@@ -17,34 +17,44 @@
 
 """Volume drivers for libvirt."""
 
+import hashlib
 import os
 import time
 
 from nova import exception
-from nova.openstack.common import cfg
-from nova.openstack.common import lockutils
+from nova import flags
 from nova.openstack.common import log as logging
 from nova import utils
-from nova.virt.libvirt import config as vconfig
+from nova.virt.libvirt import config
 from nova.virt.libvirt import utils as virtutils
 
 LOG = logging.getLogger(__name__)
+FLAGS = flags.FLAGS
+flags.DECLARE('num_iscsi_scan_tries', 'nova.volume.driver')
+XXX_mount = "/mnt/novamount"
 
-volume_opts = [
-    cfg.IntOpt('num_iscsi_scan_tries',
-               default=3,
-               help='number of times to rescan iSCSI target to find volume'),
-    cfg.StrOpt('rbd_user',
-               default=None,
-               help='the RADOS client name for accessing rbd volumes'),
-    cfg.StrOpt('rbd_secret_uuid',
-               default=None,
-               help='the libvirt uuid of the secret for the rbd_user'
-                    'volumes')
-    ]
+class LibvirtBaseVolumeDriver(object):
+    """Base class for volume drivers."""
+    def __init__(self, connection, is_block_dev):
+        self.connection = connection
+        self.is_block_dev = is_block_dev
 
-CONF = cfg.CONF
-CONF.register_opts(volume_opts)
+    def connect_volume(self, connection_info, mount_device):
+        """Connect the volume. Returns xml for libvirt."""
+        LOG.warn("Mounting for device: %s" % mount_device)
+        conf = config.LibvirtConfigGuestDisk()
+        conf.driver_name = virtutils.pick_disk_driver_name(self.is_block_dev)
+        #conf.device_type = disk_info['type']
+        conf.driver_format = "raw"
+        #conf.driver_cache = "none"
+        conf.target_dev = mount_device
+        conf.target_bus = "virtio"
+        conf.serial = connection_info.get('serial')
+        return conf
+
+    def disconnect_volume(self, connection_info, disk_dev):
+        """Disconnect the volume."""
+        pass
 
 
 class LibvirtVolumeDriver(object):
@@ -54,7 +64,7 @@ class LibvirtVolumeDriver(object):
 
     def connect_volume(self, connection_info, mount_device):
         """Connect the volume. Returns xml for libvirt."""
-        conf = vconfig.LibvirtConfigGuestDisk()
+        conf = config.LibvirtConfigGuestDisk()
         conf.source_type = "block"
         conf.driver_name = virtutils.pick_disk_driver_name(is_block_dev=True)
         conf.driver_format = "raw"
@@ -74,7 +84,7 @@ class LibvirtFakeVolumeDriver(LibvirtVolumeDriver):
     """Driver to attach Network volumes to libvirt."""
 
     def connect_volume(self, connection_info, mount_device):
-        conf = vconfig.LibvirtConfigGuestDisk()
+        conf = config.LibvirtConfigGuestDisk()
         conf.source_type = "network"
         conf.driver_name = "qemu"
         conf.driver_format = "raw"
@@ -87,11 +97,68 @@ class LibvirtFakeVolumeDriver(LibvirtVolumeDriver):
         return conf
 
 
+class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
+    """Class implements libvirt part of volume driver for XtreemFS."""
+
+    def __init__(self, connection):
+        """Create back-end to xtreemfs."""
+        super(LibvirtXtreemfsVolumeDriver,
+              self).__init__(connection, is_block_dev=False)
+
+    def connect_volume(self, connection_info, mount_device):
+        """Connect the volume. Returns xml for libvirt."""
+        conf = super(LibvirtXtreemfsVolumeDriver,
+                     self).connect_volume(connection_info, mount_device)
+        path = self._ensure_mounted(connection_info['data']['export'])
+        path = os.path.join(path, connection_info['data']['name'])
+        conf.source_type = 'file'
+        conf.source_path = path
+        return conf
+
+    def _ensure_mounted(self, xtreemfs_export):
+        """
+        @type xtreemfs_export: string
+        """
+        mount_path = os.path.join(XXX_mount,
+                                  self.get_hash_str(xtreemfs_export))
+        self._mount_xtreemfs(mount_path, xtreemfs_export, ensure=True)
+        return mount_path
+
+    def _mount_xtreemfs(self, mount_path, xtreemfs_share, ensure=False):
+        """Mount xtreemfs export to mount path."""
+        if not self._path_exists(mount_path):
+            utils.execute('mkdir', '-p', mount_path, run_as_root=True)
+
+        try:
+            utils.execute('mount.xtreemfs', '-o', 'allow_other',
+                          xtreemfs_share,
+                          mount_path,
+                          run_as_root=True)
+        except exception.ProcessExecutionError as exc:
+            if ensure and 'already mounted' in exc.message:
+                LOG.warn(_("%s is already mounted"), xtreemfs_share)
+            else:
+                raise
+
+    @staticmethod
+    def get_hash_str(base_str):
+        """returns string that represents hash of base_str (in hex format)."""
+        return hashlib.md5(base_str).hexdigest()
+
+    @staticmethod
+    def _path_exists(path):
+        """Check path."""
+        try:
+            return utils.execute('stat', path, run_as_root=True)
+        except exception.ProcessExecutionError:
+            return False
+
+
 class LibvirtNetVolumeDriver(LibvirtVolumeDriver):
     """Driver to attach Network volumes to libvirt."""
 
     def connect_volume(self, connection_info, mount_device):
-        conf = vconfig.LibvirtConfigGuestDisk()
+        conf = config.LibvirtConfigGuestDisk()
         conf.source_type = "network"
         conf.driver_name = virtutils.pick_disk_driver_name(is_block_dev=False)
         conf.driver_format = "raw"
@@ -102,19 +169,10 @@ class LibvirtNetVolumeDriver(LibvirtVolumeDriver):
         conf.target_bus = "virtio"
         conf.serial = connection_info.get('serial')
         netdisk_properties = connection_info['data']
-        auth_enabled = netdisk_properties.get('auth_enabled')
-        if (conf.source_protocol == 'rbd' and
-            CONF.rbd_secret_uuid):
-            conf.auth_secret_uuid = CONF.rbd_secret_uuid
-            auth_enabled = True  # Force authentication locally
-            if CONF.rbd_user:
-                conf.auth_username = CONF.rbd_user
-        if auth_enabled:
-            conf.auth_username = (conf.auth_username or
-                                  netdisk_properties['auth_username'])
+        if netdisk_properties.get('auth_enabled'):
+            conf.auth_username = netdisk_properties['auth_username']
             conf.auth_secret_type = netdisk_properties['secret_type']
-            conf.auth_secret_uuid = (conf.auth_secret_uuid or
-                                     netdisk_properties['secret_uuid'])
+            conf.auth_secret_uuid = netdisk_properties['secret_uuid']
         return conf
 
 
@@ -138,7 +196,7 @@ class LibvirtISCSIVolumeDriver(LibvirtVolumeDriver):
                          '-v', property_value)
         return self._run_iscsiadm(iscsi_properties, iscsi_command, **kwargs)
 
-    @lockutils.synchronized('connect_volume', 'nova-')
+    @utils.synchronized('connect_volume')
     def connect_volume(self, connection_info, mount_device):
         """Attach the volume to instance_name"""
         iscsi_properties = connection_info['data']
@@ -184,7 +242,7 @@ class LibvirtISCSIVolumeDriver(LibvirtVolumeDriver):
         # TODO(justinsb): This retry-with-delay is a pattern, move to utils?
         tries = 0
         while not os.path.exists(host_device):
-            if tries >= CONF.num_iscsi_scan_tries:
+            if tries >= FLAGS.num_iscsi_scan_tries:
                 raise exception.NovaException(_("iSCSI device not found at %s")
                                               % (host_device))
 
@@ -208,7 +266,7 @@ class LibvirtISCSIVolumeDriver(LibvirtVolumeDriver):
         sup = super(LibvirtISCSIVolumeDriver, self)
         return sup.connect_volume(connection_info, mount_device)
 
-    @lockutils.synchronized('connect_volume', 'nova-')
+    @utils.synchronized('connect_volume')
     def disconnect_volume(self, connection_info, mount_device):
         """Detach the volume from instance_name"""
         sup = super(LibvirtISCSIVolumeDriver, self)
