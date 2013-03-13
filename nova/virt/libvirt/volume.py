@@ -17,6 +17,7 @@
 
 """Volume drivers for libvirt."""
 
+import hashlib
 import os
 import time
 
@@ -30,6 +31,30 @@ from nova.virt.libvirt import utils as virtutils
 LOG = logging.getLogger(__name__)
 FLAGS = flags.FLAGS
 flags.DECLARE('num_iscsi_scan_tries', 'nova.volume.driver')
+XXX_mount = "/mnt/novamount"
+
+class LibvirtBaseVolumeDriver(object):
+    """Base class for volume drivers."""
+    def __init__(self, connection, is_block_dev):
+        self.connection = connection
+        self.is_block_dev = is_block_dev
+
+    def connect_volume(self, connection_info, mount_device):
+        """Connect the volume. Returns xml for libvirt."""
+        LOG.warn("Mounting for device: %s" % mount_device)
+        conf = config.LibvirtConfigGuestDisk()
+        conf.driver_name = virtutils.pick_disk_driver_name(self.is_block_dev)
+        #conf.device_type = disk_info['type']
+        conf.driver_format = "raw"
+        #conf.driver_cache = "none"
+        conf.target_dev = mount_device
+        conf.target_bus = "virtio"
+        conf.serial = connection_info.get('serial')
+        return conf
+
+    def disconnect_volume(self, connection_info, disk_dev):
+        """Disconnect the volume."""
+        pass
 
 
 class LibvirtVolumeDriver(object):
@@ -70,6 +95,63 @@ class LibvirtFakeVolumeDriver(LibvirtVolumeDriver):
         conf.target_bus = "virtio"
         conf.serial = connection_info.get('serial')
         return conf
+
+
+class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
+    """Class implements libvirt part of volume driver for XtreemFS."""
+
+    def __init__(self, connection):
+        """Create back-end to xtreemfs."""
+        super(LibvirtXtreemfsVolumeDriver,
+              self).__init__(connection, is_block_dev=False)
+
+    def connect_volume(self, connection_info, mount_device):
+        """Connect the volume. Returns xml for libvirt."""
+        conf = super(LibvirtXtreemfsVolumeDriver,
+                     self).connect_volume(connection_info, mount_device)
+        path = self._ensure_mounted(connection_info['data']['export'])
+        path = os.path.join(path, connection_info['data']['name'])
+        conf.source_type = 'file'
+        conf.source_path = path
+        return conf
+
+    def _ensure_mounted(self, xtreemfs_export):
+        """
+        @type xtreemfs_export: string
+        """
+        mount_path = os.path.join(XXX_mount,
+                                  self.get_hash_str(xtreemfs_export))
+        self._mount_xtreemfs(mount_path, xtreemfs_export, ensure=True)
+        return mount_path
+
+    def _mount_xtreemfs(self, mount_path, xtreemfs_share, ensure=False):
+        """Mount xtreemfs export to mount path."""
+        if not self._path_exists(mount_path):
+            utils.execute('mkdir', '-p', mount_path, run_as_root=True)
+
+        try:
+            utils.execute('mount.xtreemfs', '-o', 'allow_other',
+                          xtreemfs_share,
+                          mount_path,
+                          run_as_root=True)
+        except exception.ProcessExecutionError as exc:
+            if ensure and 'already mounted' in exc.message:
+                LOG.warn(_("%s is already mounted"), xtreemfs_share)
+            else:
+                raise
+
+    @staticmethod
+    def get_hash_str(base_str):
+        """returns string that represents hash of base_str (in hex format)."""
+        return hashlib.md5(base_str).hexdigest()
+
+    @staticmethod
+    def _path_exists(path):
+        """Check path."""
+        try:
+            return utils.execute('stat', path, run_as_root=True)
+        except exception.ProcessExecutionError:
+            return False
 
 
 class LibvirtNetVolumeDriver(LibvirtVolumeDriver):
