@@ -143,16 +143,16 @@ libvirt_opts = [
                default='nova.virt.libvirt.vif.LibvirtBridgeDriver',
                help='The libvirt VIF driver to configure the VIFs.'),
     cfg.ListOpt('libvirt_volume_drivers',
-                default=[
-                  'iscsi=nova.virt.libvirt.volume.LibvirtISCSIVolumeDriver',
-                  'local=nova.virt.libvirt.volume.LibvirtVolumeDriver',
-                  'fake=nova.virt.libvirt.volume.LibvirtFakeVolumeDriver',
-                  'rbd=nova.virt.libvirt.volume.LibvirtNetVolumeDriver',
-                  'sheepdog=nova.virt.libvirt.volume.LibvirtNetVolumeDriver',
-                  'nfs=nova.virt.libvirt.volume_nfs.NfsVolumeDriver',
-                  'xtreemfs=nova.virt.libvirt.volume.LibvirtXtreemfsVolumeDriver'
-                  ],
-                help='Libvirt handlers for remote volumes.'),
+               default=[
+                 'iscsi=nova.virt.libvirt.volume.LibvirtISCSIVolumeDriver',
+                 'local=nova.virt.libvirt.volume.LibvirtVolumeDriver',
+                 'fake=nova.virt.libvirt.volume.LibvirtFakeVolumeDriver',
+                 'rbd=nova.virt.libvirt.volume.LibvirtNetVolumeDriver',
+                 'sheepdog=nova.virt.libvirt.volume.LibvirtNetVolumeDriver',
+                 'nfs=nova.virt.libvirt.volume_nfs.NfsVolumeDriver',
+                 'xtreemfs=nova.virt.libvirt.volume.LibvirtXtreemfsVolumeDriver'
+               ],
+               help='Libvirt handlers for remote volumes.'),
     cfg.StrOpt('libvirt_disk_prefix',
                default=None,
                help='Override the default disk prefix for the devices attached'
