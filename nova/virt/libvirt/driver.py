@@ -1011,8 +1011,14 @@ class LibvirtDriver(driver.ComputeDriver):
                                   block_device_info=None):
         """resume guest state when a host is booted"""
         xml = self._get_domain_xml(instance, network_info, block_device_info)
-        self._create_domain_and_network(xml, instance, network_info,
-                                        block_device_info)
+        try:
+            self._create_domain_and_network(xml, instance, network_info,
+                                            block_device_info)
+        except libvirt.libvirtError as e:
+            if e.get_error_message() == "Requested operation is not valid: domain is already running":
+                LOG.warning("Resuming of VM aborted: already running")
+            else:
+                raise
 
     @exception.wrap_exception()
     def rescue(self, context, instance, network_info, image_meta,
