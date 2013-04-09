@@ -1,5 +1,4 @@
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -16,7 +15,6 @@
 import webob
 
 from nova.api.openstack.compute.contrib import cloudpipe_update
-from nova.api.openstack import wsgi
 from nova import db
 from nova import test
 from nova.tests.api.openstack import fakes

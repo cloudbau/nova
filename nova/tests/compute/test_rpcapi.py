@@ -18,16 +18,16 @@
 Unit Tests for nova.compute.rpcapi
 """
 
+from oslo.config import cfg
+
 from nova.compute import rpcapi as compute_rpcapi
 from nova import context
 from nova import db
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova import test
 
 CONF = cfg.CONF
-CONF.import_opt('compute_topic', 'nova.config')
 
 
 class ComputeRpcAPITestCase(test.TestCase):
@@ -166,6 +166,17 @@ class ComputeRpcAPITestCase(test.TestCase):
         self._test_compute_api('get_vnc_console', 'call',
                 instance=self.fake_instance, console_type='type')
 
+    def test_get_spice_console(self):
+        self._test_compute_api('get_spice_console', 'call',
+                instance=self.fake_instance, console_type='type',
+                version='2.24')
+
+    def test_validate_console_port(self):
+        self._test_compute_api('validate_console_port', 'call',
+                instance=self.fake_instance, port="5900",
+                console_type="novnc",
+                version="2.26")
+
     def test_host_maintenance_mode(self):
         self._test_compute_api('host_maintenance_mode', 'call',
                 host_param='param', mode='mode', host='host')
@@ -210,7 +221,9 @@ class ComputeRpcAPITestCase(test.TestCase):
 
     def test_soft_delete_instance(self):
         self._test_compute_api('soft_delete_instance', 'cast',
-                instance=self.fake_instance)
+                instance=self.fake_instance,
+                reservations=['uuid1', 'uuid2'],
+                version='2.27')
 
     def test_restore_instance(self):
         self._test_compute_api('restore_instance', 'cast',
@@ -219,7 +232,8 @@ class ComputeRpcAPITestCase(test.TestCase):
     def test_pre_live_migration(self):
         self._test_compute_api('pre_live_migration', 'call',
                 instance=self.fake_instance, block_migration='block_migration',
-                disk='disk', host='host')
+                disk='disk', host='host', migrate_data=None,
+                version='2.21')
 
     def test_prep_resize(self):
         self._test_compute_api('prep_resize', 'cast',
@@ -236,16 +250,23 @@ class ComputeRpcAPITestCase(test.TestCase):
         self._test_compute_api('reboot_instance', 'cast',
                 instance=self.fake_instance,
                 block_device_info={},
-                network_info={},
                 reboot_type='type',
-                version='2.5')
+                version='2.23')
 
     def test_rebuild_instance(self):
         self._test_compute_api('rebuild_instance', 'cast',
                 instance=self.fake_instance, new_pass='pass',
                 injected_files='files', image_ref='ref',
-                orig_image_ref='orig_ref', bdms=[],
-                orig_sys_metadata='orig_sys_metadata', version='2.18')
+                orig_image_ref='orig_ref', bdms=[], recreate=False,
+                on_shared_storage=False, orig_sys_metadata='orig_sys_metadata',
+                version='2.22')
+
+    def test_rebuild_instance_with_shared(self):
+        self._test_compute_api('rebuild_instance', 'cast', new_pass='None',
+                injected_files='None', image_ref='None', orig_image_ref='None',
+                bdms=[], instance=self.fake_instance, host='new_host',
+                orig_sys_metadata=None, recreate=True, on_shared_storage=True,
+                version='2.22')
 
     def test_reserve_block_device_name(self):
         self._test_compute_api('reserve_block_device_name', 'call',
@@ -349,7 +370,8 @@ class ComputeRpcAPITestCase(test.TestCase):
     def test_terminate_instance(self):
         self._test_compute_api('terminate_instance', 'cast',
                 instance=self.fake_instance, bdms=[],
-                version='2.4')
+                reservations=['uuid1', 'uuid2'],
+                version='2.27')
 
     def test_unpause_instance(self):
         self._test_compute_api('unpause_instance', 'cast',

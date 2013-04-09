@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2010 OpenStack, LLC.
+# Copyright (c) 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -21,18 +21,20 @@ import os
 import signal
 
 from Cheetah import Template
+from oslo.config import cfg
 
 from nova import context
 from nova import db
 from nova import exception
-from nova.openstack.common import cfg
+from nova.openstack.common import excutils
 from nova.openstack.common import log as logging
+from nova import paths
 from nova import utils
 
 
 xvp_opts = [
     cfg.StrOpt('console_xvp_conf_template',
-               default='$pybasedir/nova/console/xvp.conf.template',
+               default=paths.basedir_def('nova/console/xvp.conf.template'),
                help='XVP conf template'),
     cfg.StrOpt('console_xvp_conf',
                default='/etc/xvp.conf',
@@ -50,8 +52,7 @@ xvp_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(xvp_opts)
-CONF.import_opt('host', 'nova.config')
-CONF.import_opt('pybasedir', 'nova.config')
+CONF.import_opt('host', 'nova.netconf')
 LOG = logging.getLogger(__name__)
 
 
@@ -114,9 +115,13 @@ class XVPConsoleProxy(object):
         self._xvp_restart()
 
     def _write_conf(self, config):
-        LOG.debug(_('Re-wrote %s') % CONF.console_xvp_conf)
-        with open(CONF.console_xvp_conf, 'w') as cfile:
-            cfile.write(config)
+        try:
+            LOG.debug(_('Re-wrote %s') % CONF.console_xvp_conf)
+            with open(CONF.console_xvp_conf, 'w') as cfile:
+                cfile.write(config)
+        except IOError:
+            with excutils.save_and_reraise_exception():
+                LOG.exception(_("Failed to write configuration file"))
 
     def _xvp_stop(self):
         LOG.debug(_('Stopping xvp'))
@@ -194,4 +199,6 @@ class XVPConsoleProxy(object):
         #xvp will blow up on passwords that are too long (mdragon)
         password = password[:maxlen]
         out, err = utils.execute('xvp', flag, process_input=password)
+        if err:
+            raise exception.ProcessExecutionError(_("Failed to run xvp."))
         return out.strip()

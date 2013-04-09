@@ -17,7 +17,6 @@
 
 import webob
 from webob import exc
-from xml.dom import minidom
 
 from nova.api.openstack import common
 from nova.api.openstack import extensions
@@ -26,11 +25,15 @@ from nova.api.openstack import xmlutil
 from nova import compute
 from nova import exception
 from nova.openstack.common import log as logging
+from nova.openstack.common import uuidutils
 from nova import utils
 from nova import volume
 
 LOG = logging.getLogger(__name__)
 authorize = extensions.extension_authorizer('compute', 'volumes')
+
+authorize_attach = extensions.extension_authorizer('compute',
+                                                   'volume_attachments')
 
 
 def _translate_volume_detail_view(context, vol):
@@ -151,7 +154,7 @@ class CreateDeserializer(CommonDeserializer):
 
     def default(self, string):
         """Deserialize an xml-formatted volume create request."""
-        dom = minidom.parseString(string)
+        dom = xmlutil.safe_minidom_parse_string(string)
         vol = self._extract_volume(dom)
         return {'body': {'volume': vol}}
 
@@ -323,11 +326,14 @@ class VolumeAttachmentController(wsgi.Controller):
 
     def __init__(self):
         self.compute_api = compute.API()
+        self.volume_api = volume.API()
         super(VolumeAttachmentController, self).__init__()
 
     @wsgi.serializers(xml=VolumeAttachmentsTemplate)
     def index(self, req, server_id):
         """Returns the list of volume attachments for a given instance."""
+        context = req.environ['nova.context']
+        authorize_attach(context, action='index')
         return self._items(req, server_id,
                            entity_maker=_translate_attachment_summary_view)
 
@@ -336,6 +342,7 @@ class VolumeAttachmentController(wsgi.Controller):
         """Return data about the given volume attachment."""
         context = req.environ['nova.context']
         authorize(context)
+        authorize_attach(context, action='show')
 
         volume_id = id
         try:
@@ -365,17 +372,26 @@ class VolumeAttachmentController(wsgi.Controller):
             instance['uuid'],
             assigned_mountpoint)}
 
+    def _validate_volume_id(self, volume_id):
+        if not uuidutils.is_uuid_like(volume_id):
+            msg = _("Bad volumeId format: volumeId is "
+                    "not in proper format (%s)") % volume_id
+            raise exc.HTTPBadRequest(explanation=msg)
+
     @wsgi.serializers(xml=VolumeAttachmentTemplate)
     def create(self, req, server_id, body):
         """Attach a volume to an instance."""
         context = req.environ['nova.context']
         authorize(context)
+        authorize_attach(context, action='create')
 
         if not self.is_valid_body(body, 'volumeAttachment'):
             raise exc.HTTPUnprocessableEntity()
 
         volume_id = body['volumeAttachment']['volumeId']
         device = body['volumeAttachment'].get('device')
+
+        self._validate_volume_id(volume_id)
 
         msg = _("Attach volume %(volume_id)s to instance %(server_id)s"
                 " at %(device)s") % locals()
@@ -387,6 +403,9 @@ class VolumeAttachmentController(wsgi.Controller):
                                                     volume_id, device)
         except exception.NotFound:
             raise exc.HTTPNotFound()
+        except exception.InstanceInvalidState as state_error:
+            common.raise_http_conflict_for_instance_invalid_state(state_error,
+                    'attach_volume')
 
         # The attach is async
         attachment = {}
@@ -414,6 +433,7 @@ class VolumeAttachmentController(wsgi.Controller):
         """Detach a volume from an instance."""
         context = req.environ['nova.context']
         authorize(context)
+        authorize_attach(context, action='delete')
 
         volume_id = id
         LOG.audit(_("Detach volume %s"), volume_id, context=context)
@@ -423,19 +443,29 @@ class VolumeAttachmentController(wsgi.Controller):
         except exception.NotFound:
             raise exc.HTTPNotFound()
 
-        bdms = self.compute_api.get_instance_bdms(context, instance)
+        volume = self.volume_api.get(context, volume_id)
 
+        bdms = self.compute_api.get_instance_bdms(context, instance)
         if not bdms:
             LOG.debug(_("Instance %s is not attached."), server_id)
             raise exc.HTTPNotFound()
 
         found = False
-        for bdm in bdms:
-            if bdm['volume_id'] == volume_id:
-                self.compute_api.detach_volume(context,
-                    volume_id=volume_id)
-                found = True
-                break
+        try:
+            for bdm in bdms:
+                if bdm['volume_id'] != volume_id:
+                    continue
+                try:
+                    self.compute_api.detach_volume(context, instance, volume)
+                    found = True
+                    break
+                except exception.VolumeUnattached:
+                    # The volume is not attached.  Treat it as NotFound
+                    # by falling through.
+                    pass
+        except exception.InstanceInvalidState as state_error:
+            common.raise_http_conflict_for_instance_invalid_state(state_error,
+                    'detach_volume')
 
         if not found:
             raise exc.HTTPNotFound()
@@ -607,7 +637,7 @@ class SnapshotController(wsgi.Controller):
 
 
 class Volumes(extensions.ExtensionDescriptor):
-    """Volumes support"""
+    """Volumes support."""
 
     name = "Volumes"
     alias = "os-volumes"

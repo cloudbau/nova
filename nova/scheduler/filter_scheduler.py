@@ -1,4 +1,4 @@
-# Copyright (c) 2011 OpenStack, LLC.
+# Copyright (c) 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,8 +19,12 @@ You can customize this scheduler by specifying your own Host Filters and
 Weighing Functions.
 """
 
+import random
+
+from oslo.config import cfg
+
+from nova.compute import instance_types
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova.openstack.common.notifier import api as notifier
 from nova.scheduler import driver
@@ -28,6 +32,21 @@ from nova.scheduler import scheduler_options
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
+
+
+filter_scheduler_opts = [
+    cfg.IntOpt('scheduler_host_subset_size',
+               default=1,
+               help='New instances will be scheduled on a host chosen '
+                    'randomly from a subset of the N best hosts. This '
+                    'property defines the subset size that a host is '
+                    'chosen from. A value of 1 chooses the '
+                    'first host returned by the weighing functions. '
+                    'This value must be at least 1. Any value less than 1 '
+                    'will be ignored, and 1 will be used instead')
+]
+
+CONF.register_opts(filter_scheduler_opts)
 
 
 class FilterScheduler(driver.Scheduler):
@@ -47,14 +66,14 @@ class FilterScheduler(driver.Scheduler):
 
         Returns a list of the instances created.
         """
-        instance_uuids = request_spec.get('instance_uuids')
-        num_instances = len(instance_uuids)
-        LOG.debug(_("Attempting to build %(num_instances)d instance(s)") %
-                locals())
-
         payload = dict(request_spec=request_spec)
         notifier.notify(context, notifier.publisher_id("scheduler"),
                         'scheduler.run_instance.start', notifier.INFO, payload)
+
+        instance_uuids = request_spec.pop('instance_uuids')
+        num_instances = len(instance_uuids)
+        LOG.debug(_("Attempting to build %(num_instances)d instance(s)") %
+                locals())
 
         weighed_hosts = self._schedule(context, request_spec,
                 filter_properties, instance_uuids)
@@ -120,10 +139,21 @@ class FilterScheduler(driver.Scheduler):
                 request_spec=request_spec, filter_properties=filter_properties,
                 node=weighed_host.obj.nodename)
 
+    def select_hosts(self, context, request_spec, filter_properties):
+        """Selects a filtered set of hosts."""
+        instance_uuids = request_spec.get('instance_uuids')
+        hosts = [host.obj.host for host in self._schedule(context,
+            request_spec, filter_properties, instance_uuids)]
+        if not hosts:
+            raise exception.NoValidHost(reason="")
+        return hosts
+
     def _provision_resource(self, context, weighed_host, request_spec,
             filter_properties, requested_networks, injected_files,
             admin_password, is_first_time, instance_uuid=None):
         """Create the requested resource in this Zone."""
+        # NOTE(vish): add our current instance back into the request spec
+        request_spec['instance_uuids'] = [instance_uuid]
         payload = dict(request_spec=request_spec,
                        weighted_host=weighed_host.to_dict(),
                        instance_id=instance_uuid)
@@ -131,8 +161,17 @@ class FilterScheduler(driver.Scheduler):
                         'scheduler.run_instance.scheduled', notifier.INFO,
                         payload)
 
+        # Update the metadata if necessary
+        scheduler_hints = filter_properties.get('scheduler_hints') or {}
+        group = scheduler_hints.get('group', None)
+        values = None
+        if group:
+            values = request_spec['instance_properties']['system_metadata']
+            values.update({'group': group})
+            values = {'system_metadata': values}
+
         updated_instance = driver.instance_update_db(context,
-                instance_uuid)
+                instance_uuid, extra_values=values)
 
         self._post_select_populate_filter_properties(filter_properties,
                 weighed_host.obj)
@@ -165,7 +204,7 @@ class FilterScheduler(driver.Scheduler):
         if not retry:
             return
         hosts = retry['hosts']
-        hosts.append((host, node))
+        hosts.append([host, node])
 
     def _add_oversubscription_policy(self, filter_properties, host_state):
         filter_properties['limits'] = host_state.limits
@@ -191,6 +230,23 @@ class FilterScheduler(driver.Scheduler):
                 "'scheduler_max_attempts', must be >= 1"))
         return max_attempts
 
+    def _log_compute_error(self, instance_uuid, retry):
+        """If the request contained an exception from a previous compute
+        build/resize operation, log it to aid debugging
+        """
+        exc = retry.pop('exc', None)  # string-ified exception from compute
+        if not exc:
+            return  # no exception info from a prevous attempt, skip
+
+        hosts = retry.get('hosts', None)
+        if not hosts:
+            return  # no previously attempted hosts, skip
+
+        last_host, last_node = hosts[-1]
+        msg = _("Error from last host: %(last_host)s (node %(last_node)s): "
+                "%(exc)s") % locals()
+        LOG.error(msg, instance_uuid=instance_uuid)
+
     def _populate_retry(self, filter_properties, instance_properties):
         """Populate filter properties with history of retries for this
         request. If maximum retries is exceeded, raise NoValidHost.
@@ -212,8 +268,10 @@ class FilterScheduler(driver.Scheduler):
             }
         filter_properties['retry'] = retry
 
+        instance_uuid = instance_properties.get('uuid')
+        self._log_compute_error(instance_uuid, retry)
+
         if retry['num_attempts'] > max_attempts:
-            instance_uuid = instance_properties.get('uuid')
             msg = _("Exceeded max scheduling attempts %(max_attempts)d for "
                     "instance %(instance_uuid)s") % locals()
             raise exception.NoValidHost(reason=msg)
@@ -226,6 +284,18 @@ class FilterScheduler(driver.Scheduler):
         elevated = context.elevated()
         instance_properties = request_spec['instance_properties']
         instance_type = request_spec.get("instance_type", None)
+
+        # Get the group
+        update_group_hosts = False
+        scheduler_hints = filter_properties.get('scheduler_hints') or {}
+        group = scheduler_hints.get('group', None)
+        if group:
+            group_hosts = self.group_hosts(elevated, group)
+            update_group_hosts = True
+            if 'group_hosts' not in filter_properties:
+                filter_properties.update({'group_hosts': []})
+            configured_hosts = filter_properties['group_hosts']
+            filter_properties['group_hosts'] = configured_hosts + group_hosts
 
         config_options = self._get_configuration_options()
 
@@ -272,10 +342,48 @@ class FilterScheduler(driver.Scheduler):
 
             weighed_hosts = self.host_manager.get_weighed_hosts(hosts,
                     filter_properties)
-            best_host = weighed_hosts[0]
-            LOG.debug(_("Choosing host %(best_host)s") % locals())
-            selected_hosts.append(best_host)
+
+            scheduler_host_subset_size = CONF.scheduler_host_subset_size
+            if scheduler_host_subset_size > len(weighed_hosts):
+                scheduler_host_subset_size = len(weighed_hosts)
+            if scheduler_host_subset_size < 1:
+                scheduler_host_subset_size = 1
+
+            chosen_host = random.choice(
+                weighed_hosts[0:scheduler_host_subset_size])
+            LOG.debug(_("Choosing host %(chosen_host)s") % locals())
+            selected_hosts.append(chosen_host)
+
             # Now consume the resources so the filter/weights
             # will change for the next instance.
-            best_host.obj.consume_from_instance(instance_properties)
+            chosen_host.obj.consume_from_instance(instance_properties)
+            if update_group_hosts is True:
+                filter_properties['group_hosts'].append(chosen_host.obj.host)
         return selected_hosts
+
+    def _assert_compute_node_has_enough_memory(self, context,
+                                              instance_ref, dest):
+        """Checks if destination host has enough memory for live migration.
+
+
+        :param context: security context
+        :param instance_ref: nova.db.sqlalchemy.models.Instance object
+        :param dest: destination host
+
+        """
+        compute = self._get_compute_info(context, dest)
+        node = compute.get('hypervisor_hostname')
+        host_state = self.host_manager.host_state_cls(dest, node)
+        host_state.update_from_compute_node(compute)
+
+        instance_type = instance_types.extract_instance_type(instance_ref)
+        filter_properties = {'instance_type': instance_type}
+
+        hosts = self.host_manager.get_filtered_hosts([host_state],
+                                                     filter_properties,
+                                                     'RamFilter')
+        if not hosts:
+            instance_uuid = instance_ref['uuid']
+            reason = _("Unable to migrate %(instance_uuid)s to %(dest)s: "
+                       "Lack of memory")
+            raise exception.MigrationError(reason=reason % locals())

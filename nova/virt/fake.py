@@ -25,18 +25,23 @@ semantics of real hypervisor connections.
 
 """
 
+from oslo.config import cfg
+
 from nova.compute import power_state
+from nova.compute import task_states
 from nova import db
 from nova import exception
 from nova.openstack.common import log as logging
 from nova.virt import driver
 from nova.virt import virtapi
 
+CONF = cfg.CONF
+CONF.import_opt('host', 'nova.netconf')
 
 LOG = logging.getLogger(__name__)
 
 
-_FAKE_NODES = ['fake-mini']
+_FAKE_NODES = [CONF.host]
 
 
 def set_nodes(nodes):
@@ -59,7 +64,7 @@ def restore_nodes():
     Usually called from tearDown().
     """
     global _FAKE_NODES
-    _FAKE_NODES = ['fake-mini']
+    _FAKE_NODES = [CONF.host]
 
 
 class FakeInstance(object):
@@ -75,16 +80,17 @@ class FakeInstance(object):
 class FakeDriver(driver.ComputeDriver):
     capabilities = {
         "has_imagecache": True,
+        "supports_recreate": True,
         }
 
-    """Fake hypervisor driver"""
+    """Fake hypervisor driver."""
 
     def __init__(self, virtapi, read_only=False):
         super(FakeDriver, self).__init__(virtapi)
         self.instances = {}
         self.host_status_base = {
           'host_name-description': 'Fake Host',
-          'host_hostname': 'fake-mini',
+          'host_hostname': CONF.host,
           'host_memory_total': 8000000000,
           'host_memory_overhead': 10000000,
           'host_memory_free': 7900000000,
@@ -96,10 +102,11 @@ class FakeDriver(driver.ComputeDriver):
           'disk_total': 600000000000,
           'disk_used': 100000000000,
           'host_uuid': 'cedb9b39-9388-41df-8891-c5c9a0c0fe5f',
-          'host_name_label': 'fake-mini',
-          'hypervisor_hostname': 'fake-mini',
+          'host_name_label': 'fake-host',
+          'hypervisor_hostname': CONF.host,
           }
         self._mounts = {}
+        self._interfaces = {}
 
     def init_host(self, host):
         return
@@ -122,12 +129,13 @@ class FakeDriver(driver.ComputeDriver):
         fake_instance = FakeInstance(name, state)
         self.instances[name] = fake_instance
 
-    def snapshot(self, context, instance, name):
-        if not instance['name'] in self.instances:
-            raise exception.InstanceNotRunning()
+    def snapshot(self, context, instance, name, update_task_state):
+        if instance['name'] not in self.instances:
+            raise exception.InstanceNotRunning(instance_id=instance['uuid'])
+        update_task_state(task_state=task_states.IMAGE_UPLOADING)
 
-    def reboot(self, instance, network_info, reboot_type,
-               block_device_info=None):
+    def reboot(self, context, instance, network_info, reboot_type,
+               block_device_info=None, bad_volumes_callback=None):
         pass
 
     @staticmethod
@@ -163,6 +171,12 @@ class FakeDriver(driver.ComputeDriver):
                                 block_device_info=None):
         pass
 
+    def post_live_migration_at_destination(self, context, instance,
+                                           network_info,
+                                           block_migration=False,
+                                           block_device_info=None):
+        pass
+
     def power_off(self, instance):
         pass
 
@@ -187,7 +201,8 @@ class FakeDriver(driver.ComputeDriver):
     def resume(self, instance, network_info, block_device_info=None):
         pass
 
-    def destroy(self, instance, network_info, block_device_info=None):
+    def destroy(self, instance, network_info, block_device_info=None,
+                destroy_disks=True):
         key = instance['name']
         if key in self.instances:
             del self.instances[key]
@@ -196,20 +211,34 @@ class FakeDriver(driver.ComputeDriver):
                         {'key': key,
                          'inst': self.instances}, instance=instance)
 
-    def attach_volume(self, connection_info, instance_name, mountpoint):
-        """Attach the disk to the instance at mountpoint using info"""
-        if not instance_name in self._mounts:
+    def attach_volume(self, connection_info, instance, mountpoint):
+        """Attach the disk to the instance at mountpoint using info."""
+        instance_name = instance['name']
+        if instance_name not in self._mounts:
             self._mounts[instance_name] = {}
         self._mounts[instance_name][mountpoint] = connection_info
         return True
 
-    def detach_volume(self, connection_info, instance_name, mountpoint):
-        """Detach the disk attached to the instance"""
+    def detach_volume(self, connection_info, instance, mountpoint):
+        """Detach the disk attached to the instance."""
         try:
-            del self._mounts[instance_name][mountpoint]
+            del self._mounts[instance['name']][mountpoint]
         except KeyError:
             pass
         return True
+
+    def attach_interface(self, instance, image_meta, network_info):
+        for (network, mapping) in network_info:
+            if mapping['vif_uuid'] in self._interfaces:
+                raise exception.InterfaceAttachFailed('duplicate')
+            self._interfaces[mapping['vif_uuid']] = mapping
+
+    def detach_interface(self, instance, network_info):
+        for (network, mapping) in network_info:
+            try:
+                del self._interfaces[mapping['vif_uuid']]
+            except KeyError:
+                raise exception.InterfaceDetachFailed('not attached')
 
     def get_info(self, instance):
         if instance['name'] not in self.instances:
@@ -266,6 +295,12 @@ class FakeDriver(driver.ComputeDriver):
                 'host': 'fakevncconsole.com',
                 'port': 6969}
 
+    def get_spice_console(self, instance):
+        return {'internal_access_path': 'FAKE',
+                'host': 'fakespiceconsole.com',
+                'port': 6969,
+                'tlsPort': 6970}
+
     def get_console_pool_info(self, console_type):
         return {'address': '127.0.0.1',
                 'username': 'fakeuser',
@@ -290,7 +325,7 @@ class FakeDriver(driver.ComputeDriver):
            disk and ram.
         """
         if nodename not in _FAKE_NODES:
-            raise exception.NovaException("node %s is not found" % nodename)
+            return {}
 
         dic = {'vcpus': 1,
                'memory_mb': 8192,
@@ -324,7 +359,7 @@ class FakeDriver(driver.ComputeDriver):
                                            src_compute_info, dst_compute_info,
                                            block_migration=False,
                                            disk_over_commit=False):
-        return
+        return {}
 
     def check_can_live_migrate_source(self, ctxt, instance_ref,
                                       dest_check_data):
@@ -339,7 +374,7 @@ class FakeDriver(driver.ComputeDriver):
         return
 
     def pre_live_migration(self, context, instance_ref, block_device_info,
-                           network_info):
+                           network_info, migrate_data=None):
         return
 
     def unfilter_instance(self, instance_ref, network_info):
@@ -347,7 +382,7 @@ class FakeDriver(driver.ComputeDriver):
         raise NotImplementedError('This method is supported only by libvirt.')
 
     def test_remove_vm(self, instance_name):
-        """ Removes the named VM, as if it crashed. For testing"""
+        """Removes the named VM, as if it crashed. For testing."""
         self.instances.pop(instance_name)
 
     def get_host_stats(self, refresh=False):
@@ -384,7 +419,6 @@ class FakeDriver(driver.ComputeDriver):
         return 'disabled'
 
     def get_disk_available_least(self):
-        """ """
         pass
 
     def get_volume_connector(self, instance):
@@ -392,6 +426,15 @@ class FakeDriver(driver.ComputeDriver):
 
     def get_available_nodes(self):
         return _FAKE_NODES
+
+    def instance_on_disk(self, instance):
+        return False
+
+    def list_instance_uuids(self):
+        return []
+
+    def legacy_nwinfo(self):
+        return True
 
 
 class FakeVirtAPI(virtapi.VirtAPI):
@@ -431,3 +474,6 @@ class FakeVirtAPI(virtapi.VirtAPI):
     def agent_build_get_by_triple(self, context, hypervisor, os, architecture):
         return db.agent_build_get_by_triple(context,
                                             hypervisor, os, architecture)
+
+    def instance_type_get(self, context, instance_type_id):
+        return db.instance_type_get(context, instance_type_id)

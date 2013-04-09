@@ -1,4 +1,4 @@
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -26,7 +26,7 @@ COMPUTE_RESOURCE_SEMAPHORE = "compute_resources"
 
 
 class NopClaim(object):
-    """For use with compute drivers that do not support resource tracking"""
+    """For use with compute drivers that do not support resource tracking."""
 
     def __init__(self, migration=None):
         self.migration = migration

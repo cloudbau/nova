@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2010 OpenStack, LLC.
+# Copyright (c) 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,15 +17,16 @@
 
 """Handles ConsoleProxy API requests."""
 
+from oslo.config import cfg
+
 from nova.compute import rpcapi as compute_rpcapi
 from nova.console import rpcapi as console_rpcapi
 from nova.db import base
-from nova.openstack.common import cfg
 from nova.openstack.common import rpc
 from nova.openstack.common import uuidutils
 
 CONF = cfg.CONF
-CONF.import_opt('console_topic', 'nova.config')
+CONF.import_opt('console_topic', 'nova.console.rpcapi')
 
 
 class API(base.Base):
@@ -68,3 +69,8 @@ class API(base.Base):
         else:
             instance = self.db.instance_get(context, instance_uuid)
         return instance
+
+    def get_backdoor_port(self, context, host):
+        topic = self._get_console_topic(context, host)
+        rpcapi = console_rpcapi.ConsoleAPI(topic=topic)
+        return rpcapi.get_backdoor_port(context, host)

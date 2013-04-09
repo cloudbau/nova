@@ -40,7 +40,7 @@ def db_key_pair_get_all_by_user(self, user_id):
 
 
 def db_key_pair_create(self, keypair):
-    pass
+    return keypair
 
 
 def db_key_pair_destroy(context, user_id, name):
@@ -48,8 +48,8 @@ def db_key_pair_destroy(context, user_id, name):
         raise Exception()
 
 
-def db_key_pair_get(context, user_id, name):
-    pass
+def db_key_pair_create_duplicate(context, keypair):
+    raise exception.KeyPairExists(key_name=keypair.get('name', ''))
 
 
 class KeypairsTest(test.TestCase):
@@ -205,7 +205,7 @@ class KeypairsTest(test.TestCase):
         self.assertEqual(res.status_int, 413)
 
     def test_keypair_create_duplicate(self):
-        self.stubs.Set(db, "key_pair_get", db_key_pair_get)
+        self.stubs.Set(db, "key_pair_create", db_key_pair_create_duplicate)
         body = {'keypair': {'name': 'create_duplicate'}}
         req = webob.Request.blank('/v2/fake/os-keypairs')
         req.method = 'POST'
@@ -235,6 +235,11 @@ class KeypairsTest(test.TestCase):
         req.headers['Content-Type'] = 'application/json'
         res = req.get_response(self.app)
         self.assertEqual(res.status_int, 202)
+
+    def test_keypair_get_keypair_not_found(self):
+        req = webob.Request.blank('/v2/fake/os-keypairs/DOESNOTEXIST')
+        res = req.get_response(self.app)
+        self.assertEqual(res.status_int, 404)
 
     def test_keypair_delete_not_found(self):
 

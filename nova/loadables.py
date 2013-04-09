@@ -1,4 +1,4 @@
-# Copyright (c) 2011-2012 OpenStack, LLC.
+# Copyright (c) 2011-2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -49,7 +49,7 @@ from nova.openstack.common import importutils
 class BaseLoader(object):
     def __init__(self, loadable_cls_type):
         mod = sys.modules[self.__class__.__module__]
-        self.path = mod.__path__[0]
+        self.path = os.path.abspath(mod.__path__[0])
         self.package = mod.__package__
         self.loadable_cls_type = loadable_cls_type
 

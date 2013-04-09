@@ -20,6 +20,8 @@
 WSGI middleware for OpenStack Compute API.
 """
 
+from oslo.config import cfg
+
 import nova.api.openstack
 from nova.api.openstack.compute import consoles
 from nova.api.openstack.compute import extensions
@@ -31,9 +33,7 @@ from nova.api.openstack.compute import limits
 from nova.api.openstack.compute import server_metadata
 from nova.api.openstack.compute import servers
 from nova.api.openstack.compute import versions
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
-
 
 LOG = logging.getLogger(__name__)
 
@@ -57,7 +57,8 @@ class APIRouter(nova.api.openstack.APIRouter):
             self.resources['versions'] = versions.create_resource()
             mapper.connect("versions", "/",
                         controller=self.resources['versions'],
-                        action='show')
+                        action='show',
+                        conditions={"method": ['GET']})
 
         mapper.redirect("", "/")
 

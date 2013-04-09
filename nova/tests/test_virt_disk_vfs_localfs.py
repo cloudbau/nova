@@ -14,8 +14,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import sys
-
 from nova import exception
 from nova import test
 from nova.tests import utils as tests_utils
@@ -48,7 +46,7 @@ def fake_execute(*args, **kwargs):
     elif args[0] == "chown":
         owner = args[1]
         path = args[2]
-        if not path in files:
+        if path not in files:
             raise Exception("No such file: " + path)
 
         sep = owner.find(':')
@@ -74,7 +72,7 @@ def fake_execute(*args, **kwargs):
     elif args[0] == "chgrp":
         group = args[1]
         path = args[2]
-        if not path in files:
+        if path not in files:
             raise Exception("No such file: " + path)
 
         if group == "users":
@@ -85,13 +83,13 @@ def fake_execute(*args, **kwargs):
     elif args[0] == "chmod":
         mode = args[1]
         path = args[2]
-        if not path in files:
+        if path not in files:
             raise Exception("No such file: " + path)
 
         files[path]["mode"] = int(mode, 8)
     elif args[0] == "cat":
         path = args[1]
-        if not path in files:
+        if path not in files:
             files[path] = {
                 "content": "Hello World",
                 "gid": 100,
@@ -106,8 +104,7 @@ def fake_execute(*args, **kwargs):
         else:
             path = args[1]
             append = False
-        print str(files)
-        if not path in files:
+        if path not in files:
             files[path] = {
                 "content": "Hello World",
                 "gid": 100,
@@ -151,10 +148,6 @@ class VirtDiskVFSLocalFSTestPaths(test.TestCase):
 
 
 class VirtDiskVFSLocalFSTest(test.TestCase):
-
-    def setUp(self):
-        super(VirtDiskVFSLocalFSTest, self).setUp()
-
     def test_makepath(self):
         global dirs, commands
         dirs = []

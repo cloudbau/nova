@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,7 +15,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-""" Keypair management extension"""
+"""Keypair management extension."""
 
 import webob
 import webob.exc
@@ -49,7 +49,7 @@ class KeypairsTemplate(xmlutil.TemplateBuilder):
 
 class KeypairController(object):
 
-    """ Keypair API controller for the OpenStack API """
+    """Keypair API controller for the OpenStack API."""
     def __init__(self):
         self.api = compute_api.KeypairAPI()
 
@@ -119,7 +119,10 @@ class KeypairController(object):
         context = req.environ['nova.context']
         authorize(context)
 
-        keypair = self.api.get_key_pair(context, context.user_id, id)
+        try:
+            keypair = self.api.get_key_pair(context, context.user_id, id)
+        except exception.KeypairNotFound:
+            raise webob.exc.HTTPNotFound()
         return {'keypair': keypair}
 
     @wsgi.serializers(xml=KeypairsTemplate)
@@ -187,7 +190,7 @@ class Controller(servers.Controller):
 
 
 class Keypairs(extensions.ExtensionDescriptor):
-    """Keypair Support"""
+    """Keypair Support."""
 
     name = "Keypairs"
     alias = "os-keypairs"

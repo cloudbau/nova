@@ -1,7 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -110,7 +109,7 @@ class AgentController(object):
                                  'url': url,
                                  'md5hash': md5hash})
         except exception.AgentBuildNotFound as ex:
-            raise webob.exc.HTTPNotFound(explanation=str(ex))
+            raise webob.exc.HTTPNotFound(explanation=ex.format_message())
 
         return {"agent": {'agent_id': id, 'version': version,
                 'url': url, 'md5hash': md5hash}}
@@ -123,7 +122,7 @@ class AgentController(object):
         try:
             db.agent_build_destroy(context, id)
         except exception.AgentBuildNotFound as ex:
-            raise webob.exc.HTTPNotFound(explanation=str(ex))
+            raise webob.exc.HTTPNotFound(explanation=ex.format_message())
 
     def create(self, req, body):
         """Creates a new agent build."""
@@ -156,7 +155,7 @@ class AgentController(object):
 
 
 class Agents(extensions.ExtensionDescriptor):
-    """Agents support"""
+    """Agents support."""
 
     name = "Agents"
     alias = "os-agents"

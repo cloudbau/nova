@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2011 Citrix Systems, Inc.
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -81,18 +81,6 @@ def stub_out_db_instance_api(stubs):
             }
         return FakeModel(base_options)
 
-    def fake_network_get_by_instance(context, instance_id):
-        """Stubs out the db.network_get_by_instance method."""
-
-        fields = {
-            'bridge': 'vmnet0',
-            'netmask': '255.255.255.0',
-            'gateway': '10.10.10.1',
-            'broadcast': '10.10.10.255',
-            'dns1': 'fake',
-            'vlan': 100}
-        return FakeModel(fields)
-
     def fake_instance_type_get_all(context, inactive=0, filters=None):
         return INSTANCE_TYPES.values()
 
@@ -100,6 +88,5 @@ def stub_out_db_instance_api(stubs):
         return INSTANCE_TYPES[name]
 
     stubs.Set(db, 'instance_create', fake_instance_create)
-    stubs.Set(db, 'network_get_by_instance', fake_network_get_by_instance)
     stubs.Set(db, 'instance_type_get_all', fake_instance_type_get_all)
     stubs.Set(db, 'instance_type_get_by_name', fake_instance_type_get_by_name)

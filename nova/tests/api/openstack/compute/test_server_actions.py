@@ -1,4 +1,4 @@
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,6 +17,7 @@ import base64
 import uuid
 
 import mox
+from oslo.config import cfg
 import webob
 
 from nova.api.openstack.compute import servers
@@ -26,13 +27,12 @@ from nova.compute import vm_states
 from nova import db
 from nova import exception
 from nova.image import glance
-from nova.openstack.common import cfg
 from nova.openstack.common import importutils
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.tests.image import fake
 from nova.tests import matchers
-
+from nova.tests import utils
 
 CONF = cfg.CONF
 CONF.import_opt('password_length', 'nova.utils')
@@ -40,7 +40,7 @@ FAKE_UUID = fakes.FAKE_UUID
 INSTANCE_IDS = {FAKE_UUID: 1}
 
 
-def return_server_not_found(context, uuid):
+def return_server_not_found(*arg, **kwarg):
     raise exception.NotFound()
 
 
@@ -184,12 +184,26 @@ class ServerActionsControllerTest(test.TestCase):
         body = dict(reboot=dict(type="HARD"))
 
         def fake_reboot(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
 
         self.stubs.Set(compute_api.API, 'reboot', fake_reboot)
 
         req = fakes.HTTPRequest.blank(self.url)
         self.assertRaises(webob.exc.HTTPConflict,
+                          self.controller._action_reboot,
+                          req, FAKE_UUID, body)
+
+    def test_reboot_raises_unprocessable_entity(self):
+        body = dict(reboot=dict(type="HARD"))
+
+        def fake_reboot(*args, **kwargs):
+            raise NotImplementedError()
+
+        self.stubs.Set(compute_api.API, 'reboot', fake_reboot)
+        req = fakes.HTTPRequest.blank(self.url)
+        self.assertRaises(webob.exc.HTTPUnprocessableEntity,
                           self.controller._action_reboot,
                           req, FAKE_UUID, body)
 
@@ -294,7 +308,9 @@ class ServerActionsControllerTest(test.TestCase):
         }
 
         def fake_rebuild(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
 
         self.stubs.Set(compute_api.API, 'rebuild', fake_rebuild)
 
@@ -334,6 +350,21 @@ class ServerActionsControllerTest(test.TestCase):
         self.assertRaises(webob.exc.HTTPBadRequest,
                           self.controller._action_rebuild,
                           req, FAKE_UUID, body)
+
+    def test_rebuild_with_too_large_metadata(self):
+        body = {
+            "rebuild": {
+                "imageRef": self._image_href,
+                "metadata": {
+                   256 * "k": "value"
+                }
+            }
+        }
+
+        req = fakes.HTTPRequest.blank(self.url)
+        self.assertRaises(webob.exc.HTTPRequestEntityTooLarge,
+                          self.controller._action_rebuild, req,
+                          FAKE_UUID, body)
 
     def test_rebuild_bad_entity(self):
         body = {
@@ -573,11 +604,36 @@ class ServerActionsControllerTest(test.TestCase):
                           self.controller._action_resize,
                           req, FAKE_UUID, body)
 
+    def test_resize_with_server_not_found(self):
+        body = dict(resize=dict(flavorRef="http://localhost/3"))
+
+        self.stubs.Set(compute_api.API, 'get', return_server_not_found)
+
+        req = fakes.HTTPRequest.blank(self.url)
+        self.assertRaises(webob.exc.HTTPNotFound,
+                          self.controller._action_resize,
+                          req, FAKE_UUID, body)
+
+    def test_resize_with_too_many_instances(self):
+        body = dict(resize=dict(flavorRef="http://localhost/3"))
+
+        def fake_resize(*args, **kwargs):
+            raise exception.TooManyInstances(message="TooManyInstance")
+
+        self.stubs.Set(compute_api.API, 'resize', fake_resize)
+
+        req = fakes.HTTPRequest.blank(self.url)
+        self.assertRaises(exception.TooManyInstances,
+                          self.controller._action_resize,
+                          req, FAKE_UUID, body)
+
     def test_resize_raises_conflict_on_invalid_state(self):
         body = dict(resize=dict(flavorRef="http://localhost/3"))
 
         def fake_resize(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
 
         self.stubs.Set(compute_api.API, 'resize', fake_resize)
 
@@ -621,7 +677,9 @@ class ServerActionsControllerTest(test.TestCase):
         body = dict(confirmResize=None)
 
         def fake_confirm_resize(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
 
         self.stubs.Set(compute_api.API, 'confirm_resize',
                 fake_confirm_resize)
@@ -647,6 +705,14 @@ class ServerActionsControllerTest(test.TestCase):
                           self.controller._action_revert_resize,
                           req, FAKE_UUID, body)
 
+    def test_revert_resize_server_not_found(self):
+        body = dict(revertResize=None)
+
+        req = fakes.HTTPRequest.blank(self.url)
+        self.assertRaises(webob. exc.HTTPNotFound,
+                          self.controller._action_revert_resize,
+                          req, "bad_server_id", body)
+
     def test_revert_resize_server(self):
         body = dict(revertResize=None)
 
@@ -666,7 +732,9 @@ class ServerActionsControllerTest(test.TestCase):
         body = dict(revertResize=None)
 
         def fake_revert_resize(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
 
         self.stubs.Set(compute_api.API, 'revert_resize',
                 fake_revert_resize)
@@ -717,32 +785,13 @@ class ServerActionsControllerTest(test.TestCase):
         image_service.create(None, original_image)
 
         def fake_block_device_mapping_get_all_by_instance(context, inst_id):
-            class BDM(object):
-                def __init__(self):
-                    self.no_device = None
-                    self.values = dict(volume_id=_fake_id('a'),
-                                       virtual_name=None,
-                                       volume_size=1,
-                                       device_name='vda',
-                                       snapshot_id=1,
-                                       delete_on_termination=False)
-
-                def __getattr__(self, name):
-                    """Properly delegate dotted lookups"""
-                    if name in self.__dict__['values']:
-                        return self.values.get(name)
-                    try:
-                        return self.__dict__[name]
-                    except KeyError:
-                        raise AttributeError
-
-                def __getitem__(self, key):
-                    return self.values.get(key)
-
-                def iteritems(self):
-                    return self.values.iteritems()
-
-            return [BDM()]
+            return [dict(volume_id=_fake_id('a'),
+                         virtual_name=None,
+                         volume_size=1,
+                         device_name='vda',
+                         snapshot_id=1,
+                         delete_on_termination=False,
+                         no_device=None)]
 
         self.stubs.Set(db, 'block_device_mapping_get_all_by_instance',
                        fake_block_device_mapping_get_all_by_instance)
@@ -869,7 +918,9 @@ class ServerActionsControllerTest(test.TestCase):
 
     def test_create_image_raises_conflict_on_invalid_state(self):
         def snapshot(*args, **kwargs):
-            raise exception.InstanceInvalidState
+            raise exception.InstanceInvalidState(attr='fake_attr',
+                state='fake_state', method='fake_method',
+                instance_uuid='fake')
         self.stubs.Set(compute_api.API, 'snapshot', snapshot)
 
         body = {
@@ -1096,3 +1147,10 @@ class TestServerActionXMLDeserializer(test.TestCase):
                           self.deserializer.deserialize,
                           serial_request,
                           'action')
+
+    def test_corrupt_xml(self):
+        """Should throw a 400 error on corrupt xml."""
+        self.assertRaises(
+                exception.MalformedRequestBody,
+                self.deserializer.deserialize,
+                utils.killer_xml_body())

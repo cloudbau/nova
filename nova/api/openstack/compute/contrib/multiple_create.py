@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 OpenStack LLC.
+# Copyright 2012 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -18,7 +18,7 @@ from nova.api.openstack import extensions
 
 
 class Multiple_create(extensions.ExtensionDescriptor):
-    """Allow multiple create in the Create Server v1.1 API"""
+    """Allow multiple create in the Create Server v1.1 API."""
 
     name = "MultipleCreate"
     alias = "os-multiple-create"

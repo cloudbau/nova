@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 OpenStack, LLC
+# Copyright 2012 OpenStack Foundation
 # Copyright 2011 Canonical Ltd.
 # All Rights Reserved.
 #
@@ -63,7 +63,7 @@ class FlavorextradataController(wsgi.Controller):
 
 
 class Flavorextradata(extensions.ExtensionDescriptor):
-    """Provide additional data for flavors"""
+    """Provide additional data for flavors."""
 
     name = "FlavorExtraData"
     alias = "OS-FLV-EXT-DATA"

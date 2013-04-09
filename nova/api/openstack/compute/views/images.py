@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2010-2011 OpenStack LLC.
+# Copyright 2010-2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -18,7 +18,7 @@
 import os.path
 
 from nova.api.openstack import common
-from nova import utils
+from nova.image import glance
 
 
 class ViewBuilder(common.ViewBuilder):
@@ -117,7 +117,7 @@ class ViewBuilder(common.ViewBuilder):
 
     def _get_alternate_link(self, request, identifier):
         """Create an alternate link for a specific image id."""
-        glance_url = utils.generate_glance_url()
+        glance_url = glance.generate_glance_url()
         glance_url = self._update_glance_link_prefix(glance_url)
         return os.path.join(glance_url,
                             request.environ["nova.context"].project_id,

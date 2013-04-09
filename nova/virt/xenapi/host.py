@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2012 Citrix Systems, Inc.
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -19,14 +19,12 @@
 Management class for host-related functions (start, reboot, etc).
 """
 
-import logging
-
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import exception
-from nova import notifications
 from nova.openstack.common import jsonutils
+from nova.openstack.common import log as logging
 from nova.virt.xenapi import pool_states
 from nova.virt.xenapi import vm_utils
 

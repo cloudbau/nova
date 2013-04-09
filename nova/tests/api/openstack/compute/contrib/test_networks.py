@@ -1,5 +1,5 @@
 # Copyright 2011 Grid Dynamics
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,19 +15,16 @@
 #    under the License.
 
 import copy
-import itertools
 import math
 import netaddr
 import uuid
 
+from oslo.config import cfg
 import webob
 
-from nova.api.openstack.compute.contrib import networks
 from nova.api.openstack.compute.contrib import networks_associate
-from nova import config
-from nova import db
+from nova.api.openstack.compute.contrib import os_networks as networks
 from nova import exception
-from nova.openstack.common import cfg
 from nova import test
 from nova.tests.api.openstack import fakes
 
@@ -97,23 +94,27 @@ NEW_NETWORK = {
 class FakeNetworkAPI(object):
 
     _sentinel = object()
+    _vlan_is_disabled = False
 
     def __init__(self):
         self.networks = copy.deepcopy(FAKE_NETWORKS)
+
+    def disable_vlan(self):
+        self._vlan_is_disabled = True
 
     def delete(self, context, network_id):
         for i, network in enumerate(self.networks):
             if network['id'] == network_id:
                 del self.networks[0]
                 return True
-        raise exception.NetworkNotFoundForUUID()
+        raise exception.NetworkNotFoundForUUID(uuid=network_id)
 
     def disassociate(self, context, network_uuid):
         for network in self.networks:
             if network.get('uuid') == network_uuid:
                 network['project_id'] = None
                 return True
-        raise exception.NetworkNotFound()
+        raise exception.NetworkNotFound(network_id=network_uuid)
 
     def associate(self, context, network_uuid, host=_sentinel,
                   project=_sentinel):
@@ -124,10 +125,12 @@ class FakeNetworkAPI(object):
                 if project is not FakeNetworkAPI._sentinel:
                     network['project_id'] = project
                 return True
-        raise exception.NetworkNotFound()
+        raise exception.NetworkNotFound(network_id=network_uuid)
 
     def add_network_to_project(self, context,
                                project_id, network_uuid=None):
+        if self._vlan_is_disabled:
+            raise NotImplementedError()
         if network_uuid:
             for network in self.networks:
                 if network.get('project_id', None) is None:
@@ -146,7 +149,7 @@ class FakeNetworkAPI(object):
         for network in self.networks:
             if network.get('uuid') == network_id:
                 return network
-        raise exception.NetworkNotFound()
+        raise exception.NetworkNotFound(network_id=network_id)
 
     def create(self, context, **kwargs):
         subnet_bits = int(math.ceil(math.log(kwargs.get(
@@ -180,7 +183,8 @@ class NetworksTest(test.TestCase):
     def setUp(self):
         super(NetworksTest, self).setUp()
         self.fake_network_api = FakeNetworkAPI()
-        self.controller = networks.NetworkController(self.fake_network_api)
+        self.controller = networks.NetworkController(
+                                                self.fake_network_api)
         self.associate_controller = networks_associate\
             .NetworkAssociateActionController(self.fake_network_api)
         fakes.stub_out_networking(self.stubs)
@@ -275,6 +279,13 @@ class NetworksTest(test.TestCase):
         req = fakes.HTTPRequest.blank('/v2/1234/os-networks/100')
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.delete, req, 100)
+
+    def test_network_add_vlan_disabled(self):
+        self.fake_network_api.disable_vlan()
+        uuid = FAKE_NETWORKS[1]['uuid']
+        req = fakes.HTTPRequest.blank('/v2/1234/os-networks/add')
+        self.assertRaises(webob.exc.HTTPNotImplemented,
+                          self.controller.add, req, {'id': uuid})
 
     def test_network_add(self):
         uuid = FAKE_NETWORKS[1]['uuid']

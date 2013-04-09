@@ -8,7 +8,7 @@ Server for the Nova Cert
 
 :Author: openstack@lists.launchpad.net
 :Date:   2012-09-27
-:Copyright: OpenStack LLC
+:Copyright: OpenStack Foundation
 :Version: 2012.1
 :Manual section: 1
 :Manual group: cloud computing
@@ -21,7 +21,7 @@ SYNOPSIS
 DESCRIPTION
 ===========
 
-nova-cert is a server daemon that serves the Nova Cert service for X509 certificates.
+nova-cert is a server daemon that serves the Nova Cert service for X509 certificates.  Used to generate certificates for euca-bundle-image.  Only needed for EC2 API.
 
 OPTIONS
 =======

@@ -74,8 +74,7 @@ class VFSLocalFS(vfs.VFS):
                                      self.imgdir,
                                      self.partition)
             if not mount.do_mount():
-                raise Exception(_("Failed to mount image: %s") %
-                                mount.error)
+                raise exception.NovaException(mount.error)
             self.mount = mount
         except Exception, e:
             LOG.debug(_("Failed to mount image %(ex)s)") %
@@ -86,7 +85,7 @@ class VFSLocalFS(vfs.VFS):
     def teardown(self):
         try:
             if self.mount:
-                self.mount.do_umount()
+                self.mount.do_teardown()
         except Exception, e:
             LOG.debug(_("Failed to unmount %(imgdir)s: %(ex)s") %
                       {'imgdir': self.imgdir, 'ex': str(e)})

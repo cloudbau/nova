@@ -15,11 +15,36 @@
 
 from webob import exc
 
+from nova import conductor
 from nova import context
-from nova import db
+from nova import utils
 
 
-MAX_SIZE = 256
+CHUNKS = 4
+CHUNK_LENGTH = 255
+MAX_SIZE = CHUNKS * CHUNK_LENGTH
+
+
+def extract_password(instance):
+    result = ''
+    for datum in sorted(instance.get('system_metadata', []),
+                        key=lambda x: x['key']):
+        if datum['key'].startswith('password_'):
+            result += datum['value']
+    return result or None
+
+
+def convert_password(context, password):
+    """Stores password as system_metadata items.
+
+    Password is stored with the keys 'password_0' -> 'password_3'.
+    """
+    password = password or ''
+    meta = {}
+    for i in xrange(CHUNKS):
+        meta['password_%d' % i] = password[:CHUNK_LENGTH]
+        password = password[CHUNK_LENGTH:]
+    return meta
 
 
 def handle_password(req, meta_data):
@@ -36,9 +61,12 @@ def handle_password(req, meta_data):
         if (req.content_length > MAX_SIZE or len(req.body) > MAX_SIZE):
             msg = _("Request is too large.")
             raise exc.HTTPBadRequest(explanation=msg)
-        db.instance_system_metadata_update(ctxt,
-                                           meta_data.uuid,
-                                           {'password': req.body},
-                                           False)
+
+        conductor_api = conductor.API()
+        instance = conductor_api.instance_get_by_uuid(ctxt, meta_data.uuid)
+        sys_meta = utils.metadata_to_dict(instance['system_metadata'])
+        sys_meta.update(convert_password(ctxt, req.body))
+        conductor_api.instance_update(ctxt, meta_data.uuid,
+                                      system_metadata=sys_meta)
     else:
         raise exc.HTTPBadRequest()

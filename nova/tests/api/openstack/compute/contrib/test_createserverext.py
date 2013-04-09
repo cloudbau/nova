@@ -1,6 +1,6 @@
 # vim: tabstop=5 shiftwidth=4 softtabstop=4
 
-# Copyright 2010-2011 OpenStack LLC.
+# Copyright 2010-2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -99,7 +99,7 @@ class CreateserverextTest(test.TestCase):
             osapi_compute_extension=[
                 'nova.api.openstack.compute.contrib.select_extensions'],
             osapi_compute_ext_list=['Createserverext', 'User_data',
-                'Security_groups', 'Networks'])
+                'Security_groups', 'Os_networks'])
 
     def _make_stub_method(self, canned_return):
         def stub_method(*args, **kwargs):

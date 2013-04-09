@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2011 X.commerce, a business unit of eBay Inc.
-# Copyright 2010 OpenStack, LLC
+# Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -16,7 +16,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Stubouts, mocks and fixtures for the test suite"""
+"""Stubouts, mocks and fixtures for the test suite."""
 
 from nova import db
 from nova import exception
@@ -331,51 +331,56 @@ def stub_out_db_instance_api(stubs, injected=True):
 
     INSTANCE_TYPES = {
         'm1.tiny': dict(id=2,
+                        name='m1.tiny',
                         memory_mb=512,
                         vcpus=1,
                         vcpu_weight=None,
                         root_gb=0,
                         ephemeral_gb=10,
                         flavorid=1,
-                        rxtx_cap=1,
+                        rxtx_factor=1.0,
                         swap=0),
         'm1.small': dict(id=5,
+                         name='m1.small',
                          memory_mb=2048,
                          vcpus=1,
                          vcpu_weight=None,
                          root_gb=20,
                          ephemeral_gb=0,
                          flavorid=2,
-                         rxtx_cap=2,
+                         rxtx_factor=1.0,
                          swap=1024),
         'm1.medium':
             dict(id=1,
+                 name='m1.medium',
                  memory_mb=4096,
                  vcpus=2,
                  vcpu_weight=None,
                  root_gb=40,
                  ephemeral_gb=40,
                  flavorid=3,
-                 rxtx_cap=3,
+                 rxtx_factor=1.0,
                  swap=0),
         'm1.large': dict(id=3,
+                         name='m1.large',
                          memory_mb=8192,
                          vcpus=4,
                          vcpu_weight=None,
                          root_gb=80,
                          ephemeral_gb=80,
                          flavorid=4,
-                         rxtx_cap=4,
+                         rxtx_factor=1.0,
                          swap=0),
         'm1.xlarge':
             dict(id=4,
+                 name='m1.xlarge',
                  memory_mb=16384,
                  vcpus=8,
                  vcpu_weight=None,
                  root_gb=160,
                  ephemeral_gb=160,
                  flavorid=5,
-                 rxtx_cap=5,
+                 rxtx_factor=1.0,
                  swap=0)}
 
     flat_network_fields = {'id': 'fake_flat',
@@ -421,13 +426,6 @@ def stub_out_db_instance_api(stubs, injected=True):
                 return inst_type
         return None
 
-    def fake_network_get_by_instance(context, instance_id):
-        # Even instance numbers are on vlan networks
-        if instance_id % 2 == 0:
-            return FakeModel(vlan_network_fields)
-        else:
-            return FakeModel(flat_network_fields)
-
     def fake_network_get_all_by_instance(context, instance_id):
         # Even instance numbers are on vlan networks
         if instance_id % 2 == 0:
@@ -438,8 +436,7 @@ def stub_out_db_instance_api(stubs, injected=True):
     def fake_fixed_ip_get_by_instance(context, instance_id):
         return [FakeModel(fixed_ip_fields)]
 
-    funcs = [fake_network_get_by_instance,
-             fake_network_get_all_by_instance,
+    funcs = [fake_network_get_all_by_instance,
              fake_instance_type_get_all,
              fake_instance_type_get_by_name,
              fake_instance_type_get,

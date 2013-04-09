@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2010 OpenStack, LLC.
+# Copyright (c) 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,10 +19,11 @@
 
 import socket
 
+from oslo.config import cfg
+
 from nova.compute import rpcapi as compute_rpcapi
 from nova import exception
 from nova import manager
-from nova.openstack.common import cfg
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova import utils
@@ -36,7 +37,7 @@ console_manager_opts = [
                 default=False,
                 help='Stub calls to compute worker for tests'),
     cfg.StrOpt('console_public_hostname',
-               default=socket.getfqdn(),
+               default=socket.gethostname(),
                help='Publicly visible name for this console host'),
     ]
 
@@ -52,7 +53,7 @@ class ConsoleProxyManager(manager.Manager):
 
     """
 
-    RPC_API_VERSION = '1.0'
+    RPC_API_VERSION = '1.1'
 
     def __init__(self, console_driver=None, *args, **kwargs):
         if not console_driver:
@@ -65,7 +66,6 @@ class ConsoleProxyManager(manager.Manager):
     def init_host(self):
         self.driver.init_host()
 
-    @exception.wrap_exception()
     def add_console(self, context, instance_id, password=None,
                     port=None, **kwargs):
         instance = self.db.instance_get(context, instance_id)
@@ -93,7 +93,6 @@ class ConsoleProxyManager(manager.Manager):
 
         return console['id']
 
-    @exception.wrap_exception()
     def remove_console(self, context, console_id, **_kwargs):
         try:
             console = self.db.console_get(context, console_id)
@@ -132,3 +131,6 @@ class ConsoleProxyManager(manager.Manager):
             pool_info['compute_host'] = instance_host
             pool = self.db.console_pool_create(context, pool_info)
         return pool
+
+    def get_backdoor_port(self, context):
+        return self.backdoor_port

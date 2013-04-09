@@ -1,4 +1,4 @@
-# Copyright (c) 2011-2012 OpenStack, LLC.
+# Copyright (c) 2011-2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -13,7 +13,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.scheduler import filters
 
 isolated_opts = [

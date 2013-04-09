@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2010 OpenStack, LLC.
+# Copyright (c) 2010 OpenStack Foundation
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
 #
@@ -18,23 +18,24 @@
 
 """Tests For Console proxy."""
 
+from oslo.config import cfg
+
 from nova.console import api as console_api
 from nova.console import rpcapi as console_rpcapi
 from nova import context
 from nova import db
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import importutils
 from nova.openstack.common import rpc
 from nova import test
 
 CONF = cfg.CONF
-CONF.import_opt('console_manager', 'nova.config')
+CONF.import_opt('console_manager', 'nova.service')
 CONF.import_opt('console_driver', 'nova.console.manager')
 
 
 class ConsoleTestCase(test.TestCase):
-    """Test case for console proxy manager"""
+    """Test case for console proxy manager."""
     def setUp(self):
         super(ConsoleTestCase, self).setUp()
         self.flags(console_driver='nova.console.fake.FakeConsoleProxy',
@@ -46,7 +47,7 @@ class ConsoleTestCase(test.TestCase):
         self.host = 'test_compute_host'
 
     def _create_instance(self):
-        """Create a test instance"""
+        """Create a test instance."""
         inst = {}
         #inst['host'] = self.host
         #inst['name'] = 'instance-1234'
@@ -123,7 +124,7 @@ class ConsoleTestCase(test.TestCase):
 
 
 class ConsoleAPITestCase(test.TestCase):
-    """Test case for console API"""
+    """Test case for console API."""
     def setUp(self):
         super(ConsoleAPITestCase, self).setUp()
 
@@ -185,3 +186,13 @@ class ConsoleAPITestCase(test.TestCase):
         self.mox.ReplayAll()
 
         self.console_api.create_console(self.context, self.fake_uuid)
+
+    def test_get_backdoor_port(self):
+        self.mox.StubOutWithMock(console_rpcapi.ConsoleAPI,
+                                 'get_backdoor_port')
+
+        console_rpcapi.ConsoleAPI.get_backdoor_port(self.context, 'fake_host')
+
+        self.mox.ReplayAll()
+
+        self.console_api.get_backdoor_port(self.context, 'fake_host')

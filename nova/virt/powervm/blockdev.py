@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -18,12 +18,14 @@ import hashlib
 import os
 import re
 
-from nova import exception as nova_exception
-from nova import utils
+from oslo.config import cfg
 
-from nova.openstack.common import cfg
+from nova.compute import instance_types
+from nova.compute import task_states
+from nova.image import glance
 from nova.openstack.common import excutils
 from nova.openstack.common import log as logging
+from nova import utils
 from nova.virt import images
 from nova.virt.powervm import command
 from nova.virt.powervm import common
@@ -35,7 +37,76 @@ CONF = cfg.CONF
 
 
 class PowerVMDiskAdapter(object):
-    pass
+    """PowerVM disk adapter interface
+    Provides a contract to implement multiple ways to generate
+    and attach volumes to virtual machines using local and/or
+    external storage
+    """
+
+    def create_volume(self, size):
+        """Creates a volume with a minimum size
+
+        :param size: size of the volume in bytes
+        :returns: string -- the name of the disk device.
+      """
+        pass
+
+    def delete_volume(self, volume_info):
+        """Removes the disk and its associated vSCSI connection
+
+        :param volume_info: dictionary with volume info including name of
+        disk device in /dev/
+        """
+        pass
+
+    def create_volume_from_image(self, context, instance, image_id):
+        """Creates a Volume and copies the specified image to it
+
+        :param context: nova context used to retrieve image from glance
+        :param instance: instance to create the volume for
+        :param image_id: image_id reference used to locate image in glance
+        :returns: dictionary with the name of the created
+                  disk device in 'device_name' key
+        """
+        pass
+
+    def create_image_from_volume(self, device_name, context,
+                                 image_id, image_meta, update_task_state):
+        """Capture the contents of a volume and upload to glance
+
+        :param device_name: device in /dev/ to capture
+        :param context: nova context for operation
+        :param image_id: image reference to pre-created image in glance
+        :param image_meta: metadata for new image
+        :param update_task_state: Function reference that allows for updates
+                                  to the instance task state
+        """
+        pass
+
+    def migrate_volume(self, lv_name, src_host, dest, image_path,
+            instance_name=None):
+        """Copy a logical volume to file, compress, and transfer
+
+        :param lv_name: volume device name
+        :param src_host: source IP or DNS name.
+        :param dest: destination IP or DNS name
+        :param image_path: path to remote image storage directory
+        :param instance_name: name of instance that is being migrated
+        :returns: file path on destination of image file that was moved
+        """
+        pass
+
+    def attach_volume_to_host(self, *args, **kargs):
+        """
+        Attaches volume to host using info passed in *args and **kargs
+        """
+        pass
+
+    def detach_volume_from_host(self, *args, **kargs):
+        """
+        Detaches volume from host using info passed in *args and **kargs
+        """
+        pass
 
 
 class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
@@ -66,11 +137,13 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
         """
         return self._create_logical_volume(size)
 
-    def delete_volume(self, disk_name):
+    def delete_volume(self, volume_info):
         """Removes the Logical Volume and its associated vSCSI connection
 
-        :param disk_name: name of Logical Volume device in /dev/
+        :param volume_info: Dictionary with volume info including name of
+        Logical Volume device in /dev/ via device_name key
         """
+        disk_name = volume_info["device_name"]
         LOG.debug(_("Removing the logical volume '%s'") % disk_name)
         self._remove_logical_volume(disk_name)
 
@@ -79,7 +152,7 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
 
         :param context: nova context used to retrieve image from glance
         :param instance: instance to create the volume for
-        :image_id: image_id reference used to locate image in glance
+        :param image_id: image_id reference used to locate image in glance
         :returns: dictionary with the name of the created
                   Logical Volume device in 'device_name' key
         """
@@ -90,9 +163,9 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
 
         if not os.path.isfile(file_path):
             LOG.debug(_("Fetching image '%s' from glance") % image_id)
-            images.fetch_to_raw(context, image_id, file_path,
-                                instance['user_id'],
-                                project_id=instance['project_id'])
+            images.fetch(context, image_id, file_path,
+                        instance['user_id'],
+                        instance['project_id'])
         else:
             LOG.debug((_("Using image found at '%s'") % file_path))
 
@@ -102,8 +175,8 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
 
         # calculate root device size in bytes
         # we respect the minimum root device size in constants
-        size_gb = max(instance['instance_type']['root_gb'],
-                      constants.POWERVM_MIN_ROOT_GB)
+        instance_type = instance_types.extract_instance_type(instance)
+        size_gb = max(instance_type['root_gb'], constants.POWERVM_MIN_ROOT_GB)
         size = size_gb * 1024 * 1024 * 1024
 
         try:
@@ -126,11 +199,96 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
 
         return {'device_name': disk_name}
 
-    def create_image_from_volume(self):
-        raise NotImplementedError()
+    def create_image_from_volume(self, device_name, context,
+                                 image_id, image_meta, update_task_state):
+        """Capture the contents of a volume and upload to glance
 
-    def migrate_volume(self):
-        raise NotImplementedError()
+        :param device_name: device in /dev/ to capture
+        :param context: nova context for operation
+        :param image_id: image reference to pre-created image in glance
+        :param image_meta: metadata for new image
+        :param update_task_state: Function reference that allows for updates
+                                  to the instance task state.
+        """
+        # Updating instance task state before capturing instance as a file
+        update_task_state(task_state=task_states.IMAGE_PENDING_UPLOAD)
+
+        # do the disk copy
+        dest_file_path = common.aix_path_join(CONF.powervm_img_remote_path,
+                                                 image_id)
+        self._copy_device_to_file(device_name, dest_file_path)
+
+        # compress and copy the file back to the nova-compute host
+        snapshot_file_path = self._copy_image_file_from_host(
+                dest_file_path, CONF.powervm_img_local_path,
+                compress=True)
+
+        # get glance service
+        glance_service, image_id = glance.get_remote_image_service(
+                context, image_id)
+
+        # Updating instance task state before uploading image
+        # Snapshot will complete but instance state will not change
+        # to none in compute manager if expected state is not correct
+        update_task_state(task_state=task_states.IMAGE_UPLOADING,
+                     expected_state=task_states.IMAGE_PENDING_UPLOAD)
+
+        # upload snapshot file to glance
+        with open(snapshot_file_path, 'r') as img_file:
+            glance_service.update(context,
+                                  image_id,
+                                  image_meta,
+                                  img_file)
+            LOG.debug(_("Snapshot added to glance."))
+
+        # clean up local image file
+        try:
+            os.remove(snapshot_file_path)
+        except OSError as ose:
+            LOG.warn(_("Failed to clean up snapshot file "
+                       "%(snapshot_file_path)s") % locals())
+
+    def migrate_volume(self, lv_name, src_host, dest, image_path,
+            instance_name=None):
+        """Copy a logical volume to file, compress, and transfer
+
+        :param lv_name: logical volume device name
+        :param dest: destination IP or DNS name
+        :param image_path: path to remote image storage directory
+        :param instance_name: name of instance that is being migrated
+        :returns: file path on destination of image file that was moved
+        """
+        if instance_name:
+            file_name = ''.join([instance_name, '_rsz'])
+        else:
+            file_name = ''.join([lv_name, '_rsz'])
+        file_path = os.path.join(image_path, file_name)
+        self._copy_device_to_file(lv_name, file_path)
+        cmds = 'gzip %s' % file_path
+        self.run_vios_command_as_root(cmds)
+        file_path = file_path + '.gz'
+        # If destination is not same host
+        # transfer file to destination VIOS system
+        if (src_host != dest):
+            with common.vios_to_vios_auth(self.connection_data.host,
+                                          dest,
+                                          self.connection_data) as key_name:
+                cmd = ' '.join(['scp -o "StrictHostKeyChecking no"',
+                                ('-i %s' % key_name),
+                                file_path,
+                                '%s@%s:%s' % (self.connection_data.username,
+                                              dest,
+                                              image_path)
+                                ])
+                # do the remote copy
+                self.run_vios_command(cmd)
+
+            # cleanup local file only if transferring to remote system
+            # otherwise keep the file to boot from locally and clean up later
+            cleanup_cmd = 'rm %s' % file_path
+            self.run_vios_command_as_root(cleanup_cmd)
+
+        return file_path
 
     def attach_volume_to_host(self, *args, **kargs):
         pass
@@ -203,6 +361,25 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
             cmd = 'dd if=%s of=/dev/%s bs=1024k' % (source_path, device)
         self.run_vios_command_as_root(cmd)
 
+    def _copy_device_to_file(self, device_name, file_path):
+        """Copy a device to a file using dd
+
+        :param device_name: device name to copy from
+        :param file_path: output file path
+        """
+        cmd = 'dd if=/dev/%s of=%s bs=1024k' % (device_name, file_path)
+        self.run_vios_command_as_root(cmd)
+
+    def _md5sum_remote_file(self, remote_path):
+        # AIX6/VIOS cannot md5sum files with sizes greater than ~2GB
+        cmd = ("perl -MDigest::MD5 -e 'my $file = \"%s\"; open(FILE, $file); "
+               "binmode(FILE); "
+               "print Digest::MD5->new->addfile(*FILE)->hexdigest, "
+               "\" $file\n\";'" % remote_path)
+
+        output = self.run_vios_command_as_root(cmd)
+        return output[0]
+
     def _copy_image_file(self, source_path, remote_path, decompress=False):
         """Copy file to VIOS, decompress it, and return its new size and name.
 
@@ -222,30 +399,31 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
         source_cksum = hasher.hexdigest()
 
         comp_path = os.path.join(remote_path, os.path.basename(source_path))
-        uncomp_path = comp_path.rstrip(".gz")
+        if comp_path.endswith(".gz"):
+            uncomp_path = os.path.splitext(comp_path)[0]
+        else:
+            uncomp_path = comp_path
         if not decompress:
             final_path = comp_path
         else:
-            final_path = "%s.%s" % (uncomp_path, source_cksum)
+            final_path = uncomp_path
 
         # Check whether the image is already on IVM
         output = self.run_vios_command("ls %s" % final_path,
                                        check_exit_code=False)
 
         # If the image does not exist already
-        if not len(output):
+        if not output:
             # Copy file to IVM
             common.ftp_put_command(self.connection_data, source_path,
                                    remote_path)
 
             # Verify image file checksums match
-            cmd = ("/usr/bin/csum -h MD5 %s |"
-                   "/usr/bin/awk '{print $1}'" % comp_path)
-            output = self.run_vios_command_as_root(cmd)
-            if not len(output):
+            output = self._md5sum_remote_file(final_path)
+            if not output:
                 LOG.error(_("Unable to get checksum"))
                 raise exception.PowerVMFileTransferFailed()
-            if source_cksum != output[0]:
+            if source_cksum != output.split(' ')[0]:
                 LOG.error(_("Image checksums do not match"))
                 raise exception.PowerVMFileTransferFailed()
 
@@ -272,7 +450,7 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
         # Calculate file size in multiples of 512 bytes
         output = self.run_vios_command("ls -o %s|awk '{print $4}'" %
                                   final_path, check_exit_code=False)
-        if len(output):
+        if output:
             size = int(output[0])
         else:
             LOG.error(_("Uncompressed image file not found"))
@@ -281,6 +459,71 @@ class PowerVMLocalVolumeAdapter(PowerVMDiskAdapter):
             size = (int(size / 512) + 1) * 512
 
         return final_path, size
+
+    def _copy_image_file_from_host(self, remote_source_path, local_dest_dir,
+                                   compress=False):
+        """
+        Copy a file from IVM to the nova-compute host,
+        and return the location of the copy
+
+        :param remote_source_path remote source file path
+        :param local_dest_dir local destination directory
+        :param compress: if True, compress the file before transfer;
+                         if False (default), copy the file as is
+        """
+
+        temp_str = common.aix_path_join(local_dest_dir,
+                                        os.path.basename(remote_source_path))
+        local_file_path = temp_str + '.gz'
+
+        if compress:
+            copy_from_path = remote_source_path + '.gz'
+        else:
+            copy_from_path = remote_source_path
+
+        if compress:
+            # Gzip the file
+            cmd = "/usr/bin/gzip %s" % remote_source_path
+            self.run_vios_command_as_root(cmd)
+
+            # Cleanup uncompressed remote file
+            cmd = "/usr/bin/rm -f %s" % remote_source_path
+            self.run_vios_command_as_root(cmd)
+
+        # Get file checksum
+        output = self._md5sum_remote_file(copy_from_path)
+        if not output:
+            LOG.error(_("Unable to get checksum"))
+            msg_args = {'file_path': copy_from_path}
+            raise exception.PowerVMFileTransferFailed(**msg_args)
+        else:
+            source_chksum = output.split(' ')[0]
+
+        # Copy file to host
+        common.ftp_get_command(self.connection_data,
+                               copy_from_path,
+                               local_file_path)
+
+        # Calculate copied image checksum
+        with open(local_file_path, 'r') as image_file:
+            hasher = hashlib.md5()
+            block_size = 0x10000
+            buf = image_file.read(block_size)
+            while len(buf) > 0:
+                hasher.update(buf)
+                buf = image_file.read(block_size)
+            dest_chksum = hasher.hexdigest()
+
+        # do comparison
+        if source_chksum and dest_chksum != source_chksum:
+            LOG.error(_("Image checksums do not match"))
+            raise exception.PowerVMFileTransferFailed()
+
+        # Cleanup transferred remote file
+        cmd = "/usr/bin/rm -f %s" % copy_from_path
+        output = self.run_vios_command_as_root(cmd)
+
+        return local_file_path
 
     def run_vios_command(self, cmd, check_exit_code=True):
         """Run a remote command using an active ssh connection.

@@ -1,4 +1,4 @@
-# Copyright (c) 2012 OpenStack, LLC
+# Copyright (c) 2012 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -47,7 +47,8 @@ def _rename(src, dst):
     os.rename(src, dst)
 
 
-def make_subprocess(cmdline, stdout=False, stderr=False, stdin=False):
+def make_subprocess(cmdline, stdout=False, stderr=False, stdin=False,
+                    universal_newlines=False):
     """Make a subprocess according to the given command-line string
     """
     # NOTE(dprince): shlex python 2.4 doesn't like unicode so we
@@ -58,6 +59,7 @@ def make_subprocess(cmdline, stdout=False, stderr=False, stdin=False):
     kwargs['stdout'] = stdout and subprocess.PIPE or None
     kwargs['stderr'] = stderr and subprocess.PIPE or None
     kwargs['stdin'] = stdin and subprocess.PIPE or None
+    kwargs['universal_newlines'] = universal_newlines
     args = shlex.split(cmdline)
     logging.info("Running args '%s'" % args)
     proc = subprocess.Popen(args, **kwargs)

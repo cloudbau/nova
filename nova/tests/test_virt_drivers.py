@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
-#    Copyright 2010 OpenStack LLC
+#    Copyright 2010 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,17 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import __builtin__
 import base64
 import fixtures
-import mox
 import netaddr
-import StringIO
 import sys
 import traceback
 
-from nova.compute.manager import ComputeManager
-from nova import db
+from nova.compute import manager
 from nova import exception
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
@@ -32,6 +28,7 @@ from nova import test
 from nova.tests import fake_libvirt_utils
 from nova.tests.image import fake as fake_image
 from nova.tests import utils as test_utils
+from nova.virt import event as virtevent
 from nova.virt import fake
 
 LOG = logging.getLogger(__name__)
@@ -88,7 +85,7 @@ class _FakeDriverBackendTestCase(object):
             'nova.virt.libvirt.driver.libvirt_utils',
             fake_libvirt_utils))
         self.useFixture(fixtures.MonkeyPatch(
-            'nova.virt.libvirt.snapshots.libvirt_utils',
+            'nova.virt.libvirt.imagebackend.libvirt_utils',
             fake_libvirt_utils))
         self.useFixture(fixtures.MonkeyPatch(
             'nova.virt.libvirt.firewall.libvirt',
@@ -108,6 +105,13 @@ class _FakeDriverBackendTestCase(object):
         def fake_make_drive(_self, _path):
             pass
 
+        def fake_get_instance_disk_info(_self, instance, xml=None):
+            return '[]'
+
+        self.stubs.Set(nova.virt.libvirt.driver.LibvirtDriver,
+                       'get_instance_disk_info',
+                       fake_get_instance_disk_info)
+
         self.stubs.Set(nova.virt.libvirt.driver.disk,
                        'extend', fake_extend)
 
@@ -123,8 +127,6 @@ class _FakeDriverBackendTestCase(object):
 
     def _teardown_fakelibvirt(self):
         # Restore libvirt
-        import nova.virt.libvirt.driver
-        import nova.virt.libvirt.firewall
         if self.saved_libvirt:
             sys.modules['libvirt'] = self.saved_libvirt
 
@@ -163,7 +165,7 @@ class VirtDriverLoaderTestCase(_FakeDriverBackendTestCase, test.TestCase):
             # NOTE(sdague) the try block is to make it easier to debug a
             # failure by knowing which driver broke
             try:
-                cm = ComputeManager()
+                cm = manager.ComputeManager()
             except Exception as e:
                 self.fail("Couldn't load driver %s - %s" % (cls, e))
 
@@ -177,12 +179,14 @@ class VirtDriverLoaderTestCase(_FakeDriverBackendTestCase, test.TestCase):
             raise test.TestingException()
 
         self.stubs.Set(sys, 'exit', _fake_exit)
-        self.assertRaises(test.TestingException, ComputeManager)
+        self.assertRaises(test.TestingException, manager.ComputeManager)
 
 
 class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     def setUp(self):
         super(_VirtDriverTestCase, self).setUp()
+
+        self.flags(instances_path=self.useFixture(fixtures.TempDir()).path)
         self.connection = importutils.import_object(self.driver_module,
                                                     fake.FakeVirtAPI())
         self.ctxt = test_utils.get_test_admin_context()
@@ -219,19 +223,22 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         img_ref = self.image_service.create(self.ctxt, {'name': 'snap-1'})
         self.assertRaises(exception.InstanceNotRunning,
                           self.connection.snapshot,
-                          self.ctxt, instance_ref, img_ref['id'])
+                          self.ctxt, instance_ref, img_ref['id'],
+                          lambda *args, **kwargs: None)
 
     @catch_notimplementederror
     def test_snapshot_running(self):
         img_ref = self.image_service.create(self.ctxt, {'name': 'snap-1'})
         instance_ref, network_info = self._get_running_instance()
-        self.connection.snapshot(self.ctxt, instance_ref, img_ref['id'])
+        self.connection.snapshot(self.ctxt, instance_ref, img_ref['id'],
+                                 lambda *args, **kwargs: None)
 
     @catch_notimplementederror
     def test_reboot(self):
         reboot_type = "SOFT"
         instance_ref, network_info = self._get_running_instance()
-        self.connection.reboot(instance_ref, network_info, reboot_type)
+        self.connection.reboot(self.ctxt, instance_ref, network_info,
+                               reboot_type)
 
     @catch_notimplementederror
     def test_get_host_ip_addr(self):
@@ -381,23 +388,23 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     def test_attach_detach_volume(self):
         instance_ref, network_info = self._get_running_instance()
         self.connection.attach_volume({'driver_volume_type': 'fake'},
-                                      instance_ref['name'],
-                                      '/mnt/nova/something')
+                                      instance_ref,
+                                      '/dev/sda')
         self.connection.detach_volume({'driver_volume_type': 'fake'},
-                                      instance_ref['name'],
-                                      '/mnt/nova/something')
+                                      instance_ref,
+                                      '/dev/sda')
 
     @catch_notimplementederror
     def test_attach_detach_different_power_states(self):
         instance_ref, network_info = self._get_running_instance()
         self.connection.power_off(instance_ref)
         self.connection.attach_volume({'driver_volume_type': 'fake'},
-                                      instance_ref['name'],
-                                      '/mnt/nova/something')
+                                      instance_ref,
+                                      '/dev/sda')
         self.connection.power_on(instance_ref)
         self.connection.detach_volume({'driver_volume_type': 'fake'},
-                                      instance_ref['name'],
-                                      '/mnt/nova/something')
+                                      instance_ref,
+                                      '/dev/sda')
 
     @catch_notimplementederror
     def test_get_info(self):
@@ -446,6 +453,15 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
         self.assertIn('internal_access_path', vnc_console)
         self.assertIn('host', vnc_console)
         self.assertIn('port', vnc_console)
+
+    @catch_notimplementederror
+    def test_get_spice_console(self):
+        instance_ref, network_info = self._get_running_instance()
+        spice_console = self.connection.get_spice_console(instance_ref)
+        self.assertIn('internal_access_path', spice_console)
+        self.assertIn('host', spice_console)
+        self.assertIn('port', spice_console)
+        self.assertIn('tlsPort', spice_console)
 
     @catch_notimplementederror
     def test_get_console_pool_info(self):
@@ -530,6 +546,72 @@ class _VirtDriverTestCase(_FakeDriverBackendTestCase):
     @catch_notimplementederror
     def test_remove_from_aggregate(self):
         self.connection.remove_from_aggregate(self.ctxt, 'aggregate', 'host')
+
+    def test_events(self):
+        got_events = []
+
+        def handler(event):
+            got_events.append(event)
+
+        self.connection.register_event_listener(handler)
+
+        event1 = virtevent.LifecycleEvent(
+            "cef19ce0-0ca2-11df-855d-b19fbce37686",
+            virtevent.EVENT_LIFECYCLE_STARTED)
+        event2 = virtevent.LifecycleEvent(
+            "cef19ce0-0ca2-11df-855d-b19fbce37686",
+            virtevent.EVENT_LIFECYCLE_PAUSED)
+
+        self.connection.emit_event(event1)
+        self.connection.emit_event(event2)
+        want_events = [event1, event2]
+        self.assertEqual(want_events, got_events)
+
+        event3 = virtevent.LifecycleEvent(
+            "cef19ce0-0ca2-11df-855d-b19fbce37686",
+            virtevent.EVENT_LIFECYCLE_RESUMED)
+        event4 = virtevent.LifecycleEvent(
+            "cef19ce0-0ca2-11df-855d-b19fbce37686",
+            virtevent.EVENT_LIFECYCLE_STOPPED)
+
+        self.connection.emit_event(event3)
+        self.connection.emit_event(event4)
+
+        want_events = [event1, event2, event3, event4]
+        self.assertEqual(want_events, got_events)
+
+    def test_event_bad_object(self):
+        # Passing in something which does not inherit
+        # from virtevent.Event
+
+        def handler(event):
+            pass
+
+        self.connection.register_event_listener(handler)
+
+        badevent = {
+            "foo": "bar"
+        }
+
+        self.assertRaises(ValueError,
+                          self.connection.emit_event,
+                          badevent)
+
+    def test_event_bad_callback(self):
+        # Check that if a callback raises an exception,
+        # it does not propagate back out of the
+        # 'emit_event' call
+
+        def handler(event):
+            raise Exception("Hit Me!")
+
+        self.connection.register_event_listener(handler)
+
+        event1 = virtevent.LifecycleEvent(
+            "cef19ce0-0ca2-11df-855d-b19fbce37686",
+            virtevent.EVENT_LIFECYCLE_STARTED)
+
+        self.connection.emit_event(event1)
 
 
 class AbstractDriverTestCase(_VirtDriverTestCase, test.TestCase):

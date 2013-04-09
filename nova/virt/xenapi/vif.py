@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2011 Citrix Systems, Inc.
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # Copyright (C) 2011 Nicira, Inc
 # All Rights Reserved.
 #
@@ -19,9 +19,9 @@
 
 """VIF drivers for XenAPI."""
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import log as logging
-from nova.virt import vif
 from nova.virt.xenapi import network_utils
 from nova.virt.xenapi import vm_utils
 
@@ -35,7 +35,7 @@ CONF.register_opt(xenapi_ovs_integration_bridge_opt)
 LOG = logging.getLogger(__name__)
 
 
-class XenVIFDriver(vif.VIFDriver):
+class XenVIFDriver(object):
     def __init__(self, xenapi_session):
         self._session = xenapi_session
 
@@ -71,7 +71,7 @@ class XenAPIBridgeDriver(XenVIFDriver):
         return vif_rec
 
     def _ensure_vlan_bridge(self, network):
-        """Ensure that a VLAN bridge exists"""
+        """Ensure that a VLAN bridge exists."""
 
         vlan_num = network.get_meta('vlan')
         bridge = network['bridge']

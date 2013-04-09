@@ -1,4 +1,4 @@
-# Copyright (c) IBM 2012 Pavel Kravchenco <kpavel at il dot ibm dot com>
+# Copyright 2012 IBM Corp.
 # Copyright (c) AT&T Labs Inc. 2012 Yun Mao <yunmao@gmail.com>
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -19,4 +19,6 @@ The membership service for Nova. Different implementations can be plugged
 according to the Nova configuration.
 """
 
-from nova.servicegroup.api import API
+from nova.servicegroup import api
+
+API = api.API

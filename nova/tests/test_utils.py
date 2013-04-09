@@ -16,27 +16,25 @@
 
 import __builtin__
 import datetime
+import functools
 import hashlib
+import importlib
 import os
 import os.path
 import StringIO
 import tempfile
 
-import eventlet
-from eventlet import greenpool
 import mox
+import netaddr
+from oslo.config import cfg
 
 import nova
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import timeutils
 from nova import test
 from nova import utils
 
 CONF = cfg.CONF
-CONF.import_opt('glance_host', 'nova.config')
-CONF.import_opt('glance_port', 'nova.config')
-CONF.import_opt('glance_protocol', 'nova.config')
 
 
 class ByteConversionTest(test.TestCase):
@@ -382,17 +380,6 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertFalse(utils.bool_from_str(None))
         self.assertFalse(utils.bool_from_str('junk'))
 
-    def test_generate_glance_http_url(self):
-        generated_url = utils.generate_glance_url()
-        http_url = "http://%s:%d" % (CONF.glance_host, CONF.glance_port)
-        self.assertEqual(generated_url, http_url)
-
-    def test_generate_glance_https_url(self):
-        self.flags(glance_protocol="https")
-        generated_url = utils.generate_glance_url()
-        https_url = "https://%s:%d" % (CONF.glance_host, CONF.glance_port)
-        self.assertEqual(generated_url, https_url)
-
     def test_read_cached_file(self):
         self.mox.StubOutWithMock(os.path, "getmtime")
         os.path.getmtime(mox.IgnoreArg()).AndReturn(1)
@@ -451,11 +438,6 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertRaises(exception.FileNotFound,
                           utils.read_file_as_root, 'bad')
 
-    def test_strcmp_const_time(self):
-        self.assertTrue(utils.strcmp_const_time('abc123', 'abc123'))
-        self.assertFalse(utils.strcmp_const_time('a', 'aaaaa'))
-        self.assertFalse(utils.strcmp_const_time('ABC123', 'abc123'))
-
     def test_temporary_chown(self):
         def fake_execute(*args, **kwargs):
             if args[0] == 'chown':
@@ -481,6 +463,74 @@ class GenericUtilsTestCase(test.TestCase):
         h1 = utils.hash_file(flo)
         h2 = hashlib.sha1(data).hexdigest()
         self.assertEquals(h1, h2)
+
+    def test_is_valid_boolstr(self):
+        self.assertTrue(utils.is_valid_boolstr('true'))
+        self.assertTrue(utils.is_valid_boolstr('false'))
+        self.assertTrue(utils.is_valid_boolstr('yes'))
+        self.assertTrue(utils.is_valid_boolstr('no'))
+        self.assertTrue(utils.is_valid_boolstr('y'))
+        self.assertTrue(utils.is_valid_boolstr('n'))
+        self.assertTrue(utils.is_valid_boolstr('1'))
+        self.assertTrue(utils.is_valid_boolstr('0'))
+
+        self.assertFalse(utils.is_valid_boolstr('maybe'))
+        self.assertFalse(utils.is_valid_boolstr('only on tuesdays'))
+
+    def test_is_valid_ipv4(self):
+        self.assertTrue(utils.is_valid_ipv4('127.0.0.1'))
+        self.assertFalse(utils.is_valid_ipv4('::1'))
+        self.assertFalse(utils.is_valid_ipv4('bacon'))
+        self.assertFalse(utils.is_valid_ipv4(""))
+        self.assertFalse(utils.is_valid_ipv4(10))
+
+    def test_is_valid_ipv6(self):
+        self.assertTrue(utils.is_valid_ipv6("::1"))
+        self.assertTrue(utils.is_valid_ipv6(
+                            "abcd:ef01:2345:6789:abcd:ef01:192.168.254.254"))
+        self.assertTrue(utils.is_valid_ipv6(
+                                    "0000:0000:0000:0000:0000:0000:0000:0001"))
+        self.assertFalse(utils.is_valid_ipv6("foo"))
+        self.assertFalse(utils.is_valid_ipv6("127.0.0.1"))
+        self.assertFalse(utils.is_valid_ipv6(""))
+        self.assertFalse(utils.is_valid_ipv6(10))
+
+    def test_is_valid_ipv6_cidr(self):
+        self.assertTrue(utils.is_valid_ipv6_cidr("2600::/64"))
+        self.assertTrue(utils.is_valid_ipv6_cidr(
+                "abcd:ef01:2345:6789:abcd:ef01:192.168.254.254/48"))
+        self.assertTrue(utils.is_valid_ipv6_cidr(
+                "0000:0000:0000:0000:0000:0000:0000:0001/32"))
+        self.assertTrue(utils.is_valid_ipv6_cidr(
+                "0000:0000:0000:0000:0000:0000:0000:0001"))
+        self.assertFalse(utils.is_valid_ipv6_cidr("foo"))
+        self.assertFalse(utils.is_valid_ipv6_cidr("127.0.0.1"))
+
+    def test_get_shortened_ipv6(self):
+        self.assertEquals("abcd:ef01:2345:6789:abcd:ef01:c0a8:fefe",
+                          utils.get_shortened_ipv6(
+                            "abcd:ef01:2345:6789:abcd:ef01:192.168.254.254"))
+        self.assertEquals("::1", utils.get_shortened_ipv6(
+                                    "0000:0000:0000:0000:0000:0000:0000:0001"))
+        self.assertEquals("caca::caca:0:babe:201:102",
+                          utils.get_shortened_ipv6(
+                                    "caca:0000:0000:caca:0000:babe:0201:0102"))
+        self.assertRaises(netaddr.AddrFormatError, utils.get_shortened_ipv6,
+                          "127.0.0.1")
+        self.assertRaises(netaddr.AddrFormatError, utils.get_shortened_ipv6,
+                          "failure")
+
+    def test_get_shortened_ipv6_cidr(self):
+        self.assertEquals("2600::/64", utils.get_shortened_ipv6_cidr(
+                "2600:0000:0000:0000:0000:0000:0000:0000/64"))
+        self.assertEquals("2600::/64", utils.get_shortened_ipv6_cidr(
+                "2600::1/64"))
+        self.assertRaises(netaddr.AddrFormatError,
+                          utils.get_shortened_ipv6_cidr,
+                          "127.0.0.1")
+        self.assertRaises(netaddr.AddrFormatError,
+                          utils.get_shortened_ipv6_cidr,
+                          "failure")
 
 
 class MonkeyPatchTestCase(test.TestCase):
@@ -526,6 +576,29 @@ class MonkeyPatchTestCase(test.TestCase):
             in nova.tests.monkey_patch_example.CALLED_FUNCTION)
         self.assertFalse(package_b + 'ExampleClassB.example_method_add'
             in nova.tests.monkey_patch_example.CALLED_FUNCTION)
+
+
+class MonkeyPatchDefaultTestCase(test.TestCase):
+    """Unit test for default monkey_patch_modules value."""
+
+    def setUp(self):
+        super(MonkeyPatchDefaultTestCase, self).setUp()
+        self.flags(
+            monkey_patch=True)
+
+    def test_monkey_patch_default_mod(self):
+        # monkey_patch_modules is defined to be
+        #    <module_to_patch>:<decorator_to_patch_with>
+        #  Here we check that both parts of the default values are
+        # valid
+        for module in CONF.monkey_patch_modules:
+            m = module.split(':', 1)
+            # Check we can import the module to be patched
+            importlib.import_module(m[0])
+            # check the decorator is valid
+            decorator_name = m[1].rsplit('.', 1)
+            decorator_module = importlib.import_module(decorator_name[0])
+            getattr(decorator_module, decorator_name[1])
 
 
 class AuditPeriodTest(test.TestCase):
@@ -693,7 +766,7 @@ class AuditPeriodTest(test.TestCase):
 
 
 class DiffDict(test.TestCase):
-    """Unit tests for diff_dict()"""
+    """Unit tests for diff_dict()."""
 
     def test_no_change(self):
         old = dict(a=1, b=2, c=3)
@@ -776,3 +849,112 @@ class LastBytesTestCase(test.TestCase):
         content = '1234567890'
         flo.write(content)
         self.assertEqual((content, 0), utils.last_bytes(flo, 1000))
+
+
+class IntLikeTestCase(test.TestCase):
+
+    def test_is_int_like(self):
+        self.assertTrue(utils.is_int_like(1))
+        self.assertTrue(utils.is_int_like("1"))
+        self.assertTrue(utils.is_int_like("514"))
+        self.assertTrue(utils.is_int_like("0"))
+
+        self.assertFalse(utils.is_int_like(1.1))
+        self.assertFalse(utils.is_int_like("1.1"))
+        self.assertFalse(utils.is_int_like("1.1.1"))
+        self.assertFalse(utils.is_int_like(None))
+        self.assertFalse(utils.is_int_like("0."))
+        self.assertFalse(utils.is_int_like("aaaaaa"))
+        self.assertFalse(utils.is_int_like("...."))
+        self.assertFalse(utils.is_int_like("1g"))
+        self.assertFalse(
+            utils.is_int_like("0cc3346e-9fef-4445-abe6-5d2b2690ec64"))
+        self.assertFalse(utils.is_int_like("a1"))
+
+
+class MetadataToDictTestCase(test.TestCase):
+    def test_metadata_to_dict(self):
+        self.assertEqual(utils.metadata_to_dict(
+                [{'key': 'foo1', 'value': 'bar'},
+                 {'key': 'foo2', 'value': 'baz'}]),
+                         {'foo1': 'bar', 'foo2': 'baz'})
+
+    def test_metadata_to_dict_empty(self):
+        self.assertEqual(utils.metadata_to_dict([]), {})
+
+    def test_dict_to_metadata(self):
+        expected = [{'key': 'foo1', 'value': 'bar1'},
+                    {'key': 'foo2', 'value': 'bar2'}]
+        self.assertEqual(utils.dict_to_metadata(dict(foo1='bar1',
+                                                     foo2='bar2')),
+                         expected)
+
+    def test_dict_to_metadata_empty(self):
+        self.assertEqual(utils.dict_to_metadata({}), [])
+
+
+class WrappedCodeTestCase(test.TestCase):
+    """Test the get_wrapped_function utility method."""
+
+    def _wrapper(self, function):
+        @functools.wraps(function)
+        def decorated_function(self, *args, **kwargs):
+            function(self, *args, **kwargs)
+        return decorated_function
+
+    def test_single_wrapped(self):
+        @self._wrapper
+        def wrapped(self, instance, red=None, blue=None):
+            pass
+
+        func = utils.get_wrapped_function(wrapped)
+        func_code = func.func_code
+        self.assertEqual(4, len(func_code.co_varnames))
+        self.assertTrue('self' in func_code.co_varnames)
+        self.assertTrue('instance' in func_code.co_varnames)
+        self.assertTrue('red' in func_code.co_varnames)
+        self.assertTrue('blue' in func_code.co_varnames)
+
+    def test_double_wrapped(self):
+        @self._wrapper
+        @self._wrapper
+        def wrapped(self, instance, red=None, blue=None):
+            pass
+
+        func = utils.get_wrapped_function(wrapped)
+        func_code = func.func_code
+        self.assertEqual(4, len(func_code.co_varnames))
+        self.assertTrue('self' in func_code.co_varnames)
+        self.assertTrue('instance' in func_code.co_varnames)
+        self.assertTrue('red' in func_code.co_varnames)
+        self.assertTrue('blue' in func_code.co_varnames)
+
+    def test_triple_wrapped(self):
+        @self._wrapper
+        @self._wrapper
+        @self._wrapper
+        def wrapped(self, instance, red=None, blue=None):
+            pass
+
+        func = utils.get_wrapped_function(wrapped)
+        func_code = func.func_code
+        self.assertEqual(4, len(func_code.co_varnames))
+        self.assertTrue('self' in func_code.co_varnames)
+        self.assertTrue('instance' in func_code.co_varnames)
+        self.assertTrue('red' in func_code.co_varnames)
+        self.assertTrue('blue' in func_code.co_varnames)
+
+
+class StringLengthTestCase(test.TestCase):
+    def test_check_string_length(self):
+        self.assertIsNone(utils.check_string_length(
+                          'test', 'name', max_length=255))
+        self.assertRaises(exception.InvalidInput,
+                          utils.check_string_length,
+                          11, 'name', max_length=255)
+        self.assertRaises(exception.InvalidInput,
+                          utils.check_string_length,
+                          '', 'name', min_length=1)
+        self.assertRaises(exception.InvalidInput,
+                          utils.check_string_length,
+                          'a' * 256, 'name', max_length=255)

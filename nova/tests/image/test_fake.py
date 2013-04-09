@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright 2011 OpenStack LLC
+#    Copyright 2011 OpenStack Foundation
 #    Author: Soren Hansen
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -41,7 +41,8 @@ class FakeImageServiceTestCase(test.TestCase):
             self.assertEquals(keys, set(['id', 'name', 'created_at',
                                          'updated_at', 'deleted_at', 'deleted',
                                          'status', 'is_public', 'properties',
-                                         'disk_format', 'container_format']))
+                                         'disk_format', 'container_format',
+                                         'size']))
             self.assertTrue(isinstance(image['created_at'], datetime.datetime))
             self.assertTrue(isinstance(image['updated_at'], datetime.datetime))
 

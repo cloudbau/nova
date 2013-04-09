@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,13 +15,11 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Tests for compute node stats"""
+"""Tests for compute node stats."""
 
 from nova.compute import stats
 from nova.compute import task_states
 from nova.compute import vm_states
-from nova import db
-from nova import exception
 from nova import test
 
 

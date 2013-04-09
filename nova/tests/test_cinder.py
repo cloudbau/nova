@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright 2011 OpenStack LLC
+#    Copyright 2011 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -17,7 +17,9 @@
 import httplib2
 import urlparse
 
+from cinderclient import exceptions as cinder_exception
 from nova import context
+from nova import exception
 from nova.volume import cinder
 
 from nova import test
@@ -39,6 +41,11 @@ def _stub_volume(**kwargs):
     }
     volume.update(kwargs)
     return volume
+
+_image_metadata = {
+    'kernel_id': 'fake',
+    'ramdisk_id': 'fake'
+}
 
 
 class FakeHTTPClient(cinder.cinder_client.client.HTTPClient):
@@ -77,14 +84,28 @@ class FakeHTTPClient(cinder.cinder_client.client.HTTPClient):
         volume = {'volume': _stub_volume(id='1234')}
         return (200, volume)
 
+    def get_volumes_nonexisting(self, **kw):
+        raise cinder_exception.NotFound(code=404, message='Resource not found')
+
+    def get_volumes_5678(self, **kw):
+        """Volume with image metadata."""
+        volume = {'volume': _stub_volume(id='1234',
+                                         volume_image_metadata=_image_metadata)
+        }
+        return (200, volume)
+
 
 class FakeCinderClient(cinder.cinder_client.Client):
 
-    def __init__(self, username, password, project_id=None, auth_url=None):
+    def __init__(self, username, password, project_id=None, auth_url=None,
+                 insecure=False, retries=None):
         super(FakeCinderClient, self).__init__(username, password,
                                                project_id=project_id,
-                                               auth_url=auth_url)
-        self.client = FakeHTTPClient(username, password, project_id, auth_url)
+                                               auth_url=auth_url,
+                                               insecure=insecure,
+                                               retries=retries)
+        self.client = FakeHTTPClient(username, password, project_id, auth_url,
+                                     insecure=insecure, retries=retries)
         # keep a ref to the clients callstack for factory's assert_called
         self.callstack = self.client.callstack = []
 
@@ -146,3 +167,30 @@ class CinderTestCase(test.TestCase):
         self.assertEquals(
             self.fake_client_factory.client.client.management_url,
             'http://other_host:8776/v1/project_id')
+
+    def test_get_non_existing_volume(self):
+        self.assertRaises(exception.VolumeNotFound, self.api.get, self.context,
+                          'nonexisting')
+
+    def test_volume_with_image_metadata(self):
+        volume = self.api.get(self.context, '5678')
+        self.assert_called('GET', '/volumes/5678')
+        self.assertTrue('volume_image_metadata' in volume)
+        self.assertEqual(volume['volume_image_metadata'], _image_metadata)
+
+    def test_cinder_api_insecure(self):
+        # The True/False negation is awkward, but better for the client
+        # to pass us insecure=True and we check verify_cert == False
+        self.flags(cinder_api_insecure=True)
+        volume = self.api.get(self.context, '1234')
+        self.assert_called('GET', '/volumes/1234')
+        self.assertEquals(
+            self.fake_client_factory.client.client.verify_cert, False)
+
+    def test_cinder_http_retries(self):
+        retries = 42
+        self.flags(cinder_http_retries=retries)
+        volume = self.api.get(self.context, '1234')
+        self.assert_called('GET', '/volumes/1234')
+        self.assertEquals(
+            self.fake_client_factory.client.client.retries, retries)

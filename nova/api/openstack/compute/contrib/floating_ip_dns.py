@@ -24,6 +24,7 @@ from nova.api.openstack import xmlutil
 from nova import exception
 from nova import network
 from nova.openstack.common import log as logging
+from nova import utils
 
 
 LOG = logging.getLogger(__name__)
@@ -129,7 +130,7 @@ def _create_domain_entry(domain, scope=None, project=None, av_zone=None):
 
 
 class FloatingIPDNSDomainController(object):
-    """DNS domain controller for OpenStack API"""
+    """DNS domain controller for OpenStack API."""
 
     def __init__(self):
         self.network_api = network.API()
@@ -151,7 +152,7 @@ class FloatingIPDNSDomainController(object):
 
     @wsgi.serializers(xml=DomainTemplate)
     def update(self, req, id, body):
-        """Add or modify domain entry"""
+        """Add or modify domain entry."""
         context = req.environ['nova.context']
         authorize(context)
         fqdomain = _unquote_domain(id)
@@ -179,7 +180,7 @@ class FloatingIPDNSDomainController(object):
                                              area_name: area})
 
     def delete(self, req, id):
-        """Delete the domain identified by id. """
+        """Delete the domain identified by id."""
         context = req.environ['nova.context']
         authorize(context)
         domain = _unquote_domain(id)
@@ -188,13 +189,13 @@ class FloatingIPDNSDomainController(object):
         try:
             self.network_api.delete_dns_domain(context, domain)
         except exception.NotFound as e:
-            raise webob.exc.HTTPNotFound(explanation=unicode(e))
+            raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
         return webob.Response(status_int=202)
 
 
 class FloatingIPDNSEntryController(object):
-    """DNS Entry controller for OpenStack API"""
+    """DNS Entry controller for OpenStack API."""
 
     def __init__(self):
         self.network_api = network.API()
@@ -206,36 +207,37 @@ class FloatingIPDNSEntryController(object):
         context = req.environ['nova.context']
         authorize(context)
         domain = _unquote_domain(domain_id)
-        name = id
 
-        entries = self.network_api.get_dns_entries_by_name(context,
-                                                           name, domain)
-        entry = _create_dns_entry(entries[0], name, domain)
+        floating_ip = None
+        # Check whether id is a valid ipv4/ipv6 address.
+        if utils.is_valid_ipv4(id) or utils.is_valid_ipv6(id):
+            floating_ip = id
+
+        if floating_ip:
+            entries = self.network_api.get_dns_entries_by_address(context,
+                                                                  floating_ip,
+                                                                  domain)
+        else:
+            entries = self.network_api.get_dns_entries_by_name(context, id,
+                                                               domain)
+
+        if not entries:
+            explanation = _("DNS entries not found.")
+            raise webob.exc.HTTPNotFound(explanation=explanation)
+
+        if floating_ip:
+            entrylist = [_create_dns_entry(floating_ip, entry, domain)
+                         for entry in entries]
+            dns_entries = _translate_dns_entries_view(entrylist)
+            return wsgi.ResponseObject(dns_entries,
+                                       xml=FloatingIPDNSsTemplate)
+
+        entry = _create_dns_entry(entries[0], id, domain)
         return _translate_dns_entry_view(entry)
-
-    @wsgi.serializers(xml=FloatingIPDNSsTemplate)
-    def index(self, req, domain_id):
-        """Return a list of dns entries for the specified domain and ip."""
-        context = req.environ['nova.context']
-        authorize(context)
-        params = req.GET
-        floating_ip = params.get('ip')
-        domain = _unquote_domain(domain_id)
-
-        if not floating_ip:
-            raise webob.exc.HTTPUnprocessableEntity()
-
-        entries = self.network_api.get_dns_entries_by_address(context,
-                                                              floating_ip,
-                                                              domain)
-        entrylist = [_create_dns_entry(floating_ip, entry, domain)
-                     for entry in entries]
-
-        return _translate_dns_entries_view(entrylist)
 
     @wsgi.serializers(xml=FloatingIPDNSTemplate)
     def update(self, req, domain_id, id, body):
-        """Add or modify dns entry"""
+        """Add or modify dns entry."""
         context = req.environ['nova.context']
         authorize(context)
         domain = _unquote_domain(domain_id)
@@ -263,7 +265,7 @@ class FloatingIPDNSEntryController(object):
                                           'domain': domain})
 
     def delete(self, req, domain_id, id):
-        """Delete the entry identified by req and id. """
+        """Delete the entry identified by req and id."""
         context = req.environ['nova.context']
         authorize(context)
         domain = _unquote_domain(domain_id)
@@ -272,13 +274,13 @@ class FloatingIPDNSEntryController(object):
         try:
             self.network_api.delete_dns_entry(context, name, domain)
         except exception.NotFound as e:
-            raise webob.exc.HTTPNotFound(explanation=unicode(e))
+            raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
         return webob.Response(status_int=202)
 
 
 class Floating_ip_dns(extensions.ExtensionDescriptor):
-    """Floating IP DNS support"""
+    """Floating IP DNS support."""
 
     name = "FloatingIpDns"
     alias = "os-floating-ip-dns"

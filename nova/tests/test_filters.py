@@ -1,4 +1,4 @@
-# Copyright 2012 OpenStack LLC.  # All Rights Reserved.
+# Copyright 2012 OpenStack Foundation  # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -52,7 +52,7 @@ class FiltersTestCase(test.TestCase):
         self.assertEqual(list(result), ['obj1', 'obj3'])
 
     def test_filter_all_recursive_yields(self):
-        """Test filter_all() allows generators from previous filter_all()s."""
+        # Test filter_all() allows generators from previous filter_all()s.
         # filter_all() yields results.  We want to make sure that we can
         # call filter_all() with generators returned from previous calls
         # to filter_all().

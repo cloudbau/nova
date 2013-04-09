@@ -24,6 +24,7 @@ class GuestFS(object):
         self.mounts = []
         self.files = {}
         self.auginit = False
+        self.attach_method = 'libvirt'
 
     def launch(self):
         self.running = True
@@ -39,6 +40,12 @@ class GuestFS(object):
     def add_drive_opts(self, file, *args, **kwargs):
         self.drives.append((file, kwargs['format']))
 
+    def get_attach_method(self):
+        return self.attach_method
+
+    def set_attach_method(self, attach_method):
+        self.attach_method = attach_method
+
     def inspect_os(self):
         return ["/dev/guestvgf/lv_root"]
 
@@ -50,7 +57,7 @@ class GuestFS(object):
         self.mounts.append((options, device, mntpoint))
 
     def mkdir_p(self, path):
-        if not path in self.files:
+        if path not in self.files:
             self.files[path] = {
                 "isdir": True,
                 "gid": 100,
@@ -59,7 +66,7 @@ class GuestFS(object):
                 }
 
     def read_file(self, path):
-        if not path in self.files:
+        if path not in self.files:
             self.files[path] = {
                 "isdir": False,
                 "content": "Hello World",
@@ -71,7 +78,7 @@ class GuestFS(object):
         return self.files[path]["content"]
 
     def write(self, path, content):
-        if not path in self.files:
+        if path not in self.files:
             self.files[path] = {
                 "isdir": False,
                 "content": "Hello World",
@@ -83,7 +90,7 @@ class GuestFS(object):
         self.files[path]["content"] = content
 
     def write_append(self, path, content):
-        if not path in self.files:
+        if path not in self.files:
             self.files[path] = {
                 "isdir": False,
                 "content": "Hello World",
@@ -95,14 +102,14 @@ class GuestFS(object):
         self.files[path]["content"] = self.files[path]["content"] + content
 
     def stat(self, path):
-        if not path in self.files:
-            raise Exception("No such file: " + path)
+        if path not in self.files:
+            raise RuntimeError("No such file: " + path)
 
         return self.files[path]["mode"]
 
     def chown(self, uid, gid, path):
-        if not path in self.files:
-            raise Exception("No such file: " + path)
+        if path not in self.files:
+            raise RuntimeError("No such file: " + path)
 
         if uid != -1:
             self.files[path]["uid"] = uid
@@ -110,8 +117,8 @@ class GuestFS(object):
             self.files[path]["gid"] = gid
 
     def chmod(self, mode, path):
-        if not path in self.files:
-            raise Exception("No such file: " + path)
+        if path not in self.files:
+            raise RuntimeError("No such file: " + path)
 
         self.files[path]["mode"] = mode
 
@@ -123,7 +130,7 @@ class GuestFS(object):
 
     def aug_get(self, cfgpath):
         if not self.auginit:
-            raise Exception("Augeus not initialized")
+            raise RuntimeError("Augeus not initialized")
 
         if cfgpath == "/files/etc/passwd/root/uid":
             return 0
@@ -137,4 +144,4 @@ class GuestFS(object):
             return 500
         elif cfgpath == "/files/etc/group/admins/gid":
             return 600
-        raise Exception("Unknown path %s", cfgpath)
+        raise RuntimeError("Unknown path %s", cfgpath)

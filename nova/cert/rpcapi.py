@@ -18,11 +18,18 @@
 Client side of the cert manager RPC API.
 """
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 import nova.openstack.common.rpc.proxy
 
+rpcapi_opts = [
+    cfg.StrOpt('cert_topic',
+               default='cert',
+               help='the topic cert nodes listen on'),
+]
+
 CONF = cfg.CONF
-CONF.import_opt('cert_topic', 'nova.config')
+CONF.register_opts(rpcapi_opts)
 
 
 class CertAPI(nova.openstack.common.rpc.proxy.RpcProxy):
@@ -31,6 +38,7 @@ class CertAPI(nova.openstack.common.rpc.proxy.RpcProxy):
     API version history:
 
         1.0 - Initial version.
+        1.1 - Added get_backdoor_port()
     '''
 
     #
@@ -78,3 +86,7 @@ class CertAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         return self.call(ctxt, self.make_msg('decrypt_text',
                                              project_id=project_id,
                                              text=text))
+
+    def get_backdoor_port(self, context, host):
+        return self.call(context, self.make_msg('get_backdoor_port'),
+                         version='1.1')

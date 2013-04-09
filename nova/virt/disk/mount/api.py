@@ -13,15 +13,18 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-"""Support for mounting virtual image files"""
+"""Support for mounting virtual image files."""
 
 import os
+import time
 
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova import utils
 
 LOG = logging.getLogger(__name__)
+
+MAX_DEVICE_WAIT = 30
 
 
 class Mount(object):
@@ -102,6 +105,26 @@ class Mount(object):
         self.linked = True
         return True
 
+    def _get_dev_retry_helper(self):
+        """Some implementations need to retry their get_dev."""
+        # NOTE(mikal): This method helps implement retries. The implementation
+        # simply calls _get_dev_retry_helper from their get_dev, and implements
+        # _inner_get_dev with their device acquisition logic. The NBD
+        # implementation has an example.
+        start_time = time.time()
+        device = self._inner_get_dev()
+        while not device:
+            LOG.info(_('Device allocation failed. Will retry in 2 seconds.'))
+            time.sleep(2)
+            if time.time() - start_time > MAX_DEVICE_WAIT:
+                LOG.warn(_('Device allocation failed after repeated retries.'))
+                return False
+            device = self._inner_get_dev()
+        return True
+
+    def _inner_get_dev(self):
+        raise NotImplementedError()
+
     def unget_dev(self):
         """Release the block device from the file system namespace."""
         self.linked = False
@@ -164,9 +187,10 @@ class Mount(object):
         LOG.debug(_("Mount %(dev)s on %(dir)s") %
                   {'dev': self.mapped_device, 'dir': self.mount_dir})
         _out, err = utils.trycmd('mount', self.mapped_device, self.mount_dir,
-                                 run_as_root=True)
+                                 discard_warnings=True, run_as_root=True)
         if err:
             self.error = _('Failed to mount filesystem: %s') % err
+            LOG.debug(self.error)
             return False
 
         self.mounted = True
@@ -188,11 +212,16 @@ class Mount(object):
         finally:
             if not status:
                 LOG.debug(_("Fail to mount, tearing back down"))
-                self.do_umount()
+                self.do_teardown()
         return status
 
     def do_umount(self):
-        """Call the unmnt, unmap and unget operations."""
+        """Call the unmnt operation."""
+        if self.mounted:
+            self.unmnt_dev()
+
+    def do_teardown(self):
+        """Call the umnt, unmap, and unget operations."""
         if self.mounted:
             self.unmnt_dev()
         if self.mapped:

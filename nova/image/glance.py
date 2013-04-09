@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,27 +15,38 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-"""Implementation of an image service that uses Glance as the backend"""
+"""Implementation of an image service that uses Glance as the backend."""
 
 from __future__ import absolute_import
 
 import copy
 import itertools
 import random
+import shutil
 import sys
 import time
 import urlparse
 
 import glanceclient
 import glanceclient.exc
+from oslo.config import cfg
 
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 
 glance_opts = [
+    cfg.StrOpt('glance_host',
+               default='$my_ip',
+               help='default glance hostname or ip'),
+    cfg.IntOpt('glance_port',
+               default=9292,
+               help='default glance port'),
+    cfg.StrOpt('glance_protocol',
+                default='http',
+                help='Default protocol to use when connecting to glance. '
+                     'Set to https for SSL.'),
     cfg.ListOpt('glance_api_servers',
                 default=['$glance_host:$glance_port'],
                 help='A list of the glance api servers available to nova. '
@@ -48,12 +59,29 @@ glance_opts = [
     cfg.IntOpt('glance_num_retries',
                default=0,
                help='Number retries when downloading an image from glance'),
-]
+    cfg.ListOpt('allowed_direct_url_schemes',
+                default=[],
+                help='A list of url scheme that can be downloaded directly '
+                     'via the direct_url.  Currently supported schemes: '
+                     '[file].'),
+    ]
 
 LOG = logging.getLogger(__name__)
 CONF = cfg.CONF
 CONF.register_opts(glance_opts)
 CONF.import_opt('auth_strategy', 'nova.api.auth')
+CONF.import_opt('my_ip', 'nova.netconf')
+
+
+def generate_glance_url():
+    """Generate the URL to glance."""
+    return "%s://%s:%d" % (CONF.glance_protocol, CONF.glance_host,
+                           CONF.glance_port)
+
+
+def generate_image_url(image_ref):
+    """Generate an image URL from an image_ref."""
+    return "%s/images/%s" % (generate_glance_url(), image_ref)
 
 
 def _parse_image_ref(image_href):
@@ -73,7 +101,7 @@ def _parse_image_ref(image_href):
 
 
 def _create_glance_client(context, host, port, use_ssl, version=1):
-    """Instantiate a new glanceclient.Client object"""
+    """Instantiate a new glanceclient.Client object."""
     if use_ssl:
         scheme = 'https'
     else:
@@ -230,15 +258,30 @@ class GlanceImageService(object):
 
         return getattr(image_meta, 'direct_url', None)
 
-    def download(self, context, image_id, data):
-        """Calls out to Glance for metadata and data and writes data."""
+    def download(self, context, image_id, data=None):
+        """Calls out to Glance for data and writes data."""
+        if 'file' in CONF.allowed_direct_url_schemes:
+            location = self.get_location(context, image_id)
+            o = urlparse.urlparse(location)
+            if o.scheme == "file":
+                with open(o.path, "r") as f:
+                    # FIXME(jbresnah) a system call to cp could have
+                    # significant performance advantages, however we
+                    # do not have the path to files at this point in
+                    # the abstraction.
+                    shutil.copyfileobj(f, data)
+                return
+
         try:
             image_chunks = self._client.call(context, 1, 'data', image_id)
         except Exception:
             _reraise_translated_image_exception(image_id)
 
-        for chunk in image_chunks:
-            data.write(chunk)
+        if data is None:
+            return image_chunks
+        else:
+            for chunk in image_chunks:
+                data.write(chunk)
 
     def create(self, context, image_meta, data=None):
         """Store the image data and return the new image object."""
@@ -445,6 +488,8 @@ def get_remote_image_service(context, image_href):
     :returns: a tuple of the form (image_service, image_id)
 
     """
+    # Calling out to another service may take a while, so lets log this
+    LOG.debug(_("fetching image %s from glance") % image_href)
     #NOTE(bcwaldon): If image_href doesn't look like a URI, assume its a
     # standalone image ID
     if '/' not in str(image_href):

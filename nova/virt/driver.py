@@ -24,22 +24,47 @@ Driver base-classes:
 
 import sys
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova import utils
+from nova.virt import event as virtevent
 
 driver_opts = [
     cfg.StrOpt('compute_driver',
                help='Driver to use for controlling virtualization. Options '
                    'include: libvirt.LibvirtDriver, xenapi.XenAPIDriver, '
                    'fake.FakeDriver, baremetal.BareMetalDriver, '
-                   'vmwareapi.VMWareESXDriver'),
+                   'vmwareapi.VMwareESXDriver, vmwareapi.VMwareVCDriver'),
+    cfg.StrOpt('default_ephemeral_format',
+               default=None,
+               help='The default format an ephemeral_volume will be '
+                    'formatted with on creation.'),
+    cfg.StrOpt('preallocate_images',
+               default='none',
+               help='VM image preallocation mode: '
+                    '"none" => no storage provisioning is done up front, '
+                    '"space" => storage is fully allocated at instance start'),
+    cfg.BoolOpt('use_cow_images',
+                default=True,
+                help='Whether to use cow images'),
 ]
 
 CONF = cfg.CONF
 CONF.register_opts(driver_opts)
 LOG = logging.getLogger(__name__)
+
+
+def driver_dict_from_config(named_driver_config, *args, **kwargs):
+    driver_registry = dict()
+
+    for driver_str in named_driver_config:
+        driver_type, _sep, driver = driver_str.partition('=')
+        driver_class = importutils.import_class(driver)
+        driver_registry[driver_type] = driver_class(*args, **kwargs)
+
+    return driver_registry
 
 
 def block_device_info_get_root(block_device_info):
@@ -102,10 +127,12 @@ class ComputeDriver(object):
 
     capabilities = {
         "has_imagecache": False,
+        "supports_recreate": False,
         }
 
     def __init__(self, virtapi):
         self.virtapi = virtapi
+        self._compute_event_callback = None
 
     def init_host(self, host):
         """Initialize anything that is necessary for the driver to function,
@@ -167,6 +194,13 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
+    def list_instance_uuids(self):
+        """
+        Return the UUIDS of all the instances known to the virtualization
+        layer, as a list.
+        """
+        raise NotImplementedError()
+
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info=None, block_device_info=None):
         """
@@ -194,7 +228,8 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def destroy(self, instance, network_info, block_device_info=None):
+    def destroy(self, instance, network_info, block_device_info=None,
+                destroy_disks=True):
         """Destroy (shutdown and delete) the specified instance.
 
         If the instance is not found (for example if networking failed), this
@@ -206,13 +241,14 @@ class ComputeDriver(object):
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
         :param block_device_info: Information about block devices that should
                                   be detached from the instance.
+        :param destroy_disks: Indicates if disks should be destroyed
 
         """
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def reboot(self, instance, network_info, reboot_type,
-               block_device_info=None):
+    def reboot(self, context, instance, network_info, reboot_type,
+               block_device_info=None, bad_volumes_callback=None):
         """Reboot the specified instance.
 
         After this is called successfully, the instance's state
@@ -225,8 +261,10 @@ class ComputeDriver(object):
         :param network_info:
            :py:meth:`~nova.network.manager.NetworkManager.get_instance_nw_info`
         :param reboot_type: Either a HARD or SOFT reboot
+        :param block_device_info: Info pertaining to attached volumes
+        :param bad_volumes_callback: Function to handle any bad volumes
+            encountered
         """
-        # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def get_console_pool_info(self, console_type):
@@ -241,8 +279,12 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
+    def get_spice_console(self, instance):
+        # TODO(Vek): Need to pass context in for access to auth_token
+        raise NotImplementedError()
+
     def get_diagnostics(self, instance):
-        """Return data about VM diagnostics"""
+        """Return data about VM diagnostics."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
@@ -263,12 +305,20 @@ class ComputeDriver(object):
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
-    def attach_volume(self, connection_info, instance_name, mountpoint):
-        """Attach the disk to the instance at mountpoint using info"""
+    def attach_volume(self, connection_info, instance, mountpoint):
+        """Attach the disk to the instance at mountpoint using info."""
         raise NotImplementedError()
 
-    def detach_volume(self, connection_info, instance_name, mountpoint):
-        """Detach the disk attached to the instance"""
+    def detach_volume(self, connection_info, instance, mountpoint):
+        """Detach the disk attached to the instance."""
+        raise NotImplementedError()
+
+    def attach_interface(self, instance, image_meta, network_info):
+        """Attach an interface to the instance."""
+        raise NotImplementedError()
+
+    def detach_interface(self, instance, network_info):
+        """Detach an interface from the instance."""
         raise NotImplementedError()
 
     def migrate_disk_and_power_off(self, context, instance, dest,
@@ -280,7 +330,7 @@ class ComputeDriver(object):
         """
         raise NotImplementedError()
 
-    def snapshot(self, context, instance, image_id):
+    def snapshot(self, context, instance, image_id, update_task_state):
         """
         Snapshots the specified instance.
 
@@ -305,13 +355,13 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def confirm_migration(self, migration, instance, network_info):
-        """Confirms a resize, destroying the source VM"""
+        """Confirms a resize, destroying the source VM."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def finish_revert_migration(self, instance, network_info,
                                 block_device_info=None):
-        """Finish reverting a resize, powering back on the instance"""
+        """Finish reverting a resize, powering back on the instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
@@ -321,32 +371,32 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def unpause(self, instance):
-        """Unpause paused VM instance"""
+        """Unpause paused VM instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def suspend(self, instance):
-        """suspend the specified instance"""
+        """suspend the specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def resume(self, instance, network_info, block_device_info=None):
-        """resume the specified instance"""
+        """resume the specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
     def resume_state_on_host_boot(self, context, instance, network_info,
                                   block_device_info=None):
-        """resume guest state when a host is booted"""
+        """resume guest state when a host is booted."""
         raise NotImplementedError()
 
     def rescue(self, context, instance, network_info, image_meta,
                rescue_password):
-        """Rescue the specified instance"""
+        """Rescue the specified instance."""
         raise NotImplementedError()
 
     def unrescue(self, instance, network_info):
-        """Unrescue the specified instance"""
+        """Unrescue the specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
@@ -355,7 +405,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def power_on(self, instance):
-        """Power on the specified instance"""
+        """Power on the specified instance."""
         raise NotImplementedError()
 
     def soft_delete(self, instance):
@@ -363,7 +413,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def restore(self, instance):
-        """Restore the specified instance"""
+        """Restore the specified instance."""
         raise NotImplementedError()
 
     def get_available_resource(self, nodename):
@@ -380,13 +430,15 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def pre_live_migration(self, ctxt, instance_ref,
-                           block_device_info, network_info):
+                           block_device_info, network_info,
+                           migrate_data=None):
         """Prepare an instance for live migration
 
         :param ctxt: security context
         :param instance_ref: instance object that will be migrated
         :param block_device_info: instance block device information
         :param network_info: instance network information
+        :param migrate_data: implementation specific data dict.
         """
         raise NotImplementedError()
 
@@ -424,7 +476,8 @@ class ComputeDriver(object):
 
     def post_live_migration_at_destination(self, ctxt, instance_ref,
                                            network_info,
-                                           block_migration=False):
+                                           block_migration=False,
+                                           block_device_info=None):
         """Post operation of live migration at destination host.
 
         :param ctxt: security context
@@ -449,6 +502,7 @@ class ComputeDriver(object):
         :param dst_compute_info: Info about the receiving machine
         :param block_migration: if true, prepare for block migration
         :param disk_over_commit: if true, allow disk over commit
+        :returns: a dict containing migration info (hypervisor-dependent)
         """
         raise NotImplementedError()
 
@@ -471,6 +525,7 @@ class ComputeDriver(object):
         :param context: security context
         :param instance_ref: nova.db.sqlalchemy.models.Instance
         :param dest_check_data: result of check_can_live_migrate_destination
+        :returns: a dict containing migration info (hypervisor-dependent)
         """
         raise NotImplementedError()
 
@@ -542,7 +597,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def reset_network(self, instance):
-        """reset networking for specified instance"""
+        """reset networking for specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         pass
 
@@ -573,15 +628,15 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def filter_defer_apply_on(self):
-        """Defer application of IPTables rules"""
+        """Defer application of IPTables rules."""
         pass
 
     def filter_defer_apply_off(self):
-        """Turn off deferral of IPTables rules and apply the rules now"""
+        """Turn off deferral of IPTables rules and apply the rules now."""
         pass
 
     def unfilter_instance(self, instance, network_info):
-        """Stop filtering instance"""
+        """Stop filtering instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         raise NotImplementedError()
 
@@ -620,7 +675,7 @@ class ComputeDriver(object):
         pass
 
     def inject_network_info(self, instance, nw_info):
-        """inject network info for specified instance"""
+        """inject network info for specified instance."""
         # TODO(Vek): Need to pass context in for access to auth_token
         pass
 
@@ -664,7 +719,7 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def get_host_stats(self, refresh=False):
-        """Return currently known host stats"""
+        """Return currently known host stats."""
         raise NotImplementedError()
 
     def block_stats(self, instance_name, disk_id):
@@ -708,11 +763,39 @@ class ComputeDriver(object):
         raise NotImplementedError()
 
     def legacy_nwinfo(self):
+        """True if the driver requires the legacy network_info format."""
+        # TODO(tr3buchet): update all subclasses and remove this method and
+        # related helpers.
+        raise NotImplementedError(self.legacy_nwinfo)
+
+    def macs_for_instance(self, instance):
+        """What MAC addresses must this instance have?
+
+        Some hypervisors (such as bare metal) cannot do freeform virtualisation
+        of MAC addresses. This method allows drivers to return a set of MAC
+        addresses that the instance is to have. allocate_for_instance will take
+        this into consideration when provisioning networking for the instance.
+
+        Mapping of MAC addresses to actual networks (or permitting them to be
+        freeform) is up to the network implementation layer. For instance,
+        with openflow switches, fixed MAC addresses can still be virtualised
+        onto any L2 domain, with arbitrary VLANs etc, but regular switches
+        require pre-configured MAC->network mappings that will match the
+        actual configuration.
+
+        Most hypervisors can use the default implementation which returns None.
+        Hypervisors with MAC limits should return a set of MAC addresses, which
+        will be supplied to the allocate_for_instance call by the compute
+        manager, and it is up to that call to ensure that all assigned network
+        details are compatible with the set of MAC addresses.
+
+        This is called during spawn_instance by the compute manager.
+
+        :return: None, or a set of MAC ids (e.g. set(['12:34:56:78:90:ab'])).
+            None means 'no constraints', a set means 'these and only these
+            MAC addresses'.
         """
-        Indicate if the driver requires the legacy network_info format.
-        """
-        # TODO(tr3buchet): update all subclasses and remove this
-        return True
+        return None
 
     def manage_image_cache(self, context, all_instances):
         """
@@ -736,7 +819,7 @@ class ComputeDriver(object):
 
     def undo_aggregate_operation(self, context, op, aggregate,
                                   host, set_error=True):
-        """Undo for  Resource Pools"""
+        """Undo for Resource Pools."""
         raise NotImplementedError()
 
     def get_volume_connector(self, instance):
@@ -773,6 +856,52 @@ class ComputeDriver(object):
         :returns: dict of  nova uuid => dict of usage info
         """
         return {}
+
+    def instance_on_disk(self, instance):
+        """Checks access of instance files on the host.
+
+        :param instance: instance to lookup
+
+        Returns True if files of an instance with the supplied ID accessible on
+        the host, False otherwise.
+
+        .. note::
+            Used in rebuild for HA implementation and required for validation
+            of access to instance shared disk files
+        """
+        return False
+
+    def register_event_listener(self, callback):
+        """Register a callback to receive events.
+
+        Register a callback to receive asynchronous event
+        notifications from hypervisors. The callback will
+        be invoked with a single parameter, which will be
+        an instance of the nova.virt.event.Event class."""
+
+        self._compute_event_callback = callback
+
+    def emit_event(self, event):
+        """Dispatches an event to the compute manager.
+
+        Invokes the event callback registered by the
+        compute manager to dispatch the event. This
+        must only be invoked from a green thread."""
+
+        if not self._compute_event_callback:
+            LOG.debug("Discarding event %s" % str(event))
+            return
+
+        if not isinstance(event, virtevent.Event):
+            raise ValueError(
+                _("Event must be an instance of nova.virt.event.Event"))
+
+        try:
+            LOG.debug("Emitting event %s" % str(event))
+            self._compute_event_callback(event)
+        except Exception, ex:
+            LOG.error(_("Exception dispatching event %(event)s: %(ex)s")
+                        % locals())
 
 
 def load_compute_driver(virtapi, compute_driver=None):

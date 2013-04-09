@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -247,7 +247,7 @@ class DiskConfigTestCase(test.TestCase):
         self.assertDiskConfig(server_dict, 'AUTO')
 
     def test_update_server_invalid_disk_config(self):
-        """Return BadRequest if user passes an invalid diskConfig value."""
+        # Return BadRequest if user passes an invalid diskConfig value.
         req = fakes.HTTPRequest.blank(
             '/fake/servers/%s' % MANUAL_INSTANCE_UUID)
         req.method = 'PUT'

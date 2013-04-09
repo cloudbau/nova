@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
-# Copyright 2012 OpenStack LLC.
+# Copyright 2012 OpenStack Foundation
 # All Rights Reserved
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,12 +15,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from nova import exception
-from nova.openstack.common import cfg
+from oslo.config import cfg
+from quantumclient import client
+from quantumclient.common import exceptions
+from quantumclient.v2_0 import client as clientv20
+
 from nova.openstack.common import excutils
 from nova.openstack.common import log as logging
-from quantumclient import client
-from quantumclient.v2_0 import client as clientv20
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -31,15 +32,17 @@ def _get_auth_token():
         httpclient = client.HTTPClient(
             username=CONF.quantum_admin_username,
             tenant_name=CONF.quantum_admin_tenant_name,
+            region_name=CONF.quantum_region_name,
             password=CONF.quantum_admin_password,
             auth_url=CONF.quantum_admin_auth_url,
             timeout=CONF.quantum_url_timeout,
-            auth_strategy=CONF.quantum_auth_strategy)
+            auth_strategy=CONF.quantum_auth_strategy,
+            insecure=CONF.quantum_api_insecure)
         httpclient.authenticate()
-    except Exception:
+        return httpclient.auth_token
+    except exceptions.QuantumClientException as e:
         with excutils.save_and_reraise_exception():
-            LOG.exception(_("_get_auth_token() failed"))
-    return httpclient.auth_token
+            LOG.error(_('Quantum client authentication failed: %s'), e)
 
 
 def _get_client(token=None):
@@ -48,6 +51,7 @@ def _get_client(token=None):
     params = {
         'endpoint_url': CONF.quantum_url,
         'timeout': CONF.quantum_url_timeout,
+        'insecure': CONF.quantum_api_insecure,
     }
     if token:
         params['token'] = token

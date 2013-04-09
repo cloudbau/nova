@@ -1,4 +1,4 @@
-#   Copyright 2011 OpenStack, LLC.
+#   Copyright 2011 OpenStack Foundation
 #
 #   Licensed under the Apache License, Version 2.0 (the "License"); you may
 #   not use this file except in compliance with the License. You may obtain
@@ -14,6 +14,8 @@
 
 """Connect your vlan to the world."""
 
+from oslo.config import cfg
+
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
@@ -24,14 +26,12 @@ from nova.compute import vm_states
 from nova import db
 from nova import exception
 from nova import network
-from nova.openstack.common import cfg
 from nova.openstack.common import fileutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova import utils
 
 CONF = cfg.CONF
-CONF.import_opt('vpn_image_id', 'nova.config')
 LOG = logging.getLogger(__name__)
 authorize = extensions.extension_authorizer('compute', 'cloudpipe')
 
@@ -73,9 +73,11 @@ class CloudpipeController(object):
         fileutils.ensure_tree(CONF.keys_path)
 
     def _get_all_cloudpipes(self, context):
-        """Get all cloudpipes"""
-        return [instance for instance in self.compute_api.get_all(context)
-                if instance['image_ref'] == str(CONF.vpn_image_id)
+        """Get all cloudpipes."""
+        instances = self.compute_api.get_all(context,
+                                             search_opts={'deleted': False})
+        return [instance for instance in instances
+                if pipelib.is_vpn_image(instance['image_ref'])
                 and instance['vm_state'] != vm_states.DELETED]
 
     def _get_cloudpipe_for_project(self, context, project_id):

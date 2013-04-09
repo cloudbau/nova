@@ -16,20 +16,19 @@
 import datetime
 
 from lxml import etree
+from oslo.config import cfg
 import webob
+from webob import exc
 
 from nova.api.openstack.compute.contrib import volumes
 from nova.compute import api as compute_api
 from nova.compute import instance_types
 from nova import context
-from nova import db
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import timeutils
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.volume import cinder
-from webob import exc
 
 CONF = cfg.CONF
 CONF.import_opt('password_length', 'nova.utils')
@@ -69,11 +68,15 @@ def fake_get_instance(self, context, instance_id):
     return({'uuid': instance_id})
 
 
+def fake_get_volume(self, context, id):
+    return({'id': 'woot'})
+
+
 def fake_attach_volume(self, context, instance, volume_id, device):
     return()
 
 
-def fake_detach_volume(self, context, volume_id):
+def fake_detach_volume(self, context, instance, volume):
     return()
 
 
@@ -87,7 +90,7 @@ def fake_get_instance_bdms(self, context, instance):
              'volume_id': FAKE_UUID_A,
              'volume_size': 1},
             {'id': 2,
-             'instance_uuid':instance['uuid'],
+             'instance_uuid': instance['uuid'],
              'device_name': '/dev/fake1',
              'delete_on_termination': 'False',
              'virtual_name': 'MyNamesVirtual',
@@ -224,6 +227,7 @@ class VolumeAttachTests(test.TestCase):
                        'get_instance_bdms',
                        fake_get_instance_bdms)
         self.stubs.Set(compute_api.API, 'get', fake_get_instance)
+        self.stubs.Set(cinder.API, 'get', fake_get_volume)
         self.context = context.get_admin_context()
         self.expected_show = {'volumeAttachment':
             {'device': '/dev/fake0',
@@ -290,6 +294,27 @@ class VolumeAttachTests(test.TestCase):
         self.assertEqual(result['volumeAttachment']['id'],
             '00000000-aaaa-aaaa-aaaa-000000000000')
 
+    def test_attach_volume_bad_id(self):
+        self.stubs.Set(compute_api.API,
+                       'attach_volume',
+                       fake_attach_volume)
+        attachments = volumes.VolumeAttachmentController()
+
+        body = {
+            'volumeAttachment': {
+                'device': None,
+                'volumeId': 'TESTVOLUME',
+            }
+        }
+
+        req = fakes.HTTPRequest.blank('/v2/fake/os-volumes/attach')
+        req.method = 'POST'
+        req.content_type = 'application/json'
+        req.body = jsonutils.dumps(body)
+
+        self.assertRaises(webob.exc.HTTPBadRequest, attachments.create,
+                          req, FAKE_UUID, body)
+
 
 class VolumeSerializerTest(test.TestCase):
     def _verify_volume_attachment(self, attach, tree):
@@ -328,7 +353,6 @@ class VolumeSerializerTest(test.TestCase):
             device='/foo')
         text = serializer.serialize(dict(volumeAttachment=raw_attach))
 
-        print text
         tree = etree.fromstring(text)
 
         self.assertEqual('volumeAttachment', tree.tag)
@@ -348,7 +372,6 @@ class VolumeSerializerTest(test.TestCase):
                 device='/foo2')]
         text = serializer.serialize(dict(volumeAttachments=raw_attaches))
 
-        print text
         tree = etree.fromstring(text)
 
         self.assertEqual('volumeAttachments', tree.tag)
@@ -381,7 +404,6 @@ class VolumeSerializerTest(test.TestCase):
             )
         text = serializer.serialize(dict(volume=raw_volume))
 
-        print text
         tree = etree.fromstring(text)
 
         self._verify_volume(raw_volume, tree)
@@ -430,7 +452,6 @@ class VolumeSerializerTest(test.TestCase):
                 )]
         text = serializer.serialize(dict(volumes=raw_volumes))
 
-        print text
         tree = etree.fromstring(text)
 
         self.assertEqual('volumes', tree.tag)

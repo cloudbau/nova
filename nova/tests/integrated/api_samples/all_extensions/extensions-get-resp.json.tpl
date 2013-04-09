@@ -17,6 +17,30 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "OS-EXT-AZ",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedAvailabilityZone",
+            "namespace": "http://docs.openstack.org/compute/ext/extended_availability_zone/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "OS-EXT-IPS",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedIps",
+            "namespace": "http://docs.openstack.org/compute/ext/extended_ips/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "OS-EXT-IMG-SIZE",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ImageSize",
+            "namespace": "http://docs.openstack.org/compute/ext/image_size/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "OS-EXT-SRV-ATTR",
             "description": "%(text)s",
             "links": [],
@@ -30,6 +54,14 @@
             "links": [],
             "name": "ExtendedStatus",
             "namespace": "http://docs.openstack.org/compute/ext/extended_status/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "OS-EXT-VIF-NET",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedVIFNet",
+            "namespace": "http://docs.openstack.org/compute/ext/extended-virtual-interfaces-net/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -81,11 +113,35 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-attach-interfaces",
+            "description": "Attach interface support.",
+            "links": [],
+            "name": "AttachInterfaces",
+            "namespace": "http://docs.openstack.org/compute/ext/interfaces/api/v1.1",
+            "updated": "2012-07-22T00:00:00+00:00"
+        },
+        {
             "alias": "os-availability-zone",
             "description": "%(text)s",
             "links": [],
             "name": "AvailabilityZone",
             "namespace": "http://docs.openstack.org/compute/ext/availabilityzone/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-baremetal-nodes",
+            "description": "%(text)s",
+            "links": [],
+            "name": "BareMetalNodes",
+            "namespace": "http://docs.openstack.org/compute/ext/baremetal_nodes/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-cells",
+            "description": "%(text)s",
+            "links": [],
+            "name": "Cells",
+            "namespace": "http://docs.openstack.org/compute/ext/cells/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -161,8 +217,16 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-evacuate",
+            "description": "%(text)s",
+            "links": [],
+            "name": "Evacuate",
+            "namespace": "http://docs.openstack.org/compute/ext/evacuate/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-fixed-ips",
-            "description": "Fixed IPs support",
+            "description": "Fixed IPs support.",
             "links": [],
             "name": "FixedIPs",
             "namespace": "http://docs.openstack.org/compute/ext/fixed_ips/api/v2",
@@ -241,6 +305,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-hide-server-addresses",
+            "description": "Support hiding server addresses in certain states.",
+            "links": [],
+            "name": "HideServerAddresses",
+            "namespace": "http://docs.openstack.org/compute/ext/hide_server_addresses/api/v1.1",
+            "updated": "2012-12-11T00:00:00+00:00"
+        },
+        {
             "alias": "os-hosts",
             "description": "%(text)s",
             "links": [],
@@ -301,7 +373,15 @@
             "description": "%(text)s",
             "links": [],
             "name": "Networks",
-            "namespace": "http://docs.openstack.org/compute/ext/networks/api/v1.1",
+            "namespace": "http://docs.openstack.org/compute/ext/os-networks/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-tenant-networks",
+            "description": "%(text)s",
+            "links": [],
+            "name": "OSTenantNetworks",
+            "namespace": "http://docs.openstack.org/compute/ext/os-tenant-networks/api/v2",
             "updated": "%(timestamp)s"
         },
         {
@@ -337,6 +417,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-security-group-default-rules",
+            "description": "%(text)s",
+            "links": [],
+            "name": "SecurityGroupDefaultRules",
+            "namespace": "http://docs.openstack.org/compute/ext/securitygroupdefaultrules/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-security-groups",
             "description": "%(text)s",
             "links": [],
@@ -351,6 +439,14 @@
             "name": "ServerDiagnostics",
             "namespace": "http://docs.openstack.org/compute/ext/server-diagnostics/api/v1.1",
             "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-server-password",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ServerPassword",
+            "namespace": "http://docs.openstack.org/compute/ext/server-password/api/v2",
+            "updated": "2012-11-29T00:00:00+00:00"
         },
         {
             "alias": "os-server-start-stop",
@@ -398,6 +494,14 @@
             "links": [],
             "name": "Volumes",
             "namespace": "http://docs.openstack.org/compute/ext/volumes/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-instance-actions",
+            "description": "%(text)s",
+            "links": [],
+            "name": "InstanceActions",
+            "namespace": "http://docs.openstack.org/compute/ext/instance-actions/api/v1.1",
             "updated": "%(timestamp)s"
         }
     ]

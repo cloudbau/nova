@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -26,4 +26,6 @@ refer to the IBM Redbook[1] publication.
     May 2011. <http://www.redbooks.ibm.com/abstracts/sg247940.html>
 """
 
-from nova.virt.powervm.driver import PowerVMDriver
+from nova.virt.powervm import driver
+
+PowerVMDriver = driver.PowerVMDriver

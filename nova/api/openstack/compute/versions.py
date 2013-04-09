@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -26,9 +26,9 @@ from nova.openstack.common import timeutils
 LINKS = {
    'v2.0': {
        'pdf': 'http://docs.openstack.org/'
-               'api/openstack-compute/1.1/os-compute-devguide-1.1.pdf',
+               'api/openstack-compute/2/os-compute-devguide-2.pdf',
        'wadl': 'http://docs.openstack.org/'
-               'api/openstack-compute/1.1/wadl/os-compute-1.1.wadl',
+               'api/openstack-compute/2/wadl/os-compute-2.wadl'
     },
 }
 

@@ -18,15 +18,15 @@
 #    under the License.
 
 
-"""Network-releated utilities for supporting libvirt connection code."""
+"""Network-related utilities for supporting libvirt connection code."""
 
 
 import netaddr
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
 
 CONF = cfg.CONF
-CONF.import_opt('use_ipv6', 'nova.config')
+CONF.import_opt('use_ipv6', 'nova.netconf')
 CONF.import_opt('injected_network_template', 'nova.virt.disk.api')
 
 Template = None
@@ -66,6 +66,9 @@ def get_injected_network_template(network_info, use_ipv6=CONF.use_ipv6,
     Note: this code actually depends on the legacy network_info, but will
     convert the type itself if necessary.
     """
+
+    if network_info is None:
+        return None
 
     # the code below depends on the legacy 'network_info'
     if hasattr(network_info, 'legacy'):

@@ -18,12 +18,19 @@
 Client side of the scheduler manager RPC API.
 """
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import jsonutils
 import nova.openstack.common.rpc.proxy
 
+rpcapi_opts = [
+    cfg.StrOpt('scheduler_topic',
+               default='scheduler',
+               help='the topic scheduler nodes listen on'),
+]
+
 CONF = cfg.CONF
-CONF.import_opt('scheduler_topic', 'nova.config')
+CONF.register_opts(rpcapi_opts)
 
 
 class SchedulerAPI(nova.openstack.common.rpc.proxy.RpcProxy):
@@ -49,6 +56,8 @@ class SchedulerAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         2.3 - Remove create_volume()
         2.4 - Change update_service_capabilities()
                 - accepts a list of capabilities
+        2.5 - Add get_backdoor_port()
+        2.6 - Add select_hosts()
     '''
 
     #
@@ -106,3 +115,13 @@ class SchedulerAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 service_name=service_name, host=host,
                 capabilities=capabilities),
                 version='2.4')
+
+    def get_backdoor_port(self, context, host):
+        return self.call(context, self.make_msg('get_backdoor_port'),
+                         version='2.5')
+
+    def select_hosts(self, ctxt, request_spec, filter_properties):
+        return self.call(ctxt, self.make_msg('select_hosts',
+                request_spec=request_spec,
+                filter_properties=filter_properties),
+                version='2.6')

@@ -1,4 +1,4 @@
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -57,7 +57,7 @@ class MockEntrypoint(pkg_resources.EntryPoint):
 
 
 class APITestCase(test.TestCase):
-    """Test case for the plugin api extension interface"""
+    """Test case for the plugin api extension interface."""
     def test_add_extension(self):
         def mock_load(_s):
             return TestPluginClass()

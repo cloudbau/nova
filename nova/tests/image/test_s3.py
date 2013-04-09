@@ -23,6 +23,7 @@ import tempfile
 
 import fixtures
 
+from nova.api.ec2 import ec2utils
 from nova import context
 import nova.db.api
 from nova import exception
@@ -93,6 +94,7 @@ class TestS3ImageService(test.TestCase):
 
         fake.stub_out_image_service(self.stubs)
         self.image_service = s3.S3ImageService()
+        self.addCleanup(ec2utils.reset_cache)
 
     def tearDown(self):
         super(TestS3ImageService, self).tearDown()
@@ -129,7 +131,7 @@ class TestS3ImageService(test.TestCase):
                  'snapshot_id': 'snap-12345678',
                  'delete_on_termination': True},
                 {'device_name': '/dev/sda2',
-                 'virutal_name': 'ephemeral0'},
+                 'virtual_name': 'ephemeral0'},
                 {'device_name': '/dev/sdb0',
                  'no_device': True}]}}
         _manifest, image, image_uuid = self.image_service._s3_parse_manifest(
@@ -156,7 +158,7 @@ class TestS3ImageService(test.TestCase):
              'snapshot_id': 'snap-12345678',
              'delete_on_termination': True},
             {'device_name': '/dev/sda2',
-             'virutal_name': 'ephemeral0'},
+             'virtual_name': 'ephemeral0'},
             {'device_name': '/dev/sdb0',
              'no_device': True}]
         self.assertEqual(block_device_mapping, expected_bdm)

@@ -29,11 +29,11 @@ import time
 
 import eventlet
 import greenlet
+from oslo.config import cfg
 
+from nova import conductor
 from nova import context
-from nova import db
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import eventlet_backdoor
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
@@ -49,14 +49,20 @@ service_opts = [
     cfg.IntOpt('report_interval',
                default=10,
                help='seconds between nodes reporting state to datastore'),
-    cfg.IntOpt('periodic_interval',
-               default=60,
-               help='seconds between running periodic tasks'),
+    cfg.BoolOpt('periodic_enable',
+               default=True,
+               help='enable periodic tasks'),
     cfg.IntOpt('periodic_fuzzy_delay',
                default=60,
                help='range of seconds to randomly delay when starting the'
                     ' periodic task scheduler to reduce stampeding.'
                     ' (Disable by setting to 0)'),
+    cfg.ListOpt('enabled_apis',
+                default=['ec2', 'osapi_compute', 'metadata'],
+                help='a list of APIs to enable by default'),
+    cfg.ListOpt('enabled_ssl_apis',
+                default=[],
+                help='a list of APIs with enabled SSL'),
     cfg.StrOpt('ec2_listen',
                default="0.0.0.0",
                help='IP address for EC2 API to listen'),
@@ -87,12 +93,29 @@ service_opts = [
     cfg.IntOpt('metadata_workers',
                default=None,
                help='Number of workers for metadata service'),
+    cfg.StrOpt('compute_manager',
+               default='nova.compute.manager.ComputeManager',
+               help='full class name for the Manager for compute'),
+    cfg.StrOpt('console_manager',
+               default='nova.console.manager.ConsoleProxyManager',
+               help='full class name for the Manager for console proxy'),
+    cfg.StrOpt('cert_manager',
+               default='nova.cert.manager.CertManager',
+               help='full class name for the Manager for cert'),
+    cfg.StrOpt('network_manager',
+               default='nova.network.manager.VlanManager',
+               help='full class name for the Manager for network'),
+    cfg.StrOpt('scheduler_manager',
+               default='nova.scheduler.manager.SchedulerManager',
+               help='full class name for the Manager for scheduler'),
+    cfg.IntOpt('service_down_time',
+               default=60,
+               help='maximum time since last check-in for up service'),
     ]
 
 CONF = cfg.CONF
 CONF.register_opts(service_opts)
-CONF.import_opt('host', 'nova.config')
-CONF.import_opt('node_availability_zone', 'nova.config')
+CONF.import_opt('host', 'nova.netconf')
 
 
 class SignalExit(SystemExit):
@@ -335,7 +358,7 @@ class ProcessLauncher(object):
         return wrap
 
     def wait(self):
-        """Loop waiting on children to die and respawning as necessary"""
+        """Loop waiting on children to die and respawning as necessary."""
         while self.running:
             wrap = self._wait_child()
             if not wrap:
@@ -371,36 +394,47 @@ class Service(object):
     it state to the database services table."""
 
     def __init__(self, host, binary, topic, manager, report_interval=None,
-                 periodic_interval=None, periodic_fuzzy_delay=None,
+                 periodic_enable=None, periodic_fuzzy_delay=None,
+                 periodic_interval_max=None, db_allowed=True,
                  *args, **kwargs):
         self.host = host
         self.binary = binary
         self.topic = topic
         self.manager_class_name = manager
+        # NOTE(russellb) We want to make sure to create the servicegroup API
+        # instance early, before creating other things such as the manager,
+        # that will also create a servicegroup API instance.  Internally, the
+        # servicegroup only allocates a single instance of the driver API and
+        # we want to make sure that our value of db_allowed is there when it
+        # gets created.  For that to happen, this has to be the first instance
+        # of the servicegroup API.
+        self.servicegroup_api = servicegroup.API(db_allowed=db_allowed)
         manager_class = importutils.import_class(self.manager_class_name)
         self.manager = manager_class(host=self.host, *args, **kwargs)
         self.report_interval = report_interval
-        self.periodic_interval = periodic_interval
+        self.periodic_enable = periodic_enable
         self.periodic_fuzzy_delay = periodic_fuzzy_delay
+        self.periodic_interval_max = periodic_interval_max
         self.saved_args, self.saved_kwargs = args, kwargs
         self.timers = []
         self.backdoor_port = None
-        self.servicegroup_api = servicegroup.API()
+        self.conductor_api = conductor.API(use_local=db_allowed)
+        self.conductor_api.wait_until_ready(context.get_admin_context())
 
     def start(self):
-        vcs_string = version.version_string_with_vcs()
-        LOG.audit(_('Starting %(topic)s node (version %(vcs_string)s)'),
-                  {'topic': self.topic, 'vcs_string': vcs_string})
+        verstr = version.version_string_with_package()
+        LOG.audit(_('Starting %(topic)s node (version %(version)s)'),
+                  {'topic': self.topic, 'version': verstr})
+        self.basic_config_check()
         self.manager.init_host()
         self.model_disconnected = False
         ctxt = context.get_admin_context()
         try:
-            service_ref = db.service_get_by_args(ctxt,
-                                                 self.host,
-                                                 self.binary)
-            self.service_id = service_ref['id']
+            self.service_ref = self.conductor_api.service_get_by_args(ctxt,
+                    self.host, self.binary)
+            self.service_id = self.service_ref['id']
         except exception.NotFound:
-            self._create_service_ref(ctxt)
+            self.service_ref = self._create_service_ref(ctxt)
 
         if self.backdoor_port is not None:
             self.manager.backdoor_port = self.backdoor_port
@@ -433,26 +467,27 @@ class Service(object):
         if pulse:
             self.timers.append(pulse)
 
-        if self.periodic_interval:
+        if self.periodic_enable:
             if self.periodic_fuzzy_delay:
                 initial_delay = random.randint(0, self.periodic_fuzzy_delay)
             else:
                 initial_delay = None
 
-            periodic = utils.LoopingCall(self.periodic_tasks)
-            periodic.start(interval=self.periodic_interval,
-                           initial_delay=initial_delay)
+            periodic = utils.DynamicLoopingCall(self.periodic_tasks)
+            periodic.start(initial_delay=initial_delay,
+                           periodic_interval_max=self.periodic_interval_max)
             self.timers.append(periodic)
 
     def _create_service_ref(self, context):
-        zone = CONF.node_availability_zone
-        service_ref = db.service_create(context,
-                                        {'host': self.host,
-                                         'binary': self.binary,
-                                         'topic': self.topic,
-                                         'report_count': 0,
-                                         'availability_zone': zone})
-        self.service_id = service_ref['id']
+        svc_values = {
+            'host': self.host,
+            'binary': self.binary,
+            'topic': self.topic,
+            'report_count': 0
+        }
+        service = self.conductor_api.service_create(context, svc_values)
+        self.service_id = service['id']
+        return service
 
     def __getattr__(self, key):
         manager = self.__dict__.get('manager', None)
@@ -460,8 +495,9 @@ class Service(object):
 
     @classmethod
     def create(cls, host=None, binary=None, topic=None, manager=None,
-               report_interval=None, periodic_interval=None,
-               periodic_fuzzy_delay=None):
+               report_interval=None, periodic_enable=None,
+               periodic_fuzzy_delay=None, periodic_interval_max=None,
+               db_allowed=True):
         """Instantiates class and passes back application object.
 
         :param host: defaults to CONF.host
@@ -469,8 +505,9 @@ class Service(object):
         :param topic: defaults to bin_name - 'nova-' part
         :param manager: defaults to CONF.<topic>_manager
         :param report_interval: defaults to CONF.report_interval
-        :param periodic_interval: defaults to CONF.periodic_interval
+        :param periodic_enable: defaults to CONF.periodic_enable
         :param periodic_fuzzy_delay: defaults to CONF.periodic_fuzzy_delay
+        :param periodic_interval_max: if set, the max time to wait between runs
 
         """
         if not host:
@@ -482,18 +519,19 @@ class Service(object):
         if not manager:
             manager_cls = ('%s_manager' %
                            binary.rpartition('nova-')[2])
-            CONF.import_opt(manager_cls, 'nova.config')
             manager = CONF.get(manager_cls, None)
         if report_interval is None:
             report_interval = CONF.report_interval
-        if periodic_interval is None:
-            periodic_interval = CONF.periodic_interval
+        if periodic_enable is None:
+            periodic_enable = CONF.periodic_enable
         if periodic_fuzzy_delay is None:
             periodic_fuzzy_delay = CONF.periodic_fuzzy_delay
         service_obj = cls(host, binary, topic, manager,
                           report_interval=report_interval,
-                          periodic_interval=periodic_interval,
-                          periodic_fuzzy_delay=periodic_fuzzy_delay)
+                          periodic_enable=periodic_enable,
+                          periodic_fuzzy_delay=periodic_fuzzy_delay,
+                          periodic_interval_max=periodic_interval_max,
+                          db_allowed=db_allowed)
 
         return service_obj
 
@@ -501,7 +539,8 @@ class Service(object):
         """Destroy the service object in the datastore."""
         self.stop()
         try:
-            db.service_destroy(context.get_admin_context(), self.service_id)
+            self.conductor_api.service_destroy(context.get_admin_context(),
+                                               self.service_id)
         except exception.NotFound:
             LOG.warn(_('Service killed that has no database entry'))
 
@@ -529,13 +568,23 @@ class Service(object):
     def periodic_tasks(self, raise_on_error=False):
         """Tasks to be run at a periodic interval."""
         ctxt = context.get_admin_context()
-        self.manager.periodic_tasks(ctxt, raise_on_error=raise_on_error)
+        return self.manager.periodic_tasks(ctxt, raise_on_error=raise_on_error)
+
+    def basic_config_check(self):
+        """Perform basic config checks before starting processing."""
+        # Make sure the tempdir exists and is writable
+        try:
+            with utils.tempdir() as tmpdir:
+                pass
+        except Exception as e:
+            LOG.error(_('Temporary directory is invalid: %s'), e)
+            sys.exit(1)
 
 
 class WSGIService(object):
     """Provides ability to launch API from a 'paste' configuration."""
 
-    def __init__(self, name, loader=None):
+    def __init__(self, name, loader=None, use_ssl=False, max_url_len=None):
         """Initialize, but do not start the WSGI server.
 
         :param name: The name of the WSGI server given to the loader.
@@ -550,10 +599,13 @@ class WSGIService(object):
         self.host = getattr(CONF, '%s_listen' % name, "0.0.0.0")
         self.port = getattr(CONF, '%s_listen_port' % name, 0)
         self.workers = getattr(CONF, '%s_workers' % name, None)
+        self.use_ssl = use_ssl
         self.server = wsgi.Server(name,
                                   self.app,
                                   host=self.host,
-                                  port=self.port)
+                                  port=self.port,
+                                  use_ssl=self.use_ssl,
+                                  max_url_len=max_url_len)
         # Pull back actual port used
         self.port = self.server.port
         self.backdoor_port = None
@@ -569,7 +621,7 @@ class WSGIService(object):
 
         """
         fl = '%s_manager' % self.name
-        if not fl in CONF:
+        if fl not in CONF:
             return None
 
         manager_class_name = CONF.get(fl, None)

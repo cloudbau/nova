@@ -1,4 +1,4 @@
-#   Copyright 2011 OpenStack LLC.
+#   Copyright 2011 OpenStack Foundation
 #
 #   Licensed under the Apache License, Version 2.0 (the "License"); you may
 #   not use this file except in compliance with the License. You may obtain
@@ -12,11 +12,11 @@
 #   License for the specific language governing permissions and limitations
 #   under the License.
 
+from oslo.config import cfg
 import webob
 
 from nova import compute
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova import test
 from nova.tests.api.openstack import fakes
@@ -113,3 +113,18 @@ class RescueTest(test.TestCase):
 
         resp = req.get_response(self.app)
         self.assertEqual(resp.status_int, 409)
+
+    def test_rescue_raises_unrescuable(self):
+        body = dict(rescue=None)
+
+        def fake_rescue(*args, **kwargs):
+            raise exception.InstanceNotRescuable('fake message')
+
+        self.stubs.Set(compute.api.API, "rescue", fake_rescue)
+        req = webob.Request.blank('/v2/fake/servers/test_inst/action')
+        req.method = "POST"
+        req.body = jsonutils.dumps(body)
+        req.headers["content-type"] = "application/json"
+
+        resp = req.get_response(self.app)
+        self.assertEqual(resp.status_int, 400)

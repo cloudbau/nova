@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -20,8 +20,8 @@ import os
 import re
 import urlparse
 
+from oslo.config import cfg
 import webob
-from xml.dom import minidom
 
 from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
@@ -29,7 +29,6 @@ from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova import quota
 
@@ -146,7 +145,7 @@ def get_pagination_params(request):
 
 
 def _get_limit_param(request):
-    """Extract integer limit from request or fail"""
+    """Extract integer limit from request or fail."""
     try:
         limit = int(request.GET['limit'])
     except ValueError:
@@ -159,7 +158,7 @@ def _get_limit_param(request):
 
 
 def _get_marker_param(request):
-    """Extract marker id from request or fail"""
+    """Extract marker id from request or fail."""
     return request.GET['marker']
 
 
@@ -201,7 +200,7 @@ def limited(items, request, max_limit=CONF.osapi_max_limit):
 
 
 def get_limit_and_marker(request, max_limit=CONF.osapi_max_limit):
-    """get limited parameter from request"""
+    """get limited parameter from request."""
     params = get_pagination_params(request)
     limit = params.get('limit', max_limit)
     limit = min(max_limit, limit)
@@ -356,7 +355,7 @@ def raise_http_conflict_for_instance_invalid_state(exc, action):
 
 class MetadataDeserializer(wsgi.MetadataXMLDeserializer):
     def deserialize(self, text):
-        dom = minidom.parseString(text)
+        dom = xmlutil.safe_minidom_parse_string(text)
         metadata_node = self.find_first_child_named(dom, "metadata")
         metadata = self.extract_metadata(metadata_node)
         return {'body': {'metadata': metadata}}
@@ -364,7 +363,7 @@ class MetadataDeserializer(wsgi.MetadataXMLDeserializer):
 
 class MetaItemDeserializer(wsgi.MetadataXMLDeserializer):
     def deserialize(self, text):
-        dom = minidom.parseString(text)
+        dom = xmlutil.safe_minidom_parse_string(text)
         metadata_item = self.extract_metadata(dom)
         return {'body': {'meta': metadata_item}}
 
@@ -372,7 +371,7 @@ class MetaItemDeserializer(wsgi.MetadataXMLDeserializer):
 class MetadataXMLDeserializer(wsgi.XMLDeserializer):
 
     def extract_metadata(self, metadata_node):
-        """Marshal the metadata attribute of a parsed request"""
+        """Marshal the metadata attribute of a parsed request."""
         if metadata_node is None:
             return {}
         metadata = {}
@@ -382,7 +381,7 @@ class MetadataXMLDeserializer(wsgi.XMLDeserializer):
         return metadata
 
     def _extract_metadata_container(self, datastring):
-        dom = minidom.parseString(datastring)
+        dom = xmlutil.safe_minidom_parse_string(datastring)
         metadata_node = self.find_first_child_named(dom, "metadata")
         metadata = self.extract_metadata(metadata_node)
         return {'body': {'metadata': metadata}}
@@ -394,7 +393,7 @@ class MetadataXMLDeserializer(wsgi.XMLDeserializer):
         return self._extract_metadata_container(datastring)
 
     def update(self, datastring):
-        dom = minidom.parseString(datastring)
+        dom = xmlutil.safe_minidom_parse_string(datastring)
         metadata_item = self.extract_metadata(dom)
         return {'body': {'meta': metadata_item}}
 

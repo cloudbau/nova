@@ -1,4 +1,4 @@
-# Copyright (c) 2011 OpenStack, LLC.
+# Copyright (c) 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -14,73 +14,92 @@
 #    under the License.
 
 from lxml import etree
+import testtools
 import webob.exc
 
 from nova.api.openstack.compute.contrib import hosts as os_hosts
 from nova.compute import power_state
 from nova.compute import vm_states
-from nova import context
+from nova import context as context_maker
 from nova import db
+from nova import exception
 from nova.openstack.common import log as logging
 from nova import test
+from nova.tests import fake_hosts
+from nova.tests import utils
 
 LOG = logging.getLogger(__name__)
-HOST_LIST = {"hosts": [
-        {"host_name": "host_c1", "service": "compute", "zone": "nova"},
-        {"host_name": "host_c2", "service": "compute", "zone": "nonova"},
-        {"host_name": "host_v1", "service": "volume", "zone": "nova"},
-        {"host_name": "host_v2", "service": "volume", "zone": "nonova"}]
-        }
-HOST_LIST_NOVA_ZONE = [
-        {"host_name": "host_c1", "service": "compute", "zone": "nova"},
-        {"host_name": "host_v1", "service": "volume", "zone": "nova"}]
-SERVICES_LIST = [
-        {"host": "host_c1", "topic": "compute", "availability_zone": "nova"},
-        {"host": "host_c2", "topic": "compute", "availability_zone": "nonova"},
-        {"host": "host_v1", "topic": "volume", "availability_zone": "nova"},
-        {"host": "host_v2", "topic": "volume", "availability_zone": "nonova"}]
 
 
-def stub_service_get_all(self, req):
-    return SERVICES_LIST
+def stub_service_get_all(context, disabled=None):
+    return fake_hosts.SERVICES_LIST
 
 
-def stub_set_host_enabled(context, host, enabled):
-    if host == "notimplemented":
+def stub_service_get_by_host_and_topic(context, host_name, topic):
+    for service in stub_service_get_all(context):
+        if service['host'] == host_name and service['topic'] == topic:
+            return service
+
+
+def stub_set_host_enabled(context, host_name, enabled):
+    """
+    Simulates three possible behaviours for VM drivers or compute drivers when
+    enabling or disabling a host.
+
+    'enabled' means new instances can go to this host
+    'disabled' means they can't
+    """
+    results = {True: "enabled", False: "disabled"}
+    if host_name == "notimplemented":
+        # The vm driver for this host doesn't support this feature
         raise NotImplementedError()
+    elif host_name == "dummydest":
+        # The host does not exist
+        raise exception.ComputeHostNotFound(host=host_name)
+    elif host_name == "host_c2":
+        # Simulate a failure
+        return results[not enabled]
+    else:
+        # Do the right thing
+        return results[enabled]
+
+
+def stub_set_host_maintenance(context, host_name, mode):
     # We'll simulate success and failure by assuming
     # that 'host_c1' always succeeds, and 'host_c2'
     # always fails
-    fail = (host == "host_c2")
-    status = "enabled" if (enabled != fail) else "disabled"
-    return status
-
-
-def stub_set_host_maintenance(context, host, mode):
-    if host == "notimplemented":
+    results = {True: "on_maintenance", False: "off_maintenance"}
+    if host_name == "notimplemented":
+        # The vm driver for this host doesn't support this feature
         raise NotImplementedError()
-    # We'll simulate success and failure by assuming
-    # that 'host_c1' always succeeds, and 'host_c2'
-    # always fails
-    fail = (host == "host_c2")
-    maintenance = "on_maintenance" if (mode != fail) else "off_maintenance"
-    return maintenance
+    elif host_name == "dummydest":
+        # The host does not exist
+        raise exception.ComputeHostNotFound(host=host_name)
+    elif host_name == "host_c2":
+        # Simulate a failure
+        return results[not mode]
+    else:
+        # Do the right thing
+        return results[mode]
 
 
-def stub_host_power_action(context, host, action):
-    if host == "notimplemented":
+def stub_host_power_action(context, host_name, action):
+    if host_name == "notimplemented":
         raise NotImplementedError()
+    elif host_name == "dummydest":
+        # The host does not exist
+        raise exception.ComputeHostNotFound(host=host_name)
     return action
 
 
 def _create_instance(**kwargs):
-    """Create a test instance"""
-    ctxt = context.get_admin_context()
+    """Create a test instance."""
+    ctxt = context_maker.get_admin_context()
     return db.instance_create(ctxt, _create_instance_dict(**kwargs))
 
 
 def _create_instance_dict(**kwargs):
-    """Create a dictionary for a test instance"""
+    """Create a dictionary for a test instance."""
     inst = {}
     inst['image_ref'] = 'cedef40a-ed67-4d10-800e-17455edce175'
     inst['reservation_id'] = 'r-fakeres'
@@ -103,12 +122,12 @@ def _create_instance_dict(**kwargs):
 
 
 class FakeRequest(object):
-    environ = {"nova.context": context.get_admin_context()}
+    environ = {"nova.context": context_maker.get_admin_context()}
     GET = {}
 
 
 class FakeRequestWithNovaZone(object):
-    environ = {"nova.context": context.get_admin_context()}
+    environ = {"nova.context": context_maker.get_admin_context()}
     GET = {"zone": "nova"}
 
 
@@ -118,14 +137,22 @@ class HostTestCase(test.TestCase):
     def setUp(self):
         super(HostTestCase, self).setUp()
         self.controller = os_hosts.HostController()
+        self.hosts_api = self.controller.api
         self.req = FakeRequest()
+
+        # Pretend we have fake_hosts.HOST_LIST in the DB
         self.stubs.Set(db, 'service_get_all',
                        stub_service_get_all)
-        self.stubs.Set(self.controller.api, 'set_host_enabled',
+        # Only hosts in our fake DB exist
+        self.stubs.Set(db, 'service_get_by_host_and_topic',
+                       stub_service_get_by_host_and_topic)
+        # 'host_c1' always succeeds, and 'host_c2'
+        self.stubs.Set(self.hosts_api, 'set_host_enabled',
                        stub_set_host_enabled)
-        self.stubs.Set(self.controller.api, 'set_host_maintenance',
+        # 'host_c1' always succeeds, and 'host_c2'
+        self.stubs.Set(self.hosts_api, 'set_host_maintenance',
                        stub_set_host_maintenance)
-        self.stubs.Set(self.controller.api, 'host_power_action',
+        self.stubs.Set(self.hosts_api, 'host_power_action',
                        stub_host_power_action)
 
     def _test_host_update(self, host, key, val, expected_value):
@@ -135,13 +162,16 @@ class HostTestCase(test.TestCase):
 
     def test_list_hosts(self):
         """Verify that the compute hosts are returned."""
-        hosts = os_hosts._list_hosts(self.req)
-        self.assertEqual(hosts, HOST_LIST['hosts'])
+        result = self.controller.index(self.req)
+        self.assert_('hosts' in result)
+        hosts = result['hosts']
+        self.assertEqual(fake_hosts.HOST_LIST, hosts)
 
     def test_list_hosts_with_zone(self):
-        req = FakeRequestWithNovaZone()
-        hosts = os_hosts._list_hosts(req)
-        self.assertEqual(hosts, HOST_LIST_NOVA_ZONE)
+        result = self.controller.index(FakeRequestWithNovaZone())
+        self.assert_('hosts' in result)
+        hosts = result['hosts']
+        self.assertEqual(fake_hosts.HOST_LIST_NOVA_ZONE, hosts)
 
     def test_disable_host(self):
         self._test_host_update('host_c1', 'status', 'disable', 'disabled')
@@ -201,6 +231,31 @@ class HostTestCase(test.TestCase):
     def test_host_reboot_notimpl(self):
         self._test_host_power_action_notimpl(self.controller.reboot)
 
+    def test_host_status_bad_host(self):
+        # A host given as an argument does not exist.
+        self.req.environ["nova.context"].is_admin = True
+        dest = 'dummydest'
+        with testtools.ExpectedException(webob.exc.HTTPNotFound,
+                                         ".*%s.*" % dest):
+            self.controller.update(self.req, dest, body={'status': 'enable'})
+
+    def test_host_maintenance_bad_host(self):
+        # A host given as an argument does not exist.
+        self.req.environ["nova.context"].is_admin = True
+        dest = 'dummydest'
+        with testtools.ExpectedException(webob.exc.HTTPNotFound,
+                                         ".*%s.*" % dest):
+            self.controller.update(self.req, dest,
+                                   body={'maintenance_mode': 'enable'})
+
+    def test_host_power_action_bad_host(self):
+        # A host given as an argument does not exist.
+        self.req.environ["nova.context"].is_admin = True
+        dest = 'dummydest'
+        with testtools.ExpectedException(webob.exc.HTTPNotFound,
+                                         ".*%s.*" % dest):
+            self.controller.reboot(self.req, dest)
+
     def test_bad_status_value(self):
         bad_body = {"status": "bad"}
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
@@ -214,21 +269,17 @@ class HostTestCase(test.TestCase):
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                 self.req, "host_c1", bad_body)
 
-    def test_bad_update_key_and_correct_udpate_key(self):
+    def test_bad_update_key_and_correct_update_key(self):
         bad_body = {"status": "disable", "crazy": "bad"}
         self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
                 self.req, "host_c1", bad_body)
 
-    def test_good_udpate_keys(self):
+    def test_good_update_keys(self):
         body = {"status": "disable", "maintenance_mode": "enable"}
         result = self.controller.update(self.req, 'host_c1', body)
         self.assertEqual(result["host"], "host_c1")
         self.assertEqual(result["status"], "disabled")
         self.assertEqual(result["maintenance_mode"], "on_maintenance")
-
-    def test_bad_host(self):
-        self.assertRaises(webob.exc.HTTPNotFound, self.controller.update,
-                self.req, "bogus_host_name", {"status": "disable"})
 
     def test_show_forbidden(self):
         self.req.environ["nova.context"].is_admin = False
@@ -239,18 +290,18 @@ class HostTestCase(test.TestCase):
         self.req.environ["nova.context"].is_admin = True
 
     def test_show_host_not_exist(self):
-        """A host given as an argument does not exists."""
+        # A host given as an argument does not exist.
         self.req.environ["nova.context"].is_admin = True
         dest = 'dummydest'
-        self.assertRaises(webob.exc.HTTPNotFound,
-                          self.controller.show,
-                          self.req, dest)
+        with testtools.ExpectedException(webob.exc.HTTPNotFound,
+                                         ".*%s.*" % dest):
+            self.controller.show(self.req, dest)
 
     def _create_compute_service(self):
         """Create compute-manager(ComputeNode and Service record)."""
-        ctxt = context.get_admin_context()
+        ctxt = self.req.environ["nova.context"]
         dic = {'host': 'dummy', 'binary': 'nova-compute', 'topic': 'compute',
-               'report_count': 0, 'availability_zone': 'dummyzone'}
+               'report_count': 0}
         s_ref = db.service_create(ctxt, dic)
 
         dic = {'service_id': s_ref['id'],
@@ -263,8 +314,8 @@ class HostTestCase(test.TestCase):
         return db.service_get(ctxt, s_ref['id'])
 
     def test_show_no_project(self):
-        """No instance are running on the given host."""
-        ctxt = context.get_admin_context()
+        """No instances are running on the given host."""
+        ctxt = context_maker.get_admin_context()
         s_ref = self._create_compute_service()
 
         result = self.controller.show(self.req, s_ref['host'])
@@ -280,7 +331,7 @@ class HostTestCase(test.TestCase):
 
     def test_show_works_correctly(self):
         """show() works correctly as expected."""
-        ctxt = context.get_admin_context()
+        ctxt = context_maker.get_admin_context()
         s_ref = self._create_compute_service()
         i_ref1 = _create_instance(project_id='p-01', host=s_ref['host'])
         i_ref2 = _create_instance(project_id='p-02', vcpus=3,
@@ -307,18 +358,20 @@ class HostSerializerTest(test.TestCase):
 
     def test_index_serializer(self):
         serializer = os_hosts.HostIndexTemplate()
-        text = serializer.serialize(HOST_LIST)
+        text = serializer.serialize(fake_hosts.OS_API_HOST_LIST)
 
         tree = etree.fromstring(text)
 
         self.assertEqual('hosts', tree.tag)
-        self.assertEqual(len(HOST_LIST['hosts']), len(tree))
-        for i in range(len(HOST_LIST)):
+        self.assertEqual(len(fake_hosts.HOST_LIST), len(tree))
+        for i in range(len(fake_hosts.HOST_LIST)):
             self.assertEqual('host', tree[i].tag)
-            self.assertEqual(HOST_LIST['hosts'][i]['host_name'],
+            self.assertEqual(fake_hosts.HOST_LIST[i]['host_name'],
                              tree[i].get('host_name'))
-            self.assertEqual(HOST_LIST['hosts'][i]['service'],
+            self.assertEqual(fake_hosts.HOST_LIST[i]['service'],
                              tree[i].get('service'))
+            self.assertEqual(fake_hosts.HOST_LIST[i]['zone'],
+                             tree[i].get('zone'))
 
     def test_update_serializer_with_status(self):
         exemplar = dict(host='host_c1', status='enabled')
@@ -376,3 +429,9 @@ class HostSerializerTest(test.TestCase):
         result = self.deserializer.deserialize(intext)
 
         self.assertEqual(dict(body=exemplar), result)
+
+    def test_corrupt_xml(self):
+        self.assertRaises(
+                exception.MalformedRequestBody,
+                self.deserializer.deserialize,
+                utils.killer_xml_body())

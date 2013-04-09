@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -49,7 +49,11 @@ def load_from_conf_data(conf_data):
     attribs = dict(item.split("=") for item in list(cf_splitter))
     lpar = LPAR()
     for (key, value) in attribs.items():
-        lpar[key] = value
+        try:
+            lpar[key] = value
+        except exception.PowerVMLPARAttributeNotFound, e:
+            LOG.info(_('Encountered unknown LPAR attribute: %s\n'
+                       'Continuing without storing') % key)
     return lpar
 
 

@@ -1,4 +1,4 @@
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -25,7 +25,7 @@ class RetryFilter(filters.BaseHostFilter):
     """
 
     def host_passes(self, host_state, filter_properties):
-        """Skip nodes that have already been attempted"""
+        """Skip nodes that have already been attempted."""
         retry = filter_properties.get('retry', None)
         if not retry:
             # Re-scheduling is disabled
@@ -33,10 +33,13 @@ class RetryFilter(filters.BaseHostFilter):
             return True
 
         hosts = retry.get('hosts', [])
-        host = (host_state.host, host_state.nodename)
+        host = [host_state.host, host_state.nodename]
 
-        LOG.debug(_("Previously tried hosts: %(hosts)s.  (host=%(host)s)") %
-                locals())
+        passes = host not in hosts
+        pass_msg = "passes" if passes else "fails"
+
+        LOG.debug(_("Host %(host)s %(pass_msg)s.  Previously tried hosts: "
+                    "%(hosts)s") % locals())
 
         # Host passes if it's not in the list of previously attempted hosts:
-        return host not in hosts
+        return passes

@@ -2,21 +2,23 @@
  wrapper for pyflakes to ignore gettext based warning:
      "undefined name '_'"
 
- From https://bugs.launchpad.net/pyflakes/+bug/844592
+ Synced in from openstack-common
 """
-import __builtin__
-import os
+
+__all__ = ['main']
+
+import __builtin__ as builtins
 import sys
 
-from pyflakes.scripts.pyflakes import main
+import pyflakes.api
+from pyflakes import checker
+
+
+def main():
+    checker.Checker.builtIns = (set(dir(builtins)) |
+                                set(['_']) |
+                                set(checker._MAGIC_GLOBALS))
+    sys.exit(pyflakes.api.main())
 
 if __name__ == "__main__":
-    names = os.environ.get('PYFLAKES_BUILTINS', '_')
-    names = [x.strip() for x in names.split(',')]
-    for x in names:
-        if not hasattr(__builtin__, x):
-            setattr(__builtin__, x, True)
-
-    del names, os, __builtin__
-
-    sys.exit(main())
+    main()

@@ -1,5 +1,3 @@
-import netaddr
-import webob
 from webob import exc
 
 from nova.api.openstack import extensions
@@ -54,7 +52,7 @@ class NetworkAssociateActionController(wsgi.Controller):
 
 
 class Networks_associate(extensions.ExtensionDescriptor):
-    """Network association support"""
+    """Network association support."""
 
     name = "NetworkAssociationSupport"
     alias = "os-networks-associate"

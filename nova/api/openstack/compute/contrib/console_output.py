@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # Copyright 2011 Grid Dynamics
 # Copyright 2011 Eldar Nugaev, Kirill Shileev, Ilya Alekseyev
 #
@@ -65,9 +65,11 @@ class ConsoleOutputController(wsgi.Controller):
                                                          length)
         except exception.NotFound:
             raise webob.exc.HTTPNotFound(_('Unable to get console'))
+        except exception.InstanceNotReady as e:
+            raise webob.exc.HTTPConflict(explanation=e.format_message())
 
         # XML output is not correctly escaped, so remove invalid characters
-        remove_re = re.compile('[\x00-\x08\x0B-\x0C\x0E-\x1F]')
+        remove_re = re.compile('[\x00-\x08\x0B-\x0C\x0E-\x1F-\x0D]')
         output = remove_re.sub('', output)
 
         return {'output': output}

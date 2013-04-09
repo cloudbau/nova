@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright 2010 OpenStack LLC
+#    Copyright 2010 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,13 +14,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import errno
 import glob
 import os
-import select
-
-from eventlet import greenpool
-from eventlet import greenthread
 
 from nova import exception
 from nova import test
@@ -32,6 +27,8 @@ class ExceptionTestCase(test.TestCase):
         raise exc()
 
     def test_exceptions_raise(self):
+        # NOTE(dprince): disable format errors since we are not passing kwargs
+        self.flags(fatal_exception_format_errors=False)
         for name in dir(exception):
             exc = getattr(exception, name)
             if isinstance(exc, type):

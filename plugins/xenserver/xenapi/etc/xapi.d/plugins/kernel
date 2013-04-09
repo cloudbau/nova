@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-# Copyright (c) 2012 OpenStack, LLC
+# Copyright (c) 2012 OpenStack Foundation
 # Copyright (c) 2010 Citrix Systems, Inc.
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
@@ -116,7 +116,7 @@ def _remove_file(filepath):
 
 
 def remove_kernel_ramdisk(session, args):
-    """Removes kernel and/or ramdisk from dom0's file system"""
+    """Removes kernel and/or ramdisk from dom0's file system."""
     kernel_file = optional(args, 'kernel-file')
     ramdisk_file = optional(args, 'ramdisk-file')
     if kernel_file:

@@ -37,31 +37,49 @@ these objects be simple dictionaries.
 :baremetal_db_backend:  string to lookup in the list of LazyPluggable backends.
                         `sqlalchemy` is the only supported backend right now.
 
-:baremetal_sql_connection:  string specifying the sqlalchemy connection to use,
-                            like: `sqlite:///var/lib/nova/nova.sqlite`.
+:[BAREMETAL] sql_connection: string specifying the sqlalchemy connection to
+                             use, like: `sqlite:///var/lib/nova/nova.sqlite`.
 
 """
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova import utils
 
-
+# NOTE(deva): we can't move baremetal_db_backend into an OptGroup yet
+#             because utils.LazyPluggable doesn't support reading from
+#             option groups. See bug #1093043.
 db_opts = [
-    cfg.StrOpt('baremetal_db_backend',
+    cfg.StrOpt('db_backend',
                default='sqlalchemy',
-               help='The backend to use for db'),
+               help='The backend to use for bare-metal database'),
     ]
 
+baremetal_group = cfg.OptGroup(name='baremetal',
+                               title='Baremetal Options')
+
 CONF = cfg.CONF
-CONF.register_opts(db_opts)
+CONF.register_group(baremetal_group)
+CONF.register_opts(db_opts, baremetal_group)
 
 IMPL = utils.LazyPluggable(
-        'baremetal_db_backend',
+        'db_backend',
+        config_group='baremetal',
         sqlalchemy='nova.virt.baremetal.db.sqlalchemy.api')
 
 
 def bm_node_get_all(context, service_host=None):
     return IMPL.bm_node_get_all(context,
+                                service_host=service_host)
+
+
+def bm_node_get_associated(context, service_host=None):
+    return IMPL.bm_node_get_associated(context,
+                                service_host=service_host)
+
+
+def bm_node_get_unassociated(context, service_host=None):
+    return IMPL.bm_node_get_unassociated(context,
                                 service_host=service_host)
 
 
@@ -83,6 +101,10 @@ def bm_node_get_by_instance_uuid(context, instance_uuid):
                                              instance_uuid)
 
 
+def bm_node_get_by_node_uuid(context, node_uuid):
+    return IMPL.bm_node_get_by_node_uuid(context, node_uuid)
+
+
 def bm_node_create(context, values):
     return IMPL.bm_node_create(context, values)
 
@@ -93,6 +115,10 @@ def bm_node_destroy(context, bm_node_id):
 
 def bm_node_update(context, bm_node_id, values):
     return IMPL.bm_node_update(context, bm_node_id, values)
+
+
+def bm_node_associate_and_update(context, node_uuid, values):
+    return IMPL.bm_node_associate_and_update(context, node_uuid, values)
 
 
 def bm_pxe_ip_create(context, address, server_address):
@@ -158,17 +184,3 @@ def bm_interface_get_by_vif_uuid(context, vif_uuid):
 
 def bm_interface_get_all_by_bm_node_id(context, bm_node_id):
     return IMPL.bm_interface_get_all_by_bm_node_id(context, bm_node_id)
-
-
-def bm_deployment_create(context, key, image_path, pxe_config_path, root_mb,
-                         swap_mb):
-    return IMPL.bm_deployment_create(context, key, image_path,
-                                     pxe_config_path, root_mb, swap_mb)
-
-
-def bm_deployment_get(context, dep_id):
-    return IMPL.bm_deployment_get(context, dep_id)
-
-
-def bm_deployment_destroy(context, dep_id):
-    return IMPL.bm_deployment_destroy(context, dep_id)

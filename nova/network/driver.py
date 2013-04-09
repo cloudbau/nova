@@ -16,7 +16,8 @@
 
 import sys
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 
@@ -39,6 +40,6 @@ def load_network_driver(network_driver=None):
         LOG.error(_("Network driver option required, but not specified"))
         sys.exit(1)
 
-    LOG.info(_("Loading network driver '%s'") % CONF.network_driver)
+    LOG.info(_("Loading network driver '%s'") % network_driver)
 
-    return importutils.import_module(CONF.network_driver)
+    return importutils.import_module(network_driver)

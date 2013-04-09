@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
@@ -18,7 +18,7 @@
 
 """Module to authenticate Consoles."""
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
 
 
 consoleauth_topic_opt = cfg.StrOpt('consoleauth_topic',

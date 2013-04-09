@@ -1,4 +1,4 @@
-# Copyright (c) 2011 OpenStack, LLC.
+# Copyright (c) 2011 OpenStack Foundation
 # Copyright (c) 2012 Justin Santa Barbara
 #
 # All Rights Reserved.
@@ -15,10 +15,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import log as logging
 from nova.scheduler import filters
-
 
 LOG = logging.getLogger(__name__)
 

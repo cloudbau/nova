@@ -22,6 +22,7 @@ from nova.virt.baremetal.db.sqlalchemy import models as bm_models
 def new_bm_node(**kwargs):
     h = bm_models.BareMetalNode()
     h.id = kwargs.pop('id', None)
+    h.uuid = kwargs.pop('uuid', None)
     h.service_host = kwargs.pop('service_host', None)
     h.instance_uuid = kwargs.pop('instance_uuid', None)
     h.cpus = kwargs.pop('cpus', 1)
@@ -31,9 +32,7 @@ def new_bm_node(**kwargs):
     h.pm_user = kwargs.pop('pm_user', 'ipmi_user')
     h.pm_password = kwargs.pop('pm_password', 'ipmi_password')
     h.prov_mac_address = kwargs.pop('prov_mac_address', '12:34:56:78:90:ab')
-    h.registration_status = kwargs.pop('registration_status', 'done')
     h.task_state = kwargs.pop('task_state', None)
-    h.prov_vlan_id = kwargs.pop('prov_vlan_id', None)
     h.terminal_port = kwargs.pop('terminal_port', 8000)
     if len(kwargs) > 0:
         raise test.TestingException("unknown field: %s"
@@ -61,20 +60,6 @@ def new_bm_interface(**kwargs):
     x.datapath_id = kwargs.pop('datapath_id', None)
     x.port_no = kwargs.pop('port_no', None)
     x.vif_uuid = kwargs.pop('vif_uuid', None)
-    if len(kwargs) > 0:
-        raise test.TestingException("unknown field: %s"
-                                    % ','.join(kwargs.keys()))
-    return x
-
-
-def new_bm_deployment(**kwargs):
-    x = bm_models.BareMetalDeployment()
-    x.id = kwargs.pop('id', None)
-    x.key = kwargs.pop('key', None)
-    x.image_path = kwargs.pop('image_path', None)
-    x.pxe_config_path = kwargs.pop('pxe_config_path', None)
-    x.root_mb = kwargs.pop('root_mb', None)
-    x.swap_mb = kwargs.pop('swap_mb', None)
     if len(kwargs) > 0:
         raise test.TestingException("unknown field: %s"
                                     % ','.join(kwargs.keys()))

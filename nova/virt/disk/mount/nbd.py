@@ -13,14 +13,15 @@
 # WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 # License for the specific language governing permissions and limitations
 # under the License.
-"""Support for mounting images with qemu-nbd"""
+"""Support for mounting images with qemu-nbd."""
 
 import os
 import random
 import re
 import time
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import log as logging
 from nova import utils
 from nova.virt.disk.mount import api
@@ -37,7 +38,6 @@ CONF = cfg.CONF
 CONF.register_opts(nbd_opts)
 
 NBD_DEVICE_RE = re.compile('nbd[0-9]+')
-MAX_NBD_WAIT = 30
 
 
 class NbdMount(api.Mount):
@@ -57,7 +57,7 @@ class NbdMount(api.Mount):
 
     def _allocate_nbd(self):
         if not os.path.exists('/sys/block/nbd0'):
-            LOG.error(_('ndb module not loaded'))
+            LOG.error(_('nbd module not loaded'))
             self.error = _('nbd unavailable: module not loaded')
             return None
 
@@ -89,6 +89,7 @@ class NbdMount(api.Mount):
                                  run_as_root=True)
         if err:
             self.error = _('qemu-nbd error: %s') % err
+            LOG.info(_('NBD mount error: %s'), self.error)
             return False
 
         # NOTE(vish): this forks into another process, so give it a chance
@@ -100,12 +101,15 @@ class NbdMount(api.Mount):
                 break
             time.sleep(1)
         else:
+            self.error = _('nbd device %s did not show up') % device
+            LOG.info(_('NBD mount error: %s'), self.error)
+
+            # Cleanup
             _out, err = utils.trycmd('qemu-nbd', '-d', device,
                                      run_as_root=True)
             if err:
                 LOG.warn(_('Detaching from erroneous nbd device returned '
                            'error: %s'), err)
-            self.error = _('nbd device %s did not show up') % device
             return False
 
         self.error = ''
@@ -114,18 +118,7 @@ class NbdMount(api.Mount):
 
     def get_dev(self):
         """Retry requests for NBD devices."""
-        start_time = time.time()
-        device = self._inner_get_dev()
-        while not device:
-            LOG.info(_('nbd device allocation failed. Will retry in 2 '
-                       'seconds.'))
-            time.sleep(2)
-            if time.time() - start_time > MAX_NBD_WAIT:
-                LOG.warn(_('nbd device allocation failed after repeated '
-                           'retries.'))
-                return False
-            device = self._inner_get_dev()
-        return True
+        return self._get_dev_retry_helper()
 
     def unget_dev(self):
         if not self.linked:

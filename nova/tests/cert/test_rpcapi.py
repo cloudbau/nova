@@ -18,14 +18,14 @@
 Unit Tests for nova.cert.rpcapi
 """
 
+from oslo.config import cfg
+
 from nova.cert import rpcapi as cert_rpcapi
 from nova import context
-from nova.openstack.common import cfg
 from nova.openstack.common import rpc
 from nova import test
 
 CONF = cfg.CONF
-CONF.import_opt('cert_topic', 'nova.config')
 
 
 class CertRpcAPITestCase(test.TestCase):
@@ -33,8 +33,12 @@ class CertRpcAPITestCase(test.TestCase):
         ctxt = context.RequestContext('fake_user', 'fake_project')
         rpcapi = cert_rpcapi.CertAPI()
         expected_retval = 'foo'
+        expected_version = kwargs.pop('version', rpcapi.BASE_RPC_API_VERSION)
         expected_msg = rpcapi.make_msg(method, **kwargs)
-        expected_msg['version'] = rpcapi.BASE_RPC_API_VERSION
+        expected_msg['version'] = expected_version
+
+        if method == 'get_backdoor_port':
+            del expected_msg['args']['host']
 
         self.call_ctxt = None
         self.call_topic = None
@@ -84,3 +88,7 @@ class CertRpcAPITestCase(test.TestCase):
     def test_decrypt_text(self):
         self._test_cert_api('decrypt_text',
                             project_id='fake_project_id', text='blah')
+
+    def test_get_backdoor_port(self):
+        self._test_cert_api('get_backdoor_port', host='fake_host',
+                            version='1.1')

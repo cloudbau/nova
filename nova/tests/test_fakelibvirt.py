@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 #
-#    Copyright 2010 OpenStack LLC
+#    Copyright 2010 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -53,6 +53,7 @@ def get_vm_xml(name="testname", uuid=None, source_type='file',
     </interface>
     <input type='mouse' bus='ps2'/>
     <graphics type='vnc' port='5901' autoport='yes' keymap='en-us'/>
+    <graphics type='spice' port='5901' autoport='yes' keymap='en-us'/>
   </devices>
 </domain>''' % {'name': name,
                 'uuid_tag': uuid_tag,

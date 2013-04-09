@@ -20,37 +20,36 @@ import contextlib
 import cStringIO
 import hashlib
 import json
-import logging
 import os
 import time
 
-from nova import test
+from oslo.config import cfg
 
-from nova.compute import manager as compute_manager
 from nova.compute import vm_states
+from nova import conductor
 from nova import db
-from nova.openstack.common import cfg
 from nova.openstack.common import importutils
-from nova.openstack.common import log
+from nova.openstack.common import log as logging
+from nova import test
 from nova import utils
 from nova.virt.libvirt import imagecache
 from nova.virt.libvirt import utils as virtutils
 
 CONF = cfg.CONF
-CONF.import_opt('compute_manager', 'nova.config')
-CONF.import_opt('host', 'nova.config')
+CONF.import_opt('compute_manager', 'nova.service')
+CONF.import_opt('host', 'nova.netconf')
 
-LOG = log.getLogger(__name__)
+LOG = logging.getLogger(__name__)
 
 
 class ImageCacheManagerTestCase(test.TestCase):
 
     def setUp(self):
         super(ImageCacheManagerTestCase, self).setUp()
-        self.stock_instance_names = {'instance-00000001': '123',
-                                     'instance-00000002': '456',
-                                     'instance-00000003': '789',
-                                     'banana-42-hamster': '444'}
+        self.stock_instance_names = set(['instance-00000001',
+                                         'instance-00000002',
+                                         'instance-00000003',
+                                         'banana-42-hamster'])
 
     def test_read_stored_checksum_missing(self):
         self.stubs.Set(os.path, 'exists', lambda x: False)
@@ -164,6 +163,8 @@ class ImageCacheManagerTestCase(test.TestCase):
                           'vm_state': '',
                           'task_state': ''},
                          {'image_ref': '2',
+                          'kernel_id': '21',
+                          'ramdisk_id': '22',
                           'host': 'remotehost',
                           'name': 'inst-3',
                           'uuid': '789',
@@ -175,15 +176,24 @@ class ImageCacheManagerTestCase(test.TestCase):
         # The argument here should be a context, but it's mocked out
         image_cache_manager._list_running_instances(None, all_instances)
 
-        self.assertEqual(len(image_cache_manager.used_images), 2)
+        self.assertEqual(len(image_cache_manager.used_images), 4)
         self.assertTrue(image_cache_manager.used_images['1'] ==
                         (1, 0, ['inst-1']))
         self.assertTrue(image_cache_manager.used_images['2'] ==
                         (1, 1, ['inst-2', 'inst-3']))
+        self.assertTrue(image_cache_manager.used_images['21'] ==
+                        (0, 1, ['inst-3']))
+        self.assertTrue(image_cache_manager.used_images['22'] ==
+                        (0, 1, ['inst-3']))
 
-        self.assertEqual(len(image_cache_manager.image_popularity), 2)
+        self.assertTrue('inst-1' in image_cache_manager.instance_names)
+        self.assertTrue('123' in image_cache_manager.instance_names)
+
+        self.assertEqual(len(image_cache_manager.image_popularity), 4)
         self.assertEqual(image_cache_manager.image_popularity['1'], 1)
         self.assertEqual(image_cache_manager.image_popularity['2'], 2)
+        self.assertEqual(image_cache_manager.image_popularity['21'], 1)
+        self.assertEqual(image_cache_manager.image_popularity['22'], 1)
 
     def test_list_resizing_instances(self):
         all_instances = [{'image_ref': '1',
@@ -200,7 +210,7 @@ class ImageCacheManagerTestCase(test.TestCase):
         self.assertTrue(image_cache_manager.used_images['1'] ==
                         (1, 0, ['inst-1']))
         self.assertTrue(image_cache_manager.instance_names ==
-                        set(['inst-1', 'inst-1_resize']))
+                        set(['inst-1', '123', 'inst-1_resize', '123_resize']))
 
         self.assertEqual(len(image_cache_manager.image_popularity), 1)
         self.assertEqual(image_cache_manager.image_popularity['1'], 1)
@@ -331,7 +341,6 @@ class ImageCacheManagerTestCase(test.TestCase):
         base_file1 = os.path.join(base_dir, fingerprint)
         base_file2 = os.path.join(base_dir, fingerprint + '_sm')
         base_file3 = os.path.join(base_dir, fingerprint + '_10737418240')
-        print res
         self.assertTrue(res == [(base_file1, False, False),
                                 (base_file2, True, False),
                                 (base_file3, False, True)])
@@ -339,10 +348,10 @@ class ImageCacheManagerTestCase(test.TestCase):
     @contextlib.contextmanager
     def _intercept_log_messages(self):
         try:
-            mylog = log.getLogger('nova')
+            mylog = logging.getLogger('nova')
             stream = cStringIO.StringIO()
-            handler = logging.StreamHandler(stream)
-            handler.setFormatter(log.LegacyFormatter())
+            handler = logging.logging.StreamHandler(stream)
+            handler.setFormatter(logging.LegacyFormatter())
             mylog.logger.addHandler(handler)
             yield stream
         finally:
@@ -702,6 +711,8 @@ class ImageCacheManagerTestCase(test.TestCase):
 
     def test_verify_base_images(self):
         hashed_1 = '356a192b7913b04c54574d18c28d46e6395428ab'
+        hashed_21 = '472b07b9fcf2c2451e8781e944bf5f77cd8457c8'
+        hashed_22 = '12c6fc06c99a462375eeb3f43dfd832b08ca9e17'
         hashed_42 = '92cfceb39d57d914ed8b14d0e37643de0797ae56'
 
         self.flags(instances_path='/instance_path')
@@ -714,6 +725,8 @@ class ImageCacheManagerTestCase(test.TestCase):
                           'e09c675c2d1cfac32dae3c2d83689c8c94bc693b_sm',
                           hashed_42,
                           hashed_1,
+                          hashed_21,
+                          hashed_22,
                           '%s_5368709120' % hashed_1,
                           '%s_10737418240' % hashed_1,
                           '00000004']
@@ -721,7 +734,7 @@ class ImageCacheManagerTestCase(test.TestCase):
         def fq_path(path):
             return os.path.join('/instance_path/_base/', path)
 
-        # Fake base directory existance
+        # Fake base directory existence
         orig_exists = os.path.exists
 
         def exists(path):
@@ -743,11 +756,13 @@ class ImageCacheManagerTestCase(test.TestCase):
                 if path == fq_path(p) + '.info':
                     return False
 
-            if path in ['/instance_path/_base/%s_sm' % hashed_1,
-                        '/instance_path/_base/%s_sm' % hashed_42]:
+            if path in ['/instance_path/_base/%s_sm' % i for i in [hashed_1,
+                                                                   hashed_21,
+                                                                   hashed_22,
+                                                                   hashed_42]]:
                 return False
 
-            self.fail('Unexpected path existance check: %s' % path)
+            self.fail('Unexpected path existence check: %s' % path)
 
         self.stubs.Set(os.path, 'exists', lambda x: exists(x))
 
@@ -799,6 +814,8 @@ class ImageCacheManagerTestCase(test.TestCase):
                           'vm_state': '',
                           'task_state': ''},
                          {'image_ref': '1',
+                          'kernel_id': '21',
+                          'ramdisk_id': '22',
                           'host': CONF.host,
                           'name': 'instance-2',
                           'uuid': '456',
@@ -849,7 +866,8 @@ class ImageCacheManagerTestCase(test.TestCase):
         image_cache_manager.verify_base_images(None, all_instances)
 
         # Verify
-        active = [fq_path(hashed_1), fq_path('%s_5368709120' % hashed_1)]
+        active = [fq_path(hashed_1), fq_path('%s_5368709120' % hashed_1),
+                  fq_path(hashed_21), fq_path(hashed_22)]
         self.assertEquals(image_cache_manager.active_base_files, active)
 
         for rem in [fq_path('e97222e91fc4241f49a7f520d1dcf446751129b3_sm'),
@@ -929,7 +947,7 @@ class ImageCacheManagerTestCase(test.TestCase):
     def test_compute_manager(self):
         was = {'called': False}
 
-        def fake_get_all(context):
+        def fake_get_all(context, *args, **kwargs):
             was['called'] = True
             return [{'image_ref': '1',
                      'host': CONF.host,
@@ -949,5 +967,7 @@ class ImageCacheManagerTestCase(test.TestCase):
 
             self.stubs.Set(db, 'instance_get_all', fake_get_all)
             compute = importutils.import_object(CONF.compute_manager)
+            self.flags(use_local=True, group='conductor')
+            compute.conductor_api = conductor.API()
             compute._run_image_cache_manager_pass(None)
             self.assertTrue(was['called'])

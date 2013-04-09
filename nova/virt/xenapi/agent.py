@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2010 Citrix Systems, Inc.
-# Copyright 2010-2012 OpenStack LLC.
+# Copyright 2010-2012 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -21,7 +21,11 @@ import os
 import time
 import uuid
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
+from nova.api.metadata import password
+from nova import context
+from nova import crypto
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova import utils
@@ -120,8 +124,9 @@ def _get_agent_version(session, instance, vm_ref):
 
 
 class XenAPIBasedAgent(object):
-    def __init__(self, session, instance, vm_ref):
+    def __init__(self, session, virtapi, instance, vm_ref):
         self.session = session
+        self.virtapi = virtapi
         self.instance = instance
         self.vm_ref = vm_ref
 
@@ -185,7 +190,7 @@ class XenAPIBasedAgent(object):
         if resp['returncode'] != 'D0':
             msg = _('Failed to exchange keys: %(resp)r') % locals()
             LOG.error(msg, instance=self.instance)
-            raise Exception(msg)
+            raise NotImplementedError(msg)
 
         # Some old versions of the Windows agent have a trailing \\r\\n
         # (ie CRLF escaped) for some reason. Strip that off.
@@ -205,9 +210,38 @@ class XenAPIBasedAgent(object):
         if resp['returncode'] != '0':
             msg = _('Failed to update password: %(resp)r') % locals()
             LOG.error(msg, instance=self.instance)
-            raise Exception(msg)
+            raise NotImplementedError(msg)
+
+        sshkey = self.instance.get('key_data')
+        if sshkey:
+            ctxt = context.get_admin_context()
+            enc = crypto.ssh_encrypt_text(sshkey, new_pass)
+            sys_meta = utils.metadata_to_dict(self.instance['system_metadata'])
+            sys_meta.update(password.convert_password(ctxt,
+                                                      base64.b64encode(enc)))
+            self.virtapi.instance_update(ctxt, self.instance['uuid'],
+                                         {'system_metadata': sys_meta})
 
         return resp['message']
+
+    def inject_ssh_key(self):
+        sshkey = self.instance.get('key_data')
+        if not sshkey:
+            return
+        if self.instance['os_type'] == 'windows':
+            LOG.warning(_("Skipping setting of ssh key for Windows."),
+                        instance=self.instance)
+            return
+        sshkey = str(sshkey)
+        keyfile = '/root/.ssh/authorized_keys'
+        key_data = ''.join([
+            '\n',
+            '# The following ssh key was injected by Nova',
+            '\n',
+            sshkey.strip(),
+            '\n',
+        ])
+        return self.inject_file(keyfile, key_data)
 
     def inject_file(self, path, contents):
         LOG.debug(_('Injecting file path: %r'), path, instance=self.instance)
@@ -307,7 +341,7 @@ class SimpleDH(object):
 
     @staticmethod
     def mod_exp(num, exp, mod):
-        """Efficient implementation of (num ** exp) % mod"""
+        """Efficient implementation of (num ** exp) % mod."""
         result = 1
         while exp > 0:
             if (exp & 1) == 1:

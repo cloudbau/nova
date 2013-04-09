@@ -25,14 +25,24 @@ SHOULD include dedicated exception logging.
 """
 
 import functools
-import itertools
 
+from oslo.config import cfg
 import webob.exc
 
 from nova.openstack.common import excutils
 from nova.openstack.common import log as logging
+from nova import safe_utils
 
 LOG = logging.getLogger(__name__)
+
+exc_log_opts = [
+    cfg.BoolOpt('fatal_exception_format_errors',
+                default=False,
+                help='make exception message format errors fatal'),
+]
+
+CONF = cfg.CONF
+CONF.register_opts(exc_log_opts)
 
 
 class ConvertedException(webob.exc.WSGIHTTPException):
@@ -62,6 +72,11 @@ class ProcessExecutionError(IOError):
         IOError.__init__(self, message)
 
 
+def _cleanse_dict(original):
+    """Strip all admin_password, new_pass, rescue_pass keys from a dict."""
+    return dict((k, v) for k, v in original.iteritems() if not "_pass" in k)
+
+
 def wrap_exception(notifier=None, publisher_id=None, event_type=None,
                    level=None):
     """This decorator wraps a method to catch any exceptions that may
@@ -72,14 +87,18 @@ def wrap_exception(notifier=None, publisher_id=None, event_type=None,
     # to pass it in as a parameter. Otherwise we get a cyclic import of
     # nova.notifier.api -> nova.utils -> nova.exception :(
     def inner(f):
-        def wrapped(*args, **kw):
+        def wrapped(self, context, *args, **kw):
+            # Don't store self or context in the payload, it now seems to
+            # contain confidential information.
             try:
-                return f(*args, **kw)
+                return f(self, context, *args, **kw)
             except Exception, e:
                 with excutils.save_and_reraise_exception():
                     if notifier:
-                        payload = dict(args=args, exception=e)
-                        payload.update(kw)
+                        payload = dict(exception=e)
+                        call_dict = safe_utils.getcallargs(f, *args, **kw)
+                        cleansed = _cleanse_dict(call_dict)
+                        payload.update({'args': cleansed})
 
                         # Use a temp vars so we don't shadow
                         # our outer definitions.
@@ -93,10 +112,6 @@ def wrap_exception(notifier=None, publisher_id=None, event_type=None,
                             # functools.wraps to ensure the name is
                             # propagated.
                             temp_type = f.__name__
-
-                        context = get_context_from_function_and_args(f,
-                                                                     args,
-                                                                     kw)
 
                         notifier.notify(context, publisher_id, temp_type,
                                         temp_level, payload)
@@ -137,10 +152,20 @@ class NovaException(Exception):
                 LOG.exception(_('Exception in string format operation'))
                 for name, value in kwargs.iteritems():
                     LOG.error("%s: %s" % (name, value))
-                # at least get the core message out if something happened
-                message = self.message
+
+                if CONF.fatal_exception_format_errors:
+                    raise e
+                else:
+                    # at least get the core message out if something happened
+                    message = self.message
 
         super(NovaException, self).__init__(message)
+
+    def format_message(self):
+        if self.__class__.__name__.endswith('_Remote'):
+            return self.args[0]
+        else:
+            return unicode(self)
 
 
 class EC2APIError(NovaException):
@@ -153,22 +178,12 @@ class EC2APIError(NovaException):
         super(EC2APIError, self).__init__(outstr)
 
 
-class DBError(NovaException):
-    """Wraps an implementation specific exception."""
-    def __init__(self, inner_exception=None):
-        self.inner_exception = inner_exception
-        super(DBError, self).__init__(str(inner_exception))
-
-
-class DBDuplicateEntry(DBError):
-    """Wraps an implementation specific exception."""
-    def __init__(self, columns=[], inner_exception=None):
-        self.columns = columns
-        super(DBDuplicateEntry, self).__init__(inner_exception)
+class EncryptionFailure(NovaException):
+    message = _("Failed to encrypt text: %(reason)s")
 
 
 class DecryptionFailure(NovaException):
-    message = _("Failed to decrypt text")
+    message = _("Failed to decrypt text: %(reason)s")
 
 
 class VirtualInterfaceCreateException(NovaException):
@@ -211,8 +226,28 @@ class Invalid(NovaException):
     code = 400
 
 
+class InvalidBDM(Invalid):
+    message = _("Block Device Mapping is Invalid.")
+
+
+class InvalidBDMSnapshot(InvalidBDM):
+    message = _("Block Device Mapping is Invalid: "
+                "failed to get snapshot %(id)s.")
+
+
+class InvalidBDMVolume(InvalidBDM):
+    message = _("Block Device Mapping is Invalid: "
+                "failed to get volume %(id)s.")
+
+
 class VolumeUnattached(Invalid):
     message = _("Volume %(volume_id)s is not attached to anything")
+
+
+class VolumeNotCreated(NovaException):
+    message = _("Volume %(volume_id)s did not finish being created"
+                " even after we waited %(seconds)s seconds or %(attempts)s"
+                " attempts.")
 
 
 class InvalidKeypair(Invalid):
@@ -292,6 +327,10 @@ class InstanceNotInRescueMode(Invalid):
     message = _("Instance %(instance_id)s is not in rescue mode")
 
 
+class InstanceNotRescuable(Invalid):
+    message = _("Instance %(instance_id)s cannot be rescued: %(reason)s")
+
+
 class InstanceNotReady(Invalid):
     message = _("Instance %(instance_id)s is not ready")
 
@@ -301,7 +340,15 @@ class InstanceSuspendFailure(Invalid):
 
 
 class InstanceResumeFailure(Invalid):
-    message = _("Failed to resume server") + ": %(reason)s."
+    message = _("Failed to resume instance: %(reason)s.")
+
+
+class InstancePowerOnFailure(Invalid):
+    message = _("Failed to power on instance: %(reason)s.")
+
+
+class InstancePowerOffFailure(Invalid):
+    message = _("Failed to power off instance: %(reason)s.")
 
 
 class InstanceRebootFailure(Invalid):
@@ -310,6 +357,10 @@ class InstanceRebootFailure(Invalid):
 
 class InstanceTerminationFailure(Invalid):
     message = _("Failed to terminate instance") + ": %(reason)s"
+
+
+class InstanceDeployFailure(Invalid):
+    message = _("Failed to deploy instance") + ": %(reason)s"
 
 
 class ServiceUnavailable(Invalid):
@@ -321,7 +372,7 @@ class ComputeResourcesUnavailable(ServiceUnavailable):
 
 
 class ComputeServiceUnavailable(ServiceUnavailable):
-    message = _("Compute service is unavailable at this time.")
+    message = _("Compute service of %(host)s is unavailable at this time.")
 
 
 class UnableToMigrateToSelf(Invalid):
@@ -349,6 +400,7 @@ class InvalidDevicePath(Invalid):
 
 class DevicePathInUse(Invalid):
     message = _("The supplied device path (%(path)s) is in use.")
+    code = 409
 
 
 class DeviceIsBusy(Invalid):
@@ -394,6 +446,14 @@ class InvalidEc2Id(Invalid):
 
 class InvalidUUID(Invalid):
     message = _("Expected a uuid but received %(uuid)s.")
+
+
+class InvalidID(Invalid):
+    message = _("Invalid ID received %(id)s.")
+
+
+class InvalidPeriodicTaskArg(Invalid):
+    message = _("Unexpected argument for periodic task creation: %(arg)s.")
 
 
 class ConstraintNotMet(NovaException):
@@ -469,6 +529,10 @@ class NetworkNotFound(NotFound):
     message = _("Network %(network_id)s could not be found.")
 
 
+class PortNotFound(NotFound):
+    message = _("Port id %(port_id)s could not be found.")
+
+
 class NetworkNotFoundForBridge(NetworkNotFound):
     message = _("Network could not be found for bridge %(bridge)s")
 
@@ -502,8 +566,12 @@ class PortInUse(NovaException):
     message = _("Port %(port_id)s is still in use.")
 
 
-class PortNotFound(NotFound):
-    message = _("Port %(port_id)s could not be found.")
+class PortNotUsable(NovaException):
+    message = _("Port %(port_id)s not usable for instance %(instance)s.")
+
+
+class PortNotFree(NovaException):
+    message = _("No free port available for instance %(instance)s.")
 
 
 class FixedIpNotFound(NotFound):
@@ -697,6 +765,20 @@ class SecurityGroupNotExistsForInstance(Invalid):
                 " the instance %(instance_id)s")
 
 
+class SecurityGroupDefaultRuleNotFound(Invalid):
+    message = _("Security group default rule (%rule_id)s not found.")
+
+
+class SecurityGroupCannotBeApplied(Invalid):
+    message = _("Network requires port_security_enabled and subnet associated"
+                " in order to apply security groups.")
+
+
+class NoUniqueMatch(NovaException):
+    message = _("No Unique Match Found.")
+    code = 409
+
+
 class MigrationNotFound(NotFound):
     message = _("Migration %(migration_id)s could not be found.")
 
@@ -752,7 +834,35 @@ class FlavorAccessNotFound(NotFound):
 
 
 class CellNotFound(NotFound):
-    message = _("Cell %(cell_id)s could not be found.")
+    message = _("Cell %(cell_name)s doesn't exist.")
+
+
+class CellRoutingInconsistency(NovaException):
+    message = _("Inconsistency in cell routing: %(reason)s")
+
+
+class CellServiceAPIMethodNotFound(NotFound):
+    message = _("Service API method not found: %(detail)s")
+
+
+class CellTimeout(NotFound):
+    message = _("Timeout waiting for response from cell")
+
+
+class CellMaxHopCountReached(NovaException):
+    message = _("Cell message has reached maximum hop count: %(hop_count)s")
+
+
+class NoCellsAvailable(NovaException):
+    message = _("No cells available matching scheduling criteria.")
+
+
+class CellError(NovaException):
+    message = _("Exception received during cell processing: %(exc_name)s.")
+
+
+class InstanceUnknownCell(NotFound):
+    message = _("Cell is not known for instance %(instance_uuid)s")
 
 
 class SchedulerHostFilterNotFound(NotFound):
@@ -911,6 +1021,10 @@ class FloatingIpLimitExceeded(QuotaError):
     message = _("Maximum number of floating ips exceeded")
 
 
+class FixedIpLimitExceeded(QuotaError):
+    message = _("Maximum number of fixed ips exceeded")
+
+
 class MetadataLimitExceeded(QuotaError):
     message = _("Maximum number of metadata items exceeds %(allowed)d")
 
@@ -975,8 +1089,26 @@ class DuplicateVlan(Duplicate):
     message = _("Detected existing vlan with id %(vlan)d")
 
 
+class CidrConflict(NovaException):
+    message = _("There was a conflict when trying to complete your request.")
+    code = 409
+
+
 class InstanceNotFound(NotFound):
     message = _("Instance %(instance_id)s could not be found.")
+
+
+class InstanceInfoCacheNotFound(NotFound):
+    message = _("Info cache for instance %(instance_uuid)s could not be "
+                "found.")
+
+
+class NodeNotFound(NotFound):
+    message = _("Node %(node_id)s could not be found.")
+
+
+class NodeNotFoundByUUID(NotFound):
+    message = _("Node with UUID %(node_uuid)s could not be found.")
 
 
 class MarkerNotFound(NotFound):
@@ -989,6 +1121,10 @@ class InvalidInstanceIDMalformed(Invalid):
 
 class CouldNotFetchImage(NovaException):
     message = _("Could not fetch image %(image_id)s")
+
+
+class CouldNotUploadImage(NovaException):
+    message = _("Could not upload image %(image_id)s")
 
 
 class TaskAlreadyRunning(NovaException):
@@ -1013,6 +1149,14 @@ class ConfigDriveUnknownFormat(NovaException):
                 "iso9660 or vfat.")
 
 
+class InterfaceAttachFailed(Invalid):
+    message = _("Failed to attach network adapter device to %(instance)s")
+
+
+class InterfaceDetachFailed(Invalid):
+    message = _("Failed to detach network adapter device from  %(instance)s")
+
+
 class InstanceUserDataTooLarge(NovaException):
     message = _("User data too large. User data must be no larger than "
                 "%(maxsize)s bytes once base64 encoded. Your data is "
@@ -1028,6 +1172,15 @@ class UnexpectedTaskStateError(NovaException):
                 "the actual state is %(actual)s")
 
 
+class InstanceActionNotFound(NovaException):
+    message = _("Action for request_id %(request_id)s on instance"
+                " %(instance_uuid)s not found")
+
+
+class InstanceActionEventNotFound(NovaException):
+    message = _("Event %(event)s not found for action id %(action_id)s")
+
+
 class CryptoCAFileNotFound(FileNotFound):
     message = _("The CA file for %(project)s could not be found")
 
@@ -1036,18 +1189,29 @@ class CryptoCRLFileNotFound(FileNotFound):
     message = _("The CRL file for %(project)s could not be found")
 
 
-def get_context_from_function_and_args(function, args, kwargs):
-    """Find an arg of type RequestContext and return it.
+class InstanceRecreateNotSupported(Invalid):
+    message = _('Instance recreate is not implemented by this virt driver.')
 
-       This is useful in a couple of decorators where we don't
-       know much about the function we're wrapping.
-    """
 
-    # import here to avoid circularity:
-    from nova import context
+class ServiceGroupUnavailable(NovaException):
+    message = _("The service from servicegroup driver %(driver) is "
+                "temporarily unavailable.")
 
-    for arg in itertools.chain(kwargs.values(), args):
-        if isinstance(arg, context.RequestContext):
-            return arg
 
-    return None
+class DBNotAllowed(NovaException):
+    message = _('%(binary)s attempted direct database access which is '
+                'not allowed by policy')
+
+
+class UnsupportedVirtType(Invalid):
+    message = _("Virtualization type '%(virt)s' is not supported by "
+                "this compute driver")
+
+
+class UnsupportedHardware(Invalid):
+    message = _("Requested hardware '%(model)s' is not supported by "
+                "the '%(virt)s' virt driver")
+
+
+class Base64Exception(NovaException):
+    message = _("Invalid Base 64 data for file %(path)s")

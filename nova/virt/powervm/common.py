@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,13 +14,16 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import contextlib
 import ftplib
 import os
+import uuid
 
 import paramiko
 
 from nova import exception as nova_exception
 from nova.openstack.common import log as logging
+from nova import utils
 from nova.virt.powervm import exception
 
 LOG = logging.getLogger(__name__)
@@ -28,11 +31,12 @@ LOG = logging.getLogger(__name__)
 
 class Connection(object):
 
-    def __init__(self, host, username, password, port=22):
+    def __init__(self, host, username, password, port=22, keyfile=None):
         self.host = host
         self.username = username
         self.password = password
         self.port = port
+        self.keyfile = keyfile
 
 
 def ssh_connect(connection):
@@ -48,7 +52,8 @@ def ssh_connect(connection):
         ssh.connect(connection.host,
                     username=connection.username,
                     password=connection.password,
-                    port=connection.port)
+                    port=connection.port,
+                    key_filename=connection.keyfile)
         return ssh
     except Exception:
         LOG.exception(_('Connection error connecting PowerVM manager'))
@@ -63,6 +68,7 @@ def ssh_command_as_root(ssh_connection, cmd, check_exit_code=True):
     :returns: Tuple -- a tuple of (stdout, stderr)
     :raises: nova.exception.ProcessExecutionError
     """
+    LOG.debug(_('Running cmd (SSH-as-root): %s') % cmd)
     chan = ssh_connection._transport.open_session()
     # This command is required to be executed
     # in order to become root.
@@ -84,7 +90,7 @@ def ssh_command_as_root(ssh_connection, cmd, check_exit_code=True):
             raise nova_exception.ProcessExecutionError(exit_code=exit_status,
                                                        stdout=stdout,
                                                        stderr=stderr,
-                                                       cmd=' '.join(cmd))
+                                                       cmd=''.join(cmd))
 
     return (stdout, stderr)
 
@@ -108,5 +114,111 @@ def ftp_put_command(connection, local_path, remote_dir):
         f.close()
         ftp.close()
     except Exception:
-        LOG.exception(_('File transfer to PowerVM manager failed'))
-        raise exception.PowerVMFileTransferFailed(file_path=local_path)
+        LOG.error(_('File transfer to PowerVM manager failed'))
+        raise exception.PowerVMFTPTransferFailed(ftp_cmd='PUT',
+                source_path=local_path, dest_path=remote_dir)
+
+
+def ftp_get_command(connection, remote_path, local_path):
+    """Retrieve a file via FTP
+
+    :param connection: a Connection object.
+    :param remote_path: path to the remote file
+    :param local_path: path to local destination
+    :raises: PowerVMFileTransferFailed
+    """
+    try:
+        ftp = ftplib.FTP(host=connection.host,
+                         user=connection.username,
+                         passwd=connection.password)
+        ftp.cwd(os.path.dirname(remote_path))
+        name = os.path.basename(remote_path)
+        LOG.debug(_("ftp GET %(remote_path)s to: %(local_path)s") % locals())
+        with open(local_path, 'w') as ftpfile:
+            ftpcmd = 'RETR %s' % name
+            ftp.retrbinary(ftpcmd, ftpfile.write)
+        ftp.close()
+    except Exception:
+        LOG.error(_("File transfer from PowerVM manager failed"))
+        raise exception.PowerVMFTPTransferFailed(ftp_cmd='GET',
+                source_path=remote_path, dest_path=local_path)
+
+
+def aix_path_join(path_one, path_two):
+    """Ensures file path is built correctly for remote UNIX system
+
+    :param path_one: string of the first file path
+    :param path_two: string of the second file path
+    :returns: a uniform path constructed from both strings
+    """
+    if path_one.endswith('/'):
+        path_one = path_one.rstrip('/')
+
+    if path_two.startswith('/'):
+        path_two = path_two.lstrip('/')
+
+    final_path = path_one + '/' + path_two
+    return final_path
+
+
+@contextlib.contextmanager
+def vios_to_vios_auth(source, dest, conn_info):
+    """Context allowing for SSH between VIOS partitions
+
+    This context will build an SSH key on the source host, put the key
+    into the authorized_keys on the destination host, and make the
+    private key file name available within the context.
+    The key files and key inserted into authorized_keys will be
+    removed when the context exits.
+
+    :param source: source IP or DNS name
+    :param dest: destination IP or DNS name
+    :param conn_info: dictionary object with SSH connection
+                      information for both hosts
+    """
+    KEY_BASE_NAME = "os-%s" % uuid.uuid4().hex
+    keypair_uuid = uuid.uuid4()
+    src_conn_obj = ssh_connect(conn_info)
+
+    dest_conn_info = Connection(dest, conn_info.username,
+                                       conn_info.password)
+    dest_conn_obj = ssh_connect(dest_conn_info)
+
+    def run_command(conn_obj, cmd):
+        stdout, stderr = utils.ssh_execute(conn_obj, cmd)
+        return stdout.strip().splitlines()
+
+    def build_keypair_on_source():
+        mkkey = ('ssh-keygen -f %s -N "" -C %s' %
+                    (KEY_BASE_NAME, keypair_uuid.hex))
+        ssh_command_as_root(src_conn_obj, mkkey)
+
+        chown_key = ('chown %s %s*' % (conn_info.username, KEY_BASE_NAME))
+        ssh_command_as_root(src_conn_obj, chown_key)
+
+        cat_key = ('cat %s.pub' % KEY_BASE_NAME)
+        pubkey = run_command(src_conn_obj, cat_key)
+
+        return pubkey[0]
+
+    def cleanup_key_on_source():
+        rmkey = 'rm %s*' % KEY_BASE_NAME
+        run_command(src_conn_obj, rmkey)
+
+    def insert_into_authorized_keys(public_key):
+        echo_key = 'echo "%s" >> .ssh/authorized_keys' % public_key
+        ssh_command_as_root(dest_conn_obj, echo_key)
+
+    def remove_from_authorized_keys():
+        rmkey = ('sed /%s/d .ssh/authorized_keys > .ssh/authorized_keys' %
+                 keypair_uuid.hex)
+        ssh_command_as_root(dest_conn_obj, rmkey)
+
+    public_key = build_keypair_on_source()
+    insert_into_authorized_keys(public_key)
+
+    try:
+        yield KEY_BASE_NAME
+    finally:
+        remove_from_authorized_keys()
+        cleanup_key_on_source()

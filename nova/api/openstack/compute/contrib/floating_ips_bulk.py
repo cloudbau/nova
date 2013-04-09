@@ -1,7 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -16,19 +15,16 @@
 #    under the License.
 
 import netaddr
-import urllib
+from oslo.config import cfg
 import webob.exc
 
 from nova.api.openstack import extensions
-from nova.api.openstack import wsgi
-from nova.api.openstack import xmlutil
 from nova import db
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 
 CONF = cfg.CONF
-CONF.import_opt('default_floating_pool', 'nova.network.manager')
+CONF.import_opt('default_floating_pool', 'nova.network.floating_ips')
 CONF.import_opt('public_interface', 'nova.network.linux_net')
 
 
@@ -39,14 +35,14 @@ authorize = extensions.extension_authorizer('compute', 'floating_ips_bulk')
 class FloatingIPBulkController(object):
 
     def index(self, req):
-        """Return a list of all floating ips"""
+        """Return a list of all floating ips."""
         context = req.environ['nova.context']
         authorize(context)
 
         return self._get_floating_ip_info(context)
 
     def show(self, req, id):
-        """Return a list of all floating ips for a given host"""
+        """Return a list of all floating ips for a given host."""
         context = req.environ['nova.context']
         authorize(context)
 
@@ -79,17 +75,17 @@ class FloatingIPBulkController(object):
         return floating_ip_info
 
     def create(self, req, body):
-        """Bulk create floating ips"""
+        """Bulk create floating ips."""
         context = req.environ['nova.context']
         authorize(context)
 
-        if not 'floating_ips_bulk_create' in body:
+        if 'floating_ips_bulk_create' not in body:
             raise webob.exc.HTTPUnprocessableEntity()
         params = body['floating_ips_bulk_create']
 
         LOG.debug(params)
 
-        if not 'ip_range' in params:
+        if 'ip_range' not in params:
             raise webob.exc.HTTPUnprocessableEntity()
         ip_range = params['ip_range']
 
@@ -102,19 +98,19 @@ class FloatingIPBulkController(object):
                     'interface': interface}
                    for address in self._address_to_hosts(ip_range))
         except exception.InvalidInput as exc:
-            raise webob.exc.HTTPBadRequest(explanation=str(exc))
+            raise webob.exc.HTTPBadRequest(explanation=exc.format_message())
 
         try:
             db.floating_ip_bulk_create(context, ips)
         except exception.FloatingIpExists as exc:
-            raise webob.exc.HTTPBadRequest(explanation=str(exc))
+            raise webob.exc.HTTPBadRequest(explanation=exc.format_message())
 
         return {"floating_ips_bulk_create": {"ip_range": ip_range,
                                                "pool": pool,
                                                "interface": interface}}
 
     def update(self, req, id, body):
-        """Bulk delete floating IPs"""
+        """Bulk delete floating IPs."""
         context = req.environ['nova.context']
         authorize(context)
 
@@ -130,7 +126,7 @@ class FloatingIPBulkController(object):
             ips = ({'address': str(address)}
                    for address in self._address_to_hosts(ip_range))
         except exception.InvalidInput as exc:
-            raise webob.exc.HTTPBadRequest(explanation=str(exc))
+            raise webob.exc.HTTPBadRequest(explanation=exc.format_message())
         db.floating_ip_bulk_destroy(context, ips)
 
         return {"floating_ips_bulk_delete": ip_range}
@@ -157,7 +153,7 @@ class FloatingIPBulkController(object):
 
 
 class Floating_ips_bulk(extensions.ExtensionDescriptor):
-    """Bulk handling of Floating IPs"""
+    """Bulk handling of Floating IPs."""
 
     name = "FloatingIpsBulk"
     alias = "os-floating-ips-bulk"

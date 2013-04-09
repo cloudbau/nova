@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright 2011 OpenStack LLC
+#    Copyright 2011 OpenStack Foundation
 #    Copyright 2011 Ilya Alekseyev
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -15,11 +15,10 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import imp
-import os
 import StringIO
 import sys
 
+from nova.cmd import manage
 from nova import context
 from nova import db
 from nova import exception
@@ -27,22 +26,11 @@ from nova import test
 from nova.tests.db import fakes as db_fakes
 
 
-TOPDIR = os.path.normpath(os.path.join(
-                            os.path.dirname(os.path.abspath(__file__)),
-                            os.pardir,
-                            os.pardir))
-NOVA_MANAGE_PATH = os.path.join(TOPDIR, 'bin', 'nova-manage')
-
-sys.dont_write_bytecode = True
-nova_manage = imp.load_source('nova_manage', NOVA_MANAGE_PATH)
-sys.dont_write_bytecode = False
-
-
 class FixedIpCommandsTestCase(test.TestCase):
     def setUp(self):
         super(FixedIpCommandsTestCase, self).setUp()
         db_fakes.stub_out_db_network_api(self.stubs)
-        self.commands = nova_manage.FixedIpCommands()
+        self.commands = manage.FixedIpCommands()
 
     def test_reserve(self):
         self.commands.reserve('192.168.0.100')
@@ -51,9 +39,7 @@ class FixedIpCommandsTestCase(test.TestCase):
         self.assertEqual(address['reserved'], True)
 
     def test_reserve_nonexistent_address(self):
-        self.assertRaises(SystemExit,
-                          self.commands.reserve,
-                          '55.55.55.55')
+        self.assertEqual(2, self.commands.reserve('55.55.55.55'))
 
     def test_unreserve(self):
         self.commands.unreserve('192.168.0.100')
@@ -62,16 +48,14 @@ class FixedIpCommandsTestCase(test.TestCase):
         self.assertEqual(address['reserved'], False)
 
     def test_unreserve_nonexistent_address(self):
-        self.assertRaises(SystemExit,
-                          self.commands.unreserve,
-                          '55.55.55.55')
+        self.assertEqual(2, self.commands.unreserve('55.55.55.55'))
 
 
 class FloatingIpCommandsTestCase(test.TestCase):
     def setUp(self):
         super(FloatingIpCommandsTestCase, self).setUp()
         db_fakes.stub_out_db_network_api(self.stubs)
-        self.commands = nova_manage.FloatingIpCommands()
+        self.commands = manage.FloatingIpCommands()
 
     def test_address_to_hosts(self):
         def assert_loop(result, expected):
@@ -99,12 +83,19 @@ class FloatingIpCommandsTestCase(test.TestCase):
         result = address_to_hosts('192.168.100.0/28')
         self.assertTrue(len(list(result)) == 14)
         assert_loop(result, expected)
+        # /16
+        result = address_to_hosts('192.168.100.0/16')
+        self.assertTrue(len(list(result)) == 65534)
+        # NOTE(dripton): I don't test /13 because it makes the test take 3s.
+        # /12 gives over a million IPs, which is ridiculous.
+        self.assertRaises(exception.InvalidInput, address_to_hosts,
+                          '192.168.100.1/12')
 
 
 class NetworkCommandsTestCase(test.TestCase):
     def setUp(self):
         super(NetworkCommandsTestCase, self).setUp()
-        self.commands = nova_manage.NetworkCommands()
+        self.commands = manage.NetworkCommands()
         self.net = {'id': 0,
                     'label': 'fake',
                     'injected': False,
@@ -285,8 +276,8 @@ class InstanceTypeCommandsTestCase(test.TestCase):
         self.instance_type_name = ref["name"]
         self.instance_type_id = ref["id"]
         self.instance_type_flavorid = ref["flavorid"]
-        self.set_key = nova_manage.InstanceTypeCommands().set_key
-        self.unset_key = nova_manage.InstanceTypeCommands().unset_key
+        self.set_key = manage.InstanceTypeCommands().set_key
+        self.unset_key = manage.InstanceTypeCommands().unset_key
 
     def tearDown(self):
         db.instance_type_destroy(context.get_admin_context(),
@@ -354,7 +345,7 @@ class InstanceTypeCommandsTestCase(test.TestCase):
 class ProjectCommandsTestCase(test.TestCase):
     def setUp(self):
         super(ProjectCommandsTestCase, self).setUp()
-        self.commands = nova_manage.ProjectCommands()
+        self.commands = manage.ProjectCommands()
 
     def test_quota(self):
         output = StringIO.StringIO()
@@ -366,9 +357,29 @@ class ProjectCommandsTestCase(test.TestCase):
 
         sys.stdout = sys.__stdout__
         result = output.getvalue()
-        self.assertEquals(('instances: unlimited' in result), True)
+        print_format = "%-36s %-10s" % ('instances', 'unlimited')
+        self.assertEquals((print_format in result), True)
 
     def test_quota_update_invalid_key(self):
-        self.assertRaises(SystemExit,
-                          self.commands.quota, 'admin', 'volumes1', '10'
-                          )
+        self.assertEqual(2, self.commands.quota('admin', 'volumes1', '10'))
+
+
+class DBCommandsTestCase(test.TestCase):
+    def setUp(self):
+        super(DBCommandsTestCase, self).setUp()
+        self.commands = manage.DbCommands()
+
+    def test_archive_deleted_rows_negative(self):
+        self.assertEqual(1, self.commands.archive_deleted_rows(-1))
+
+
+class ServiceCommandsTestCase(test.TestCase):
+    def setUp(self):
+        super(ServiceCommandsTestCase, self).setUp()
+        self.commands = manage.ServiceCommands()
+
+    def test_service_enable_invalid_params(self):
+        self.assertEqual(2, self.commands.enable('nohost', 'noservice'))
+
+    def test_service_disable_invalid_params(self):
+        self.assertEqual(2, self.commands.disable('nohost', 'noservice'))

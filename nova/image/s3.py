@@ -28,12 +28,12 @@ import tempfile
 import boto.s3.connection
 import eventlet
 from lxml import etree
+from oslo.config import cfg
 
 from nova.api.ec2 import ec2utils
 import nova.cert.rpcapi
 from nova import exception
 from nova.image import glance
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova import utils
 
@@ -44,6 +44,13 @@ s3_opts = [
     cfg.StrOpt('image_decryption_dir',
                default='/tmp',
                help='parent dir for tempdir used for image decryption'),
+    cfg.StrOpt('s3_host',
+               default='$my_ip',
+               help='hostname or ip for openstack to use when accessing '
+                    'the s3 api'),
+    cfg.IntOpt('s3_port',
+               default=3333,
+               help='port used when accessing the s3 api'),
     cfg.StrOpt('s3_access_key',
                default='notchecked',
                help='access key to use for s3 server for images'),
@@ -61,8 +68,7 @@ s3_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(s3_opts)
-CONF.import_opt('s3_host', 'nova.config')
-CONF.import_opt('s3_port', 'nova.config')
+CONF.import_opt('my_ip', 'nova.netconf')
 
 
 class S3ImageService(object):
@@ -395,7 +401,7 @@ class S3ImageService(object):
 
     @staticmethod
     def _test_for_malicious_tarball(path, filename):
-        """Raises exception if extracting tarball would escape extract path"""
+        """Raises exception if extracting tarball would escape extract path."""
         tar_file = tarfile.open(filename, 'r|gz')
         for n in tar_file.getnames():
             if not os.path.abspath(os.path.join(path, n)).startswith(path):

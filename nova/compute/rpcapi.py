@@ -18,14 +18,21 @@
 Client side of the compute RPC API.
 """
 
+from oslo.config import cfg
+
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 import nova.openstack.common.rpc.proxy
 
+rpcapi_opts = [
+    cfg.StrOpt('compute_topic',
+               default='compute',
+               help='the topic compute nodes listen on'),
+]
+
 CONF = cfg.CONF
-CONF.import_opt('compute_topic', 'nova.config')
+CONF.register_opts(rpcapi_opts)
 
 
 def _compute_topic(topic, ctxt, host, instance):
@@ -43,9 +50,9 @@ def _compute_topic(topic, ctxt, host, instance):
         if not instance:
             raise exception.NovaException(_('No compute host specified'))
         host = instance['host']
-    if not host:
-        raise exception.NovaException(_('Unable to find host for '
-                                           'Instance %s') % instance['uuid'])
+        if not host:
+            raise exception.NovaException(_('Unable to find host for '
+                                          'Instance %s') % instance['uuid'])
     return rpc.queue_get_for(ctxt, topic, host)
 
 
@@ -148,6 +155,16 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         2.18 - Add bdms to rebuild_instance
         2.19 - Add node to run_instance
         2.20 - Add node to prep_resize
+        2.21 - Add migrate_data dict param to pre_live_migration()
+        2.22 - Add recreate, on_shared_storage and host arguments to
+               rebuild_instance()
+        2.23 - Remove network_info from reboot_instance
+        2.24 - Added get_spice_console method
+        2.25 - Add attach_interface() and detach_interface()
+        2.26 - Add validate_console_port to ensure the service connects to
+               vnc on the correct port
+        2.27 - Adds 'reservations' to terminate_instance() and
+               soft_delete_instance()
     '''
 
     #
@@ -189,6 +206,15 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 instance=instance_p, network_id=network_id),
                 topic=_compute_topic(self.topic, ctxt, None, instance))
 
+    def attach_interface(self, ctxt, instance, network_id, port_id,
+                         requested_ip):
+        instance_p = jsonutils.to_primitive(instance)
+        return self.call(ctxt, self.make_msg('attach_interface',
+                 instance=instance_p, network_id=network_id,
+                 port_id=port_id, requested_ip=requested_ip),
+                 topic=_compute_topic(self.topic, ctxt, None, instance),
+                 version='2.25')
+
     def attach_volume(self, ctxt, instance, volume_id, mountpoint):
         instance_p = jsonutils.to_primitive(instance)
         self.cast(ctxt, self.make_msg('attach_volume',
@@ -215,10 +241,11 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
 
     def check_can_live_migrate_source(self, ctxt, instance, dest_check_data):
         instance_p = jsonutils.to_primitive(instance)
-        self.call(ctxt, self.make_msg('check_can_live_migrate_source',
-                           instance=instance_p,
-                           dest_check_data=dest_check_data),
-                  topic=_compute_topic(self.topic, ctxt, None, instance))
+        return self.call(ctxt, self.make_msg('check_can_live_migrate_source',
+                                             instance=instance_p,
+                                             dest_check_data=dest_check_data),
+                         topic=_compute_topic(self.topic, ctxt, None,
+                                              instance))
 
     def confirm_resize(self, ctxt, instance, migration, host,
             reservations=None, cast=True):
@@ -230,6 +257,13 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 reservations=reservations),
                 topic=_compute_topic(self.topic, ctxt, host, instance),
                 version='2.7')
+
+    def detach_interface(self, ctxt, instance, port_id):
+        instance_p = jsonutils.to_primitive(instance)
+        self.cast(ctxt, self.make_msg('detach_interface',
+                 instance=instance_p, port_id=port_id),
+                 topic=_compute_topic(self.topic, ctxt, None, instance),
+                 version='2.25')
 
     def detach_volume(self, ctxt, instance, volume_id):
         instance_p = jsonutils.to_primitive(instance)
@@ -283,6 +317,20 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         return self.call(ctxt, self.make_msg('get_vnc_console',
                 instance=instance_p, console_type=console_type),
                 topic=_compute_topic(self.topic, ctxt, None, instance))
+
+    def get_spice_console(self, ctxt, instance, console_type):
+        instance_p = jsonutils.to_primitive(instance)
+        return self.call(ctxt, self.make_msg('get_spice_console',
+                instance=instance_p, console_type=console_type),
+                topic=_compute_topic(self.topic, ctxt, None, instance),
+                         version='2.24')
+
+    def validate_console_port(self, ctxt, instance, port, console_type):
+        instance_p = jsonutils.to_primitive(instance)
+        return self.call(ctxt, self.make_msg('validate_console_port',
+                instance=instance_p, port=port, console_type=console_type),
+                topic=_compute_topic(self.topic, ctxt, None, instance),
+                version='2.26')
 
     def host_maintenance_mode(self, ctxt, host_param, mode, host):
         '''Set host maintenance mode
@@ -350,11 +398,14 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 topic=_compute_topic(self.topic, ctxt, None, instance))
 
     def pre_live_migration(self, ctxt, instance, block_migration, disk,
-            host):
+            host, migrate_data=None):
         instance_p = jsonutils.to_primitive(instance)
         return self.call(ctxt, self.make_msg('pre_live_migration',
-                instance=instance_p, block_migration=block_migration,
-                disk=disk), _compute_topic(self.topic, ctxt, host, None))
+                        instance=instance_p,
+                        block_migration=block_migration,
+                        disk=disk, migrate_data=migrate_data),
+                        _compute_topic(self.topic, ctxt, host, None),
+                        version='2.21')
 
     def prep_resize(self, ctxt, image, instance, instance_type, host,
                     reservations=None, request_spec=None,
@@ -370,28 +421,29 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 _compute_topic(self.topic, ctxt, host, None),
                 version='2.20')
 
-    def reboot_instance(self, ctxt, instance,
-                        block_device_info, network_info, reboot_type):
+    def reboot_instance(self, ctxt, instance, block_device_info,
+                        reboot_type):
         instance_p = jsonutils.to_primitive(instance)
         self.cast(ctxt, self.make_msg('reboot_instance',
                 instance=instance_p,
                 block_device_info=block_device_info,
-                network_info=network_info,
                 reboot_type=reboot_type),
                 topic=_compute_topic(self.topic, ctxt, None, instance),
-                version='2.5')
+                version='2.23')
 
     def rebuild_instance(self, ctxt, instance, new_pass, injected_files,
-            image_ref, orig_image_ref, orig_sys_metadata, bdms):
+            image_ref, orig_image_ref, orig_sys_metadata, bdms,
+            recreate=False, on_shared_storage=False, host=None):
         instance_p = jsonutils.to_primitive(instance)
         bdms_p = jsonutils.to_primitive(bdms)
         self.cast(ctxt, self.make_msg('rebuild_instance',
                 instance=instance_p, new_pass=new_pass,
                 injected_files=injected_files, image_ref=image_ref,
                 orig_image_ref=orig_image_ref,
-                orig_sys_metadata=orig_sys_metadata, bdms=bdms_p),
-                topic=_compute_topic(self.topic, ctxt, None, instance),
-                version='2.18')
+                orig_sys_metadata=orig_sys_metadata, bdms=bdms_p,
+                recreate=recreate, on_shared_storage=on_shared_storage),
+                topic=_compute_topic(self.topic, ctxt, host, instance),
+                version='2.22')
 
     def refresh_provider_fw_rules(self, ctxt, host):
         self.cast(ctxt, self.make_msg('refresh_provider_fw_rules'),
@@ -510,7 +562,7 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 version='2.3')
 
     def snapshot_instance(self, ctxt, instance, image_id, image_type,
-            backup_type, rotation):
+            backup_type=None, rotation=None):
         instance_p = jsonutils.to_primitive(instance)
         self.cast(ctxt, self.make_msg('snapshot_instance',
                 instance=instance_p, image_id=image_id,
@@ -537,13 +589,14 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                 instance=instance_p),
                 topic=_compute_topic(self.topic, ctxt, None, instance))
 
-    def terminate_instance(self, ctxt, instance, bdms):
+    def terminate_instance(self, ctxt, instance, bdms, reservations=None):
         instance_p = jsonutils.to_primitive(instance)
         bdms_p = jsonutils.to_primitive(bdms)
         self.cast(ctxt, self.make_msg('terminate_instance',
-                instance=instance_p, bdms=bdms_p),
+                instance=instance_p, bdms=bdms_p,
+                reservations=reservations),
                 topic=_compute_topic(self.topic, ctxt, None, instance),
-                version='2.4')
+                version='2.27')
 
     def unpause_instance(self, ctxt, instance):
         instance_p = jsonutils.to_primitive(instance)
@@ -564,11 +617,12 @@ class ComputeAPI(nova.openstack.common.rpc.proxy.RpcProxy):
     def publish_service_capabilities(self, ctxt):
         self.fanout_cast(ctxt, self.make_msg('publish_service_capabilities'))
 
-    def soft_delete_instance(self, ctxt, instance):
+    def soft_delete_instance(self, ctxt, instance, reservations=None):
         instance_p = jsonutils.to_primitive(instance)
         self.cast(ctxt, self.make_msg('soft_delete_instance',
-                instance=instance_p),
-                topic=_compute_topic(self.topic, ctxt, None, instance))
+                instance=instance_p, reservations=reservations),
+                topic=_compute_topic(self.topic, ctxt, None, instance),
+                version='2.27')
 
     def restore_instance(self, ctxt, instance):
         instance_p = jsonutils.to_primitive(instance)

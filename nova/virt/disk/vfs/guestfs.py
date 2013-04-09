@@ -14,11 +14,14 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from eventlet import tpool
 import guestfs
 
 from nova import exception
 from nova.openstack.common import log as logging
 from nova.virt.disk.vfs import api as vfs
+from nova.virt.libvirt import driver as libvirt_driver
+
 
 LOG = logging.getLogger(__name__)
 
@@ -62,13 +65,13 @@ class VFSGuestFS(vfs.VFS):
         roots = self.handle.inspect_os()
 
         if len(roots) == 0:
-            raise exception.NovaException(_("No operating system found in %s"),
-                                          self.imgfile)
+            raise exception.NovaException(_("No operating system found in %s")
+                                          % self.imgfile)
 
         if len(roots) != 1:
             LOG.debug(_("Multi-boot OS %(roots)s") % {'roots': str(roots)})
             raise exception.NovaException(
-                _("Multi-boot operating system found in %s"),
+                _("Multi-boot operating system found in %s") %
                 self.imgfile)
 
         self.setup_os_root(roots[0])
@@ -89,36 +92,57 @@ class VFSGuestFS(vfs.VFS):
             self.handle.mount_options("", mount[1], mount[0])
 
     def setup(self):
-        try:
-            LOG.debug(_("Setting up appliance for %(imgfile)s %(imgfmt)s") %
-                      {'imgfile': self.imgfile, 'imgfmt': self.imgfmt})
-            self.handle = guestfs.GuestFS()
+        LOG.debug(_("Setting up appliance for %(imgfile)s %(imgfmt)s") %
+                  {'imgfile': self.imgfile, 'imgfmt': self.imgfmt})
+        self.handle = tpool.Proxy(guestfs.GuestFS())
 
+        try:
             self.handle.add_drive_opts(self.imgfile, format=self.imgfmt)
+            if self.handle.get_attach_method() == 'libvirt':
+                libvirt_url = 'libvirt:' + libvirt_driver.LibvirtDriver.uri()
+                self.handle.set_attach_method(libvirt_url)
             self.handle.launch()
 
             self.setup_os()
 
             self.handle.aug_init("/", 0)
-        except Exception, e:
+        except RuntimeError, e:
+            # dereference object and implicitly close()
+            self.handle = None
+            raise exception.NovaException(
+                _("Error mounting %(imgfile)s with libguestfs (%(e)s)") %
+                {'imgfile': self.imgfile, 'e': e})
+        except Exception:
             self.handle = None
             raise
 
     def teardown(self):
         LOG.debug(_("Tearing down appliance"))
+
         try:
-            self.handle.aug_close()
-        except Exception, e:
-            LOG.debug(_("Failed to close augeas %s"), str(e))
-        try:
-            self.handle.shutdown()
-        except Exception, e:
-            LOG.debug(_("Failed to shutdown appliance %s"), str(e))
-        try:
-            self.handle.close()
-        except Exception, e:
-            LOG.debug(_("Failed to close guest handle %s"), str(e))
-        self.handle = None
+            try:
+                self.handle.aug_close()
+            except RuntimeError, e:
+                LOG.warn(_("Failed to close augeas %s"), e)
+
+            try:
+                self.handle.shutdown()
+            except AttributeError:
+                # Older libguestfs versions haven't an explicit shutdown
+                pass
+            except RuntimeError, e:
+                LOG.warn(_("Failed to shutdown appliance %s"), e)
+
+            try:
+                self.handle.close()
+            except AttributeError:
+                # Older libguestfs versions haven't an explicit close
+                pass
+            except RuntimeError, e:
+                LOG.warn(_("Failed to close guest handle %s"), e)
+        finally:
+            # dereference object and implicitly close()
+            self.handle = None
 
     @staticmethod
     def _canonicalize_path(path):
@@ -152,7 +176,7 @@ class VFSGuestFS(vfs.VFS):
         try:
             self.handle.stat(path)
             return True
-        except Exception, e:
+        except RuntimeError:
             return False
 
     def set_permissions(self, path, mode):

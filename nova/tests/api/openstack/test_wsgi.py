@@ -7,6 +7,7 @@ from nova.api.openstack import wsgi
 from nova import exception
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import utils
 
 
 class RequestTest(test.TestCase):
@@ -196,7 +197,7 @@ class XMLDeserializerTest(test.TestCase):
         self.assertEqual(deserializer.deserialize(xml), as_dict)
 
     def test_xml_empty(self):
-        xml = """<a></a>"""
+        xml = '<a></a>'
         as_dict = {"body": {"a": {}}}
         deserializer = wsgi.XMLDeserializer()
         self.assertEqual(deserializer.deserialize(xml), as_dict)
@@ -271,6 +272,21 @@ class ResourceTest(test.TestCase):
                                                  'application/xml',
                                                  '<fooAction>true</fooAction>')
         self.assertEqual(controller._action_foo, method)
+
+    def test_get_method_action_corrupt_xml(self):
+        class Controller(wsgi.Controller):
+            @wsgi.action('fooAction')
+            def _action_foo(self, req, id, body):
+                return body
+
+        controller = Controller()
+        resource = wsgi.Resource(controller)
+        self.assertRaises(
+                exception.MalformedRequestBody,
+                resource.get_method,
+                None, 'action',
+                'application/xml',
+                utils.killer_xml_body())
 
     def test_get_method_action_bad_body(self):
         class Controller(wsgi.Controller):
@@ -753,7 +769,7 @@ class ResourceTest(test.TestCase):
         self.assertEqual(response, 'foo')
 
     def test_resource_exception_handler_type_error(self):
-        """A TypeError should be translated to a Fault/HTTP 400"""
+        # A TypeError should be translated to a Fault/HTTP 400.
         def foo(a,):
             return a
 
@@ -851,6 +867,7 @@ class ResponseObjectTest(test.TestCase):
                                    atom=AtomSerializer)
         robj['X-header1'] = 'header1'
         robj['X-header2'] = 'header2'
+        robj['X-header3'] = 3
 
         for content_type, mtype in wsgi._MEDIA_TYPE_MAP.items():
             request = wsgi.Request.blank('/tests/123')
@@ -859,6 +876,7 @@ class ResponseObjectTest(test.TestCase):
             self.assertEqual(response.headers['Content-Type'], content_type)
             self.assertEqual(response.headers['X-header1'], 'header1')
             self.assertEqual(response.headers['X-header2'], 'header2')
+            self.assertEqual(response.headers['X-header3'], '3')
             self.assertEqual(response.status_int, 202)
             self.assertEqual(response.body, mtype)
 

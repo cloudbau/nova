@@ -52,23 +52,23 @@ class FakeNotifier(object):
         self.provided_context = context
 
 
-def good_function():
+def good_function(self, context):
     return 99
 
 
-def bad_function_exception(blah="a", boo="b", context=None):
+def bad_function_exception(self, context, extra, blah="a", boo="b", zoo=None):
     raise test.TestingException()
 
 
 class WrapExceptionTestCase(test.TestCase):
     def test_wrap_exception_good_return(self):
         wrapped = exception.wrap_exception()
-        self.assertEquals(99, wrapped(good_function)())
+        self.assertEquals(99, wrapped(good_function)(1, 2))
 
     def test_wrap_exception_throws_exception(self):
         wrapped = exception.wrap_exception()
         self.assertRaises(test.TestingException,
-                          wrapped(bad_function_exception))
+                          wrapped(bad_function_exception), 1, 2, 3)
 
     def test_wrap_exception_with_notifier(self):
         notifier = FakeNotifier()
@@ -76,7 +76,7 @@ class WrapExceptionTestCase(test.TestCase):
                                            "level")
         ctxt = context.get_admin_context()
         self.assertRaises(test.TestingException,
-                          wrapped(bad_function_exception), context=ctxt)
+                          wrapped(bad_function_exception), 1, ctxt, 3, zoo=3)
         self.assertEquals(notifier.provided_publisher, "publisher")
         self.assertEquals(notifier.provided_event, "event")
         self.assertEquals(notifier.provided_priority, "level")
@@ -88,7 +88,7 @@ class WrapExceptionTestCase(test.TestCase):
         notifier = FakeNotifier()
         wrapped = exception.wrap_exception(notifier)
         self.assertRaises(test.TestingException,
-                          wrapped(bad_function_exception))
+                          wrapped(bad_function_exception), 1, 2, 3)
         self.assertEquals(notifier.provided_publisher, None)
         self.assertEquals(notifier.provided_event, "bad_function_exception")
         self.assertEquals(notifier.provided_priority, notifier.ERROR)
@@ -117,8 +117,8 @@ class NovaExceptionTestCase(test.TestCase):
         class FakeNovaException(exception.NovaException):
             message = "default message: %(mispelled_code)s"
 
-        exc = FakeNovaException(code=500)
-        self.assertEquals(unicode(exc), 'default message: %(mispelled_code)s')
+        exc = FakeNovaException(code=500, mispelled_code='blah')
+        self.assertEquals(unicode(exc), 'default message: blah')
 
     def test_default_error_code(self):
         class FakeNovaException(exception.NovaException):
@@ -133,3 +133,39 @@ class NovaExceptionTestCase(test.TestCase):
 
         exc = FakeNovaException(code=404)
         self.assertEquals(exc.kwargs['code'], 404)
+
+    def test_cleanse_dict(self):
+        kwargs = {'foo': 1, 'blah_pass': 2, 'zoo_password': 3, '_pass': 4}
+        self.assertEquals(exception._cleanse_dict(kwargs), {'foo': 1})
+
+        kwargs = {}
+        self.assertEquals(exception._cleanse_dict(kwargs), {})
+
+    def test_format_message_local(self):
+        class FakeNovaException(exception.NovaException):
+            message = "some message"
+
+        exc = FakeNovaException()
+        self.assertEquals(unicode(exc), exc.format_message())
+
+    def test_format_message_remote(self):
+        class FakeNovaException_Remote(exception.NovaException):
+            message = "some message"
+
+            def __unicode__(self):
+                return u"print the whole trace"
+
+        exc = FakeNovaException_Remote()
+        self.assertEquals(unicode(exc), u"print the whole trace")
+        self.assertEquals(exc.format_message(), "some message")
+
+    def test_format_message_remote_error(self):
+        class FakeNovaException_Remote(exception.NovaException):
+            message = "some message %(somearg)s"
+
+            def __unicode__(self):
+                return u"print the whole trace"
+
+        self.flags(fatal_exception_format_errors=False)
+        exc = FakeNovaException_Remote(lame_arg='lame')
+        self.assertEquals(exc.format_message(), "some message %(somearg)s")

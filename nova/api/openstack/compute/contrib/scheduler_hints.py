@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -53,7 +53,7 @@ class SchedulerHintsController(wsgi.Controller):
 
 
 class Scheduler_hints(extensions.ExtensionDescriptor):
-    """Pass arbitrary key/value pairs to the scheduler"""
+    """Pass arbitrary key/value pairs to the scheduler."""
 
     name = "SchedulerHints"
     alias = "OS-SCH-HNT"

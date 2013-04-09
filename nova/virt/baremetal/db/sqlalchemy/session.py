@@ -19,20 +19,27 @@
 
 """Session Handling for SQLAlchemy backend."""
 
-from nova.db.sqlalchemy import session as nova_session
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
+from nova.openstack.common.db.sqlalchemy import session as nova_session
+from nova import paths
 
 opts = [
-    cfg.StrOpt('baremetal_sql_connection',
-               default='sqlite:///$state_path/baremetal_$sqlite_db',
+    cfg.StrOpt('sql_connection',
+               default=('sqlite:///' +
+                        paths.state_path_def('baremetal_$sqlite_db')),
                help='The SQLAlchemy connection string used to connect to the '
                     'bare-metal database'),
     ]
 
+baremetal_group = cfg.OptGroup(name='baremetal',
+                               title='Baremetal Options')
+
 CONF = cfg.CONF
-CONF.register_opts(opts)
-CONF.import_opt('sqlite_db', 'nova.db.sqlalchemy.session')
-CONF.import_opt('state_path', 'nova.config')
+CONF.register_group(baremetal_group)
+CONF.register_opts(opts, baremetal_group)
+
+CONF.import_opt('sqlite_db', 'nova.openstack.common.db.sqlalchemy.session')
 
 _ENGINE = None
 _MAKER = None
@@ -47,7 +54,6 @@ def get_session(autocommit=True, expire_on_commit=False):
         _MAKER = nova_session.get_maker(engine, autocommit, expire_on_commit)
 
     session = _MAKER()
-    session = nova_session.wrap_session(session)
     return session
 
 
@@ -55,5 +61,5 @@ def get_engine():
     """Return a SQLAlchemy engine."""
     global _ENGINE
     if _ENGINE is None:
-        _ENGINE = nova_session.create_engine(CONF.baremetal_sql_connection)
+        _ENGINE = nova_session.create_engine(CONF.baremetal.sql_connection)
     return _ENGINE

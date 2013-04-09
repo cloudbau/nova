@@ -1,7 +1,7 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2012 Citrix Systems, Inc.
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -21,12 +21,12 @@ Management class for Pool-related functions (join, eject, etc).
 
 import urlparse
 
+from oslo.config import cfg
+
 from nova.compute import rpcapi as compute_rpcapi
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
-from nova.openstack.common import rpc
 from nova.virt.xenapi import pool_states
 from nova.virt.xenapi import vm_utils
 
@@ -40,7 +40,7 @@ xenapi_pool_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(xenapi_pool_opts)
-CONF.import_opt('host', 'nova.config')
+CONF.import_opt('host', 'nova.netconf')
 
 
 class ResourcePool(object):
@@ -59,7 +59,7 @@ class ResourcePool(object):
 
     def undo_aggregate_operation(self, context, op, aggregate,
                                   host, set_error):
-        """Undo aggregate operation when pool error raised"""
+        """Undo aggregate operation when pool error raised."""
         try:
             if set_error:
                 metadata = {pool_states.KEY: pool_states.ERROR}
@@ -237,7 +237,7 @@ class ResourcePool(object):
                                            reason=str(e.details))
 
     def _create_slave_info(self):
-        """XenServer specific info needed to join the hypervisor pool"""
+        """XenServer specific info needed to join the hypervisor pool."""
         # replace the address from the xenapi connection url
         # because this might be 169.254.0.1, i.e. xenapi
         # NOTE: password in clear is not great, but it'll do for now

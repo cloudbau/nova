@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,7 +19,7 @@ from nova.compute import resource_tracker
 
 
 class FakeResourceTracker(resource_tracker.ResourceTracker):
-    """Version without a DB requirement"""
+    """Version without a DB requirement."""
 
     def _create(self, context, values):
         self.compute_node = values

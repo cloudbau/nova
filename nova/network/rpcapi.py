@@ -18,13 +18,24 @@
 Client side of the network RPC API.
 """
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova.openstack.common.rpc import proxy as rpc_proxy
 
+rpcapi_opts = [
+    cfg.StrOpt('network_topic',
+               default='network',
+               help='the topic network nodes listen on'),
+    cfg.BoolOpt('multi_host',
+                default=False,
+                help='Default value for multi_host in networks. Also, if set, '
+                     'some rpc network calls will be sent directly to host.'),
+]
+
 CONF = cfg.CONF
-CONF.import_opt('network_topic', 'nova.config')
+CONF.register_opts(rpcapi_opts)
 
 
 class NetworkAPI(rpc_proxy.RpcProxy):
@@ -38,6 +49,11 @@ class NetworkAPI(rpc_proxy.RpcProxy):
         1.3 - Adds fanout cast update_dns for multi_host networks
         1.4 - Add get_backdoor_port()
         1.5 - Adds associate
+        1.6 - Adds instance_uuid to _{dis,}associate_floating_ip
+        1.7 - Adds method get_floating_ip_pools to replace get_floating_pools
+        1.8 - Adds macs to allocate_for_instance
+        1.9 - Adds rxtx_factor to [add|remove]_fixed_ip, removes instance_uuid
+              from allocate_for_instance and instance_get_nw_info
     '''
 
     #
@@ -87,8 +103,9 @@ class NetworkAPI(rpc_proxy.RpcProxy):
     def get_floating_ip(self, ctxt, id):
         return self.call(ctxt, self.make_msg('get_floating_ip', id=id))
 
-    def get_floating_pools(self, ctxt):
-        return self.call(ctxt, self.make_msg('get_floating_pools'))
+    def get_floating_ip_pools(self, ctxt):
+        return self.call(ctxt, self.make_msg('get_floating_ip_pools'),
+                         version="1.7")
 
     def get_floating_ip_by_address(self, ctxt, address):
         return self.call(ctxt, self.make_msg('get_floating_ip_by_address',
@@ -140,25 +157,39 @@ class NetworkAPI(rpc_proxy.RpcProxy):
         return self.call(ctxt, self.make_msg('disassociate_floating_ip',
                 address=address, affect_auto_assigned=affect_auto_assigned))
 
-    def allocate_for_instance(self, ctxt, instance_id, instance_uuid,
-                              project_id, host, rxtx_factor, vpn,
-                              requested_networks):
+    def allocate_for_instance(self, ctxt, instance_id, project_id, host,
+                              rxtx_factor, vpn, requested_networks, macs=None):
+        if CONF.multi_host:
+            topic = rpc.queue_get_for(ctxt, self.topic, host)
+        else:
+            topic = None
         return self.call(ctxt, self.make_msg('allocate_for_instance',
-                instance_id=instance_id, instance_uuid=instance_uuid,
-                project_id=project_id, host=host, rxtx_factor=rxtx_factor,
-                vpn=vpn, requested_networks=requested_networks))
+                instance_id=instance_id, project_id=project_id, host=host,
+                rxtx_factor=rxtx_factor, vpn=vpn,
+                requested_networks=requested_networks,
+                macs=jsonutils.to_primitive(macs)),
+                topic=topic, version='1.9')
 
     def deallocate_for_instance(self, ctxt, instance_id, project_id, host):
+        if CONF.multi_host:
+            topic = rpc.queue_get_for(ctxt, self.topic, host)
+        else:
+            topic = None
         return self.call(ctxt, self.make_msg('deallocate_for_instance',
-                instance_id=instance_id, project_id=project_id, host=host))
+                instance_id=instance_id, project_id=project_id, host=host),
+                topic=topic)
 
-    def add_fixed_ip_to_instance(self, ctxt, instance_id, host, network_id):
+    def add_fixed_ip_to_instance(self, ctxt, instance_id, rxtx_factor,
+                                 host, network_id):
         return self.call(ctxt, self.make_msg('add_fixed_ip_to_instance',
-                instance_id=instance_id, host=host, network_id=network_id))
+                instance_id=instance_id, rxtx_factor=rxtx_factor,
+                host=host, network_id=network_id), version='1.9')
 
-    def remove_fixed_ip_from_instance(self, ctxt, instance_id, host, address):
+    def remove_fixed_ip_from_instance(self, ctxt, instance_id, rxtx_factor,
+                                      host, address):
         return self.call(ctxt, self.make_msg('remove_fixed_ip_from_instance',
-                instance_id=instance_id, host=host, address=address))
+                instance_id=instance_id, rxtx_factor=rxtx_factor,
+                host=host, address=address), version='1.9')
 
     def add_network_to_project(self, ctxt, project_id, network_uuid):
         return self.call(ctxt, self.make_msg('add_network_to_project',
@@ -167,13 +198,13 @@ class NetworkAPI(rpc_proxy.RpcProxy):
     def associate(self, ctxt, network_uuid, associations):
         return self.call(ctxt, self.make_msg('associate',
                 network_uuid=network_uuid, associations=associations),
-                self.topic, version="1.5")
+                self.topic, version='1.5')
 
-    def get_instance_nw_info(self, ctxt, instance_id, instance_uuid,
-                             rxtx_factor, host, project_id):
+    def get_instance_nw_info(self, ctxt, instance_id, rxtx_factor, host,
+                             project_id):
         return self.call(ctxt, self.make_msg('get_instance_nw_info',
-                instance_id=instance_id, instance_uuid=instance_uuid,
-                rxtx_factor=rxtx_factor, host=host, project_id=project_id))
+                instance_id=instance_id, rxtx_factor=rxtx_factor, host=host,
+                project_id=project_id), version='1.9')
 
     def validate_networks(self, ctxt, networks):
         return self.call(ctxt, self.make_msg('validate_networks',
@@ -259,20 +290,24 @@ class NetworkAPI(rpc_proxy.RpcProxy):
     # 1.0 API was being documented using this client proxy class.  It should be
     # changed if there was ever a 2.0.
     def _associate_floating_ip(self, ctxt, floating_address, fixed_address,
-                               interface, host):
+                               interface, host, instance_uuid=None):
         return self.call(ctxt, self.make_msg('_associate_floating_ip',
                 floating_address=floating_address, fixed_address=fixed_address,
-                interface=interface),
-                topic=rpc.queue_get_for(ctxt, self.topic, host))
+                interface=interface, instance_uuid=instance_uuid),
+                topic=rpc.queue_get_for(ctxt, self.topic, host),
+                version='1.6')
 
     # NOTE(russellb): Ideally this would not have a prefix of '_' since it is
     # a part of the rpc API. However, this is how it was being called when the
     # 1.0 API was being documented using this client proxy class.  It should be
     # changed if there was ever a 2.0.
-    def _disassociate_floating_ip(self, ctxt, address, interface, host):
+    def _disassociate_floating_ip(self, ctxt, address, interface, host,
+                                  instance_uuid=None):
         return self.call(ctxt, self.make_msg('_disassociate_floating_ip',
-                address=address, interface=interface),
-                topic=rpc.queue_get_for(ctxt, self.topic, host))
+                address=address, interface=interface,
+                instance_uuid=instance_uuid),
+                topic=rpc.queue_get_for(ctxt, self.topic, host),
+                version='1.6')
 
     def lease_fixed_ip(self, ctxt, address, host):
         self.cast(ctxt, self.make_msg('lease_fixed_ip', address=address),

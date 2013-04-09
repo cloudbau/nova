@@ -18,13 +18,14 @@
 
 import datetime
 
+from oslo.config import cfg
+
 from nova.api.ec2 import cloud
 from nova.api.ec2 import ec2utils
 from nova.compute import utils as compute_utils
 from nova import context
 from nova import db
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova.openstack.common import rpc
 from nova.openstack.common import timeutils
@@ -52,6 +53,8 @@ class EC2ValidateTestCase(test.TestCase):
         self.cloud = cloud.CloudController()
 
         # set up services
+        self.conductor = self.start_service('conductor',
+                manager=CONF.conductor.manager)
         self.compute = self.start_service('compute')
         self.scheduter = self.start_service('scheduler')
         self.network = self.start_service('network')
@@ -174,7 +177,7 @@ class EC2ValidateTestCase(test.TestCase):
 
 
 class EC2TimestampValidationTestCase(test.TestCase):
-    """Test case for EC2 request timestamp validation"""
+    """Test case for EC2 request timestamp validation."""
 
     def test_validate_ec2_timestamp_valid(self):
         params = {'Timestamp': '2011-04-22T11:29:49Z'}
@@ -190,6 +193,25 @@ class EC2TimestampValidationTestCase(test.TestCase):
         params = {}
         expired = ec2utils.is_ec2_timestamp_expired(params)
         self.assertFalse(expired)
+
+    def test_validate_ec2_timestamp_ms_time_regex(self):
+        result = ec2utils._ms_time_regex.match('2011-04-22T11:29:49.123Z')
+        self.assertIsNotNone(result)
+        result = ec2utils._ms_time_regex.match('2011-04-22T11:29:49.123456Z')
+        self.assertIsNotNone(result)
+        result = ec2utils._ms_time_regex.match('2011-04-22T11:29:49.1234567Z')
+        self.assertIsNone(result)
+        result = ec2utils._ms_time_regex.match('2011-04-22T11:29:49.123')
+        self.assertIsNone(result)
+        result = ec2utils._ms_time_regex.match('2011-04-22T11:29:49Z')
+        self.assertIsNone(result)
+
+    def test_validate_ec2_timestamp_aws_sdk_format(self):
+        params = {'Timestamp': '2011-04-22T11:29:49.123Z'}
+        expired = ec2utils.is_ec2_timestamp_expired(params)
+        self.assertFalse(expired)
+        expired = ec2utils.is_ec2_timestamp_expired(params, expires=300)
+        self.assertTrue(expired)
 
     def test_validate_ec2_timestamp_invalid_format(self):
         params = {'Timestamp': '2011-04-22T11:29:49.000P'}

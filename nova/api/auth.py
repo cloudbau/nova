@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2011 OpenStack, LLC
+# Copyright (c) 2011 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -18,11 +18,11 @@ Common Auth Middleware.
 
 """
 
+from oslo.config import cfg
 import webob.dec
 import webob.exc
 
 from nova import context
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova import wsgi
@@ -76,7 +76,7 @@ class InjectContext(wsgi.Middleware):
 
 
 class NovaKeystoneContext(wsgi.Middleware):
-    """Make a request context from keystone headers"""
+    """Make a request context from keystone headers."""
 
     @webob.dec.wsgify(RequestClass=wsgi.Request)
     def __call__(self, req):
@@ -128,7 +128,7 @@ class NovaKeystoneContext(wsgi.Middleware):
         return self.application
 
     def _get_roles(self, req):
-        """Get the list of roles"""
+        """Get the list of roles."""
 
         if 'X_ROLES' in req.headers:
             roles = req.headers.get('X_ROLES', '')

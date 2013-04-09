@@ -24,12 +24,12 @@ Handling of VM disk images.
 import os
 import re
 
+from oslo.config import cfg
+
 from nova import exception
 from nova.image import glance
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova import utils
-
 
 LOG = logging.getLogger(__name__)
 
@@ -49,7 +49,7 @@ class QemuImgInfo(object):
     TOP_LEVEL_RE = re.compile(r"^([\w\d\s\_\-]+):(.*)$")
     SIZE_RE = re.compile(r"\(\s*(\d+)\s+bytes\s*\)", re.I)
 
-    def __init__(self, cmd_output):
+    def __init__(self, cmd_output=None):
         details = self._parse(cmd_output)
         self.image = details.get('image')
         self.backing_file = details.get('backing_file')
@@ -123,7 +123,7 @@ class QemuImgInfo(object):
                 if len(line_pieces) != 6:
                     break
                 else:
-                    # Check against this pattern occuring in the final position
+                    # Check against this pattern in the final position
                     # "%02d:%02d:%02d.%03d"
                     date_pieces = line_pieces[5].split(":")
                     if len(date_pieces) != 3:
@@ -175,16 +175,19 @@ class QemuImgInfo(object):
 
 
 def qemu_img_info(path):
-    """Return a object containing the parsed output from qemu-img info."""
+    """Return an object containing the parsed output from qemu-img info."""
+    if not os.path.exists(path):
+        return QemuImgInfo()
+
     out, err = utils.execute('env', 'LC_ALL=C', 'LANG=C',
                              'qemu-img', 'info', path)
     return QemuImgInfo(out)
 
 
-def convert_image(source, dest, out_format):
-    """Convert image to other format"""
+def convert_image(source, dest, out_format, run_as_root=False):
+    """Convert image to other format."""
     cmd = ('qemu-img', 'convert', '-O', out_format, source, dest)
-    utils.execute(*cmd)
+    utils.execute(*cmd, run_as_root=run_as_root)
 
 
 def fetch(context, image_href, path, _user_id, _project_id):
@@ -222,6 +225,7 @@ def fetch_to_raw(context, image_href, path, user_id, project_id):
             LOG.debug("%s was %s, converting to raw" % (image_href, fmt))
             with utils.remove_path_on_error(staged):
                 convert_image(path_tmp, staged, 'raw')
+                os.unlink(path_tmp)
 
                 data = qemu_img_info(staged)
                 if data.file_format != "raw":
@@ -230,6 +234,5 @@ def fetch_to_raw(context, image_href, path, user_id, project_id):
                         data.file_format)
 
                 os.rename(staged, path)
-
         else:
             os.rename(path_tmp, path)

@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -29,10 +29,10 @@ from nova.api.openstack.compute import images
 from nova.api.openstack.compute.views import images as images_view
 from nova.api.openstack import xmlutil
 from nova import exception
+from nova.image import glance
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.tests import matchers
-from nova import utils
 
 NS = "{http://docs.openstack.org/compute/api/v1.1}"
 ATOMNS = "{http://www.w3.org/2005/Atom}"
@@ -62,7 +62,7 @@ class ImagesControllerTest(test.TestCase):
 
         href = "http://localhost/v2/fake/images/124"
         bookmark = "http://localhost/fake/images/124"
-        alternate = "%s/fake/images/124" % utils.generate_glance_url()
+        alternate = "%s/fake/images/124" % glance.generate_glance_url()
         server_uuid = "aa640691-d1a7-4a67-9d3c-d35ee6b3cc74"
         server_href = "http://localhost/v2/fake/servers/" + server_uuid
         server_bookmark = "http://localhost/fake/servers/" + server_uuid
@@ -200,7 +200,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": alternate % (utils.generate_glance_url(), 123),
+                "href": alternate % (glance.generate_glance_url(), 123),
             }],
         },
         {
@@ -238,7 +238,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": alternate % (utils.generate_glance_url(), 124),
+                "href": alternate % (glance.generate_glance_url(), 124),
             }],
         },
         {
@@ -276,7 +276,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/125" % utils.generate_glance_url()
+                "href": "%s/fake/images/125" % glance.generate_glance_url()
             }],
         },
         {
@@ -314,7 +314,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/126" % utils.generate_glance_url()
+                "href": "%s/fake/images/126" % glance.generate_glance_url()
             }],
         },
         {
@@ -352,7 +352,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/127" % utils.generate_glance_url()
+                "href": "%s/fake/images/127" % glance.generate_glance_url()
             }],
         },
         {
@@ -390,7 +390,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/128" % utils.generate_glance_url()
+                "href": "%s/fake/images/128" % glance.generate_glance_url()
             }],
         },
         {
@@ -428,7 +428,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/129" % utils.generate_glance_url()
+                "href": "%s/fake/images/129" % glance.generate_glance_url()
             }],
         },
         {
@@ -452,7 +452,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": "%s/fake/images/130" % utils.generate_glance_url()
+                "href": "%s/fake/images/130" % glance.generate_glance_url()
             }],
         },
         ]
@@ -491,7 +491,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": alternate % (utils.generate_glance_url(), 123),
+                "href": alternate % (glance.generate_glance_url(), 123),
             }],
         },
         {
@@ -529,7 +529,7 @@ class ImagesControllerTest(test.TestCase):
             {
                 "rel": "alternate",
                 "type": "application/vnd.openstack.image",
-                "href": alternate % (utils.generate_glance_url(), 124),
+                "href": alternate % (glance.generate_glance_url(), 124),
             }],
         }]
 
@@ -656,7 +656,7 @@ class ImagesControllerTest(test.TestCase):
         view = images_view.ViewBuilder()
         request = fakes.HTTPRequest.blank('/v2/fake/images/1')
         generated_url = view._get_alternate_link(request, 1)
-        actual_url = "%s/fake/images/1" % utils.generate_glance_url()
+        actual_url = "%s/fake/images/1" % glance.generate_glance_url()
         self.assertEqual(generated_url, actual_url)
 
     def test_delete_image(self):
@@ -664,6 +664,18 @@ class ImagesControllerTest(test.TestCase):
         request.method = 'DELETE'
         response = self.controller.delete(request, '124')
         self.assertEqual(response.status_int, 204)
+
+    def test_delete_deleted_image(self):
+        """If you try to delete a deleted image, you get back 403 Forbidden."""
+
+        deleted_image_id = 128
+        # see nova.tests.api.openstack.fakes:_make_image_fixtures
+
+        request = fakes.HTTPRequest.blank(
+              '/v2/fake/images/%s' % deleted_image_id)
+        request.method = 'DELETE'
+        self.assertRaises(webob.exc.HTTPForbidden, self.controller.delete,
+             request, '%s' % deleted_image_id)
 
     def test_delete_image_not_found(self):
         request = fakes.HTTPRequest.blank('/v2/fake/images/300')

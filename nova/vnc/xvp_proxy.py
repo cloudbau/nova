@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License");
@@ -25,10 +25,10 @@ import eventlet
 import eventlet.green
 import eventlet.greenio
 import eventlet.wsgi
+from oslo.config import cfg
 
 from nova.consoleauth import rpcapi as consoleauth_rpcapi
 from nova import context
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova import version
 from nova import wsgi
@@ -174,7 +174,7 @@ class SafeHttpProtocol(eventlet.wsgi.HttpProtocol):
 
 def get_wsgi_server():
     LOG.audit(_("Starting nova-xvpvncproxy node (version %s)"),
-              version.version_string_with_vcs())
+              version.version_string_with_package())
 
     return wsgi.Server("XCP VNC Proxy",
                        XCPVNCProxy(),

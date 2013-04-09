@@ -14,12 +14,13 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import os
 import sys
 
+from nova import exception
 from nova import test
 from nova.tests import fakeguestfs
 from nova.virt.disk import api as diskapi
-from nova.virt.disk.vfs import api as vfsapi
 from nova.virt.disk.vfs import guestfs as vfsguestfs
 
 
@@ -29,6 +30,25 @@ class VirtDiskTest(test.TestCase):
         super(VirtDiskTest, self).setUp()
         sys.modules['guestfs'] = fakeguestfs
         vfsguestfs.guestfs = fakeguestfs
+
+    def test_inject_data(self):
+
+        self.assertTrue(diskapi.inject_data("/some/file", use_cow=True))
+
+        self.assertTrue(diskapi.inject_data("/some/file",
+                                            mandatory=('files',)))
+
+        self.assertTrue(diskapi.inject_data("/some/file", key="mysshkey",
+                                            mandatory=('key',)))
+
+        os_name = os.name
+        os.name = 'nt'  # Cause password injection to fail
+        self.assertRaises(exception.NovaException,
+                          diskapi.inject_data,
+                          "/some/file", admin_password="p",
+                          mandatory=('admin_password',))
+        self.assertFalse(diskapi.inject_data("/some/file", admin_password="p"))
+        os.name = os_name
 
     def test_inject_data_key(self):
 
@@ -47,7 +67,7 @@ class VirtDiskTest(test.TestCase):
                                       "key was injected by Nova\nmysshkey\n",
                            'gid': 100,
                            'uid': 100,
-                           'mode': 0700})
+                           'mode': 0600})
 
         vfs.teardown()
 
@@ -81,8 +101,30 @@ class VirtDiskTest(test.TestCase):
                                       "key was injected by Nova\nmysshkey\n",
                            'gid': 100,
                            'uid': 100,
-                           'mode': 0700})
+                           'mode': 0600})
 
+        vfs.teardown()
+
+    def test_inject_data_key_with_selinux_append_with_newline(self):
+
+        vfs = vfsguestfs.VFSGuestFS("/some/file", "qcow2")
+        vfs.setup()
+
+        vfs.replace_file("/etc/rc.d/rc.local", "#!/bin/sh\necho done")
+        vfs.make_path("etc/selinux")
+        vfs.make_path("etc/rc.d")
+        diskapi._inject_key_into_fs("mysshkey", vfs)
+
+        self.assertTrue("/etc/rc.d/rc.local" in vfs.handle.files)
+        self.assertEquals(vfs.handle.files["/etc/rc.d/rc.local"],
+                {'isdir': False,
+                 'content': "#!/bin/sh\necho done\n# Added "
+                            "by Nova to ensure injected ssh keys have "
+                            "the right context\nrestorecon -RF "
+                            "root/.ssh 2>/dev/null || :\n",
+                 'gid': 100,
+                 'uid': 100,
+                 'mode': 0700})
         vfs.teardown()
 
     def test_inject_net(self):

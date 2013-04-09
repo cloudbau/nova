@@ -1,4 +1,4 @@
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -108,14 +108,14 @@ class FakeHostState(host_manager.HostState):
 
 class FakeInstance(object):
     def __init__(self, context=None, params=None, type_name='m1.tiny'):
-        """Create a test instance. Returns uuid"""
+        """Create a test instance. Returns uuid."""
         self.context = context
 
         i = self._create_fake_instance(params, type_name=type_name)
         self.uuid = i['uuid']
 
     def _create_fake_instance(self, params=None, type_name='m1.tiny'):
-        """Create a test instance"""
+        """Create a test instance."""
         if not params:
             params = {}
 

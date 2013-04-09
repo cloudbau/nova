@@ -106,7 +106,7 @@ class AggregateController(object):
             raise exc.HTTPBadRequest
 
         for key in updates.keys():
-            if not key in ["name", "availability_zone"]:
+            if key not in ["name", "availability_zone"]:
                 raise exc.HTTPBadRequest
 
         try:
@@ -167,7 +167,8 @@ class AggregateController(object):
         authorize(context)
         try:
             aggregate = self.api.remove_host_from_aggregate(context, id, host)
-        except (exception.AggregateNotFound, exception.AggregateHostNotFound):
+        except (exception.AggregateNotFound, exception.AggregateHostNotFound,
+                exception.ComputeHostNotFound):
             LOG.info(_("Cannot remove host %(host)s in aggregate "
                             "%(id)s") % locals())
             raise exc.HTTPNotFound
@@ -203,7 +204,7 @@ class AggregateController(object):
 
 
 class Aggregates(extensions.ExtensionDescriptor):
-    """Admin-only aggregate administration"""
+    """Admin-only aggregate administration."""
 
     name = "Aggregates"
     alias = "os-aggregates"

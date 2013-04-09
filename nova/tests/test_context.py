@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-#    Copyright 2011 OpenStack LLC
+#    Copyright 2011 OpenStack Foundation
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -74,3 +74,30 @@ class ContextTestCase(test.TestCase):
         self.assertTrue(c)
         self.assertIn("'extra_arg1': 'meow'", info['log_msg'])
         self.assertIn("'extra_arg2': 'wuff'", info['log_msg'])
+
+    def test_service_catalog_default(self):
+        ctxt = context.RequestContext('111', '222')
+        self.assertEquals(ctxt.service_catalog, [])
+
+        ctxt = context.RequestContext('111', '222',
+                service_catalog=[])
+        self.assertEquals(ctxt.service_catalog, [])
+
+        ctxt = context.RequestContext('111', '222',
+                service_catalog=None)
+        self.assertEquals(ctxt.service_catalog, [])
+
+    def test_service_catalog_cinder_only(self):
+        service_catalog = [
+                {u'type': u'compute', u'name': u'nova'},
+                {u'type': u's3', u'name': u's3'},
+                {u'type': u'image', u'name': u'glance'},
+                {u'type': u'volume', u'name': u'cinder'},
+                {u'type': u'ec2', u'name': u'ec2'},
+                {u'type': u'object-store', u'name': u'swift'},
+                {u'type': u'identity', u'name': u'keystone'}]
+
+        volume_catalog = [{u'type': u'volume', u'name': u'cinder'}]
+        ctxt = context.RequestContext('111', '222',
+                service_catalog=service_catalog)
+        self.assertEquals(ctxt.service_catalog, volume_catalog)

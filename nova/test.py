@@ -23,70 +23,93 @@ inline callbacks.
 
 """
 
+import eventlet
+eventlet.monkey_patch(os=False)
+
 import os
 import shutil
 import sys
 import uuid
 
-import eventlet
 import fixtures
 import mox
+from oslo.config import cfg
 import stubout
 import testtools
 
 from nova import context
 from nova import db
 from nova.db import migration
-from nova.db.sqlalchemy.session import get_engine
 from nova.network import manager as network_manager
-from nova.openstack.common import cfg
+from nova.openstack.common.db.sqlalchemy import session
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
+from nova import paths
 from nova import service
-from nova import tests
 from nova.tests import conf_fixture
 from nova.tests import policy_fixture
-from nova.tests import utils
 
 
 test_opts = [
     cfg.StrOpt('sqlite_clean_db',
                default='clean.sqlite',
                help='File name of clean sqlite db'),
-    cfg.BoolOpt('fake_tests',
-                default=True,
-                help='should we use everything for testing'),
     ]
 
 CONF = cfg.CONF
 CONF.register_opts(test_opts)
-CONF.import_opt('sql_connection', 'nova.db.sqlalchemy.session')
-CONF.import_opt('sqlite_db', 'nova.db.sqlalchemy.session')
-CONF.import_opt('state_path', 'nova.config')
+CONF.import_opt('sql_connection',
+                'nova.openstack.common.db.sqlalchemy.session')
+CONF.import_opt('sqlite_db', 'nova.openstack.common.db.sqlalchemy.session')
 CONF.set_override('use_stderr', False)
 
 logging.setup('nova')
 LOG = logging.getLogger(__name__)
-
-eventlet.monkey_patch(os=False)
 
 _DB_CACHE = None
 
 
 class Database(fixtures.Fixture):
 
-    def __init__(self):
-        self.engine = get_engine()
+    def __init__(self, db_session, db_migrate, sql_connection,
+                    sqlite_db, sqlite_clean_db):
+        self.sql_connection = sql_connection
+        self.sqlite_db = sqlite_db
+        self.sqlite_clean_db = sqlite_clean_db
+
+        self.engine = db_session.get_engine()
         self.engine.dispose()
         conn = self.engine.connect()
-        if CONF.sql_connection == "sqlite://":
-            if migration.db_version() > migration.INIT_VERSION:
+        if sql_connection == "sqlite://":
+            if db_migrate.db_version() > db_migrate.INIT_VERSION:
                 return
         else:
-            testdb = os.path.join(CONF.state_path, CONF.sqlite_db)
+            testdb = paths.state_path_rel(sqlite_db)
             if os.path.exists(testdb):
                 return
-        migration.db_sync()
+        db_migrate.db_sync()
+        self.post_migrations()
+        if sql_connection == "sqlite://":
+            conn = self.engine.connect()
+            self._DB = "".join(line for line in conn.connection.iterdump())
+            self.engine.dispose()
+        else:
+            cleandb = paths.state_path_rel(sqlite_clean_db)
+            shutil.copyfile(testdb, cleandb)
+
+    def setUp(self):
+        super(Database, self).setUp()
+
+        if self.sql_connection == "sqlite://":
+            conn = self.engine.connect()
+            conn.connection.executescript(self._DB)
+            self.addCleanup(self.engine.dispose)
+        else:
+            shutil.copyfile(paths.state_path_rel(self.sqlite_clean_db),
+                            paths.state_path_rel(self.sqlite_db))
+
+    def post_migrations(self):
+        """Any addition steps that are needed outside of the migrations."""
         ctxt = context.get_admin_context()
         network = network_manager.VlanManager()
         bridge_interface = CONF.flat_interface or CONF.vlan_interface
@@ -106,27 +129,6 @@ class Database(fixtures.Fixture):
                                 dns1=CONF.flat_network_dns)
         for net in db.network_get_all(ctxt):
             network.set_network_host(ctxt, net)
-
-        if CONF.sql_connection == "sqlite://":
-            conn = self.engine.connect()
-            self._DB = "".join(line for line in conn.connection.iterdump())
-            self.engine.dispose()
-        else:
-            cleandb = os.path.join(CONF.state_path, CONF.sqlite_clean_db)
-            shutil.copyfile(testdb, cleandb)
-
-    def setUp(self):
-        super(Database, self).setUp()
-
-        if CONF.sql_connection == "sqlite://":
-            conn = self.engine.connect()
-            conn.connection.executescript(self._DB)
-            self.addCleanup(self.engine.dispose)
-        else:
-            shutil.copyfile(os.path.join(CONF.state_path,
-                                         CONF.sqlite_clean_db),
-                            os.path.join(CONF.state_path,
-                                         CONF.sqlite_db))
 
 
 class ReplaceModule(fixtures.Fixture):
@@ -188,24 +190,35 @@ class TestCase(testtools.TestCase):
     def setUp(self):
         """Run before each test method to initialize test environment."""
         super(TestCase, self).setUp()
+        test_timeout = os.environ.get('OS_TEST_TIMEOUT', 0)
+        try:
+            test_timeout = int(test_timeout)
+        except ValueError:
+            # If timeout value is invalid do not set a timeout.
+            test_timeout = 0
+        if test_timeout > 0:
+            self.useFixture(fixtures.Timeout(test_timeout, gentle=True))
         self.useFixture(fixtures.NestedTempfile())
         self.useFixture(fixtures.TempHomeDir())
 
-        if (os.environ.get('OS_STDOUT_NOCAPTURE') != 'True' and
-                os.environ.get('OS_STDOUT_NOCAPTURE') != '1'):
+        if (os.environ.get('OS_STDOUT_CAPTURE') == 'True' or
+                os.environ.get('OS_STDOUT_CAPTURE') == '1'):
             stdout = self.useFixture(fixtures.StringStream('stdout')).stream
             self.useFixture(fixtures.MonkeyPatch('sys.stdout', stdout))
-        if (os.environ.get('OS_STDERR_NOCAPTURE') != 'True' and
-                os.environ.get('OS_STDERR_NOCAPTURE') != '1'):
+        if (os.environ.get('OS_STDERR_CAPTURE') == 'True' or
+                os.environ.get('OS_STDERR_CAPTURE') == '1'):
             stderr = self.useFixture(fixtures.StringStream('stderr')).stream
             self.useFixture(fixtures.MonkeyPatch('sys.stderr', stderr))
 
-        self.log_fixture = self.useFixture(fixtures.FakeLogger('nova'))
+        self.log_fixture = self.useFixture(fixtures.FakeLogger())
         self.useFixture(conf_fixture.ConfFixture(CONF))
 
         global _DB_CACHE
         if not _DB_CACHE:
-            _DB_CACHE = Database()
+            _DB_CACHE = Database(session, migration,
+                                    sql_connection=CONF.sql_connection,
+                                    sqlite_db=CONF.sqlite_db,
+                                    sqlite_clean_db=CONF.sqlite_clean_db)
         self.useFixture(_DB_CACHE)
 
         mox_fixture = self.useFixture(MoxStubout())
@@ -214,6 +227,7 @@ class TestCase(testtools.TestCase):
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
+        CONF.set_override('fatal_exception_format_errors', True)
 
     def _clear_attrs(self):
         # Delete attributes that don't start with _ so they don't pin

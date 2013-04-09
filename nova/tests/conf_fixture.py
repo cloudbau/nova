@@ -17,20 +17,22 @@
 #    under the License.
 
 import fixtures
+from oslo.config import cfg
 
 from nova import config
 from nova import ipv6
-from nova.openstack.common import cfg
-from nova.tests.utils import cleanup_dns_managers
+from nova import paths
+from nova.tests import utils
 
 CONF = cfg.CONF
-CONF.import_opt('state_path', 'nova.config')
+CONF.import_opt('use_ipv6', 'nova.netconf')
+CONF.import_opt('host', 'nova.netconf')
 CONF.import_opt('scheduler_driver', 'nova.scheduler.manager')
 CONF.import_opt('fake_network', 'nova.network.manager')
 CONF.import_opt('network_size', 'nova.network.manager')
 CONF.import_opt('num_networks', 'nova.network.manager')
-CONF.import_opt('floating_ip_dns_manager', 'nova.network.manager')
-CONF.import_opt('instance_dns_manager', 'nova.network.manager')
+CONF.import_opt('floating_ip_dns_manager', 'nova.network.floating_ips')
+CONF.import_opt('instance_dns_manager', 'nova.network.floating_ips')
 CONF.import_opt('policy_file', 'nova.policy')
 CONF.import_opt('compute_driver', 'nova.virt.driver')
 CONF.import_opt('api_paste_config', 'nova.wsgi')
@@ -46,7 +48,8 @@ class ConfFixture(fixtures.Fixture):
         super(ConfFixture, self).setUp()
 
         self.conf.set_default('api_paste_config',
-                              '$state_path/etc/nova/api-paste.ini')
+                              paths.state_path_def('etc/nova/api-paste.ini'))
+        self.conf.set_default('host', 'fake-mini')
         self.conf.set_default('compute_driver', 'nova.virt.fake.FakeDriver')
         self.conf.set_default('fake_network', True)
         self.conf.set_default('fake_rabbit', True)
@@ -69,5 +72,5 @@ class ConfFixture(fixtures.Fixture):
         self.conf.set_default('vlan_interface', 'eth0')
         config.parse_args([], default_config_files=[])
         self.addCleanup(self.conf.reset)
-        self.addCleanup(cleanup_dns_managers)
+        self.addCleanup(utils.cleanup_dns_managers)
         self.addCleanup(ipv6.api.reset_backend)

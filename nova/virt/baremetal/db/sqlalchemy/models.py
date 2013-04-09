@@ -19,12 +19,9 @@
 SQLAlchemy models for baremetal data.
 """
 
-from sqlalchemy.orm import relationship, backref, object_mapper
-from sqlalchemy import Column, Integer, BigInteger, String, schema
-from sqlalchemy import ForeignKey, DateTime, Boolean, Text, Float, Index
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import Column, Boolean, Integer, String
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.schema import ForeignKeyConstraint
+from sqlalchemy import ForeignKey, Text
 
 from nova.db.sqlalchemy import models
 
@@ -37,8 +34,11 @@ class BareMetalNode(BASE, models.NovaBase):
 
     __tablename__ = 'bm_nodes'
     id = Column(Integer, primary_key=True)
+    deleted = Column(Boolean, default=False)
+    uuid = Column(String(36))
     service_host = Column(String(255))
     instance_uuid = Column(String(36), nullable=True)
+    instance_name = Column(String(255), nullable=True)
     cpus = Column(Integer)
     memory_mb = Column(Integer)
     local_gb = Column(Integer)
@@ -46,15 +46,19 @@ class BareMetalNode(BASE, models.NovaBase):
     pm_user = Column(Text)
     pm_password = Column(Text)
     prov_mac_address = Column(Text)
-    registration_status = Column(String(16))
     task_state = Column(String(255))
-    prov_vlan_id = Column(Integer)
     terminal_port = Column(Integer)
+    image_path = Column(String(255), nullable=True)
+    pxe_config_path = Column(String(255), nullable=True)
+    deploy_key = Column(String(255), nullable=True)
+    root_mb = Column(Integer)
+    swap_mb = Column(Integer)
 
 
 class BareMetalPxeIp(BASE, models.NovaBase):
     __tablename__ = 'bm_pxe_ips'
     id = Column(Integer, primary_key=True)
+    deleted = Column(Boolean, default=False)
     address = Column(String(255), unique=True)
     server_address = Column(String(255), unique=True)
     bm_node_id = Column(Integer, ForeignKey('bm_nodes.id'), nullable=True)
@@ -63,18 +67,9 @@ class BareMetalPxeIp(BASE, models.NovaBase):
 class BareMetalInterface(BASE, models.NovaBase):
     __tablename__ = 'bm_interfaces'
     id = Column(Integer, primary_key=True)
+    deleted = Column(Boolean, default=False)
     bm_node_id = Column(Integer, ForeignKey('bm_nodes.id'), nullable=True)
     address = Column(String(255), unique=True)
     datapath_id = Column(String(255))
     port_no = Column(Integer)
     vif_uuid = Column(String(36), unique=True)
-
-
-class BareMetalDeployment(BASE, models.NovaBase):
-    __tablename__ = 'bm_deployments'
-    id = Column(Integer, primary_key=True)
-    key = Column(String(255))
-    image_path = Column(String(255))
-    pxe_config_path = Column(String(255))
-    root_mb = Column(Integer)
-    swap_mb = Column(Integer)

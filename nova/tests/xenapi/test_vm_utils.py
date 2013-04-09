@@ -14,7 +14,7 @@ XENSM_TYPE = 'xensm'
 ISCSI_TYPE = 'iscsi'
 
 
-def get_fake_dev_params(sr_type):
+def get_fake_connection_data(sr_type):
     fakes = {XENSM_TYPE: {'sr_uuid': 'falseSR',
                           'name_label': 'fake_storage',
                           'name_description': 'test purposes',
@@ -73,16 +73,16 @@ class GetInstanceForVdisForSrTestCase(stubs.XenAPITestBase):
 
         self.assertEquals([], result)
 
-    def test_get_vdis_for_boot_from_vol_with_sr_uuid(self):
-        dev_params = get_fake_dev_params(XENSM_TYPE)
+    def test_get_vdi_uuid_for_volume_with_sr_uuid(self):
+        connection_data = get_fake_connection_data(XENSM_TYPE)
         stubs.stubout_session(self.stubs, fake.SessionBase)
         driver = xenapi_conn.XenAPIDriver(False)
 
-        result = vm_utils.get_vdis_for_boot_from_vol(driver._session,
-                                                     dev_params)
-        self.assertEquals(result['root']['uuid'], 'falseVDI')
+        vdi_uuid = vm_utils.get_vdi_uuid_for_volume(
+                driver._session, connection_data)
+        self.assertEquals(vdi_uuid, 'falseVDI')
 
-    def test_get_vdis_for_boot_from_vol_failure(self):
+    def test_get_vdi_uuid_for_volume_failure(self):
         stubs.stubout_session(self.stubs, fake.SessionBase)
         driver = xenapi_conn.XenAPIDriver(False)
 
@@ -90,19 +90,19 @@ class GetInstanceForVdisForSrTestCase(stubs.XenAPITestBase):
             return None
 
         self.stubs.Set(volume_utils, 'introduce_sr', bad_introduce_sr)
-        dev_params = get_fake_dev_params(XENSM_TYPE)
+        connection_data = get_fake_connection_data(XENSM_TYPE)
         self.assertRaises(exception.NovaException,
-                          vm_utils.get_vdis_for_boot_from_vol,
-                          driver._session, dev_params)
+                          vm_utils.get_vdi_uuid_for_volume,
+                          driver._session, connection_data)
 
-    def test_get_vdis_for_boot_from_iscsi_vol_missing_sr_uuid(self):
-        dev_params = get_fake_dev_params(ISCSI_TYPE)
+    def test_get_vdi_uuid_for_volume_from_iscsi_vol_missing_sr_uuid(self):
+        connection_data = get_fake_connection_data(ISCSI_TYPE)
         stubs.stubout_session(self.stubs, fake.SessionBase)
         driver = xenapi_conn.XenAPIDriver(False)
 
-        result = vm_utils.get_vdis_for_boot_from_vol(driver._session,
-                                                     dev_params)
-        self.assertNotEquals(result['root']['uuid'], None)
+        vdi_uuid = vm_utils.get_vdi_uuid_for_volume(
+                driver._session, connection_data)
+        self.assertNotEquals(vdi_uuid, None)
 
 
 class VMRefOrRaiseVMFoundTestCase(test.TestCase):
@@ -204,3 +204,83 @@ class BittorrentTestCase(stubs.XenAPITestBase):
 
     def test_create_image_uncached(self):
         self._test_create_image('none')
+
+
+class CreateVBDTestCase(test.TestCase):
+    def setUp(self):
+        super(CreateVBDTestCase, self).setUp()
+
+        class FakeSession():
+            def call_xenapi(*args):
+                pass
+
+        self.session = FakeSession()
+        self.mock = mox.Mox()
+        self.mock.StubOutWithMock(self.session, 'call_xenapi')
+        self.vbd_rec = self._generate_vbd_rec()
+
+    def _generate_vbd_rec(self):
+        vbd_rec = {}
+        vbd_rec['VM'] = 'vm_ref'
+        vbd_rec['VDI'] = 'vdi_ref'
+        vbd_rec['userdevice'] = '0'
+        vbd_rec['bootable'] = False
+        vbd_rec['mode'] = 'RW'
+        vbd_rec['type'] = 'disk'
+        vbd_rec['unpluggable'] = True
+        vbd_rec['empty'] = False
+        vbd_rec['other_config'] = {}
+        vbd_rec['qos_algorithm_type'] = ''
+        vbd_rec['qos_algorithm_params'] = {}
+        vbd_rec['qos_supported_algorithms'] = []
+        return vbd_rec
+
+    def test_create_vbd_default_args(self):
+        self.session.call_xenapi('VBD.create',
+                self.vbd_rec).AndReturn("vbd_ref")
+        self.mock.ReplayAll()
+
+        result = vm_utils.create_vbd(self.session, "vm_ref", "vdi_ref", 0)
+        self.assertEquals(result, "vbd_ref")
+        self.mock.VerifyAll()
+
+    def test_create_vbd_osvol(self):
+        self.session.call_xenapi('VBD.create',
+                self.vbd_rec).AndReturn("vbd_ref")
+        self.session.call_xenapi('VBD.add_to_other_config', "vbd_ref",
+                                 "osvol", "True")
+        self.mock.ReplayAll()
+        result = vm_utils.create_vbd(self.session, "vm_ref", "vdi_ref", 0,
+                                     osvol=True)
+        self.assertEquals(result, "vbd_ref")
+        self.mock.VerifyAll()
+
+    def test_create_vbd_extra_args(self):
+        self.vbd_rec['VDI'] = 'OpaqueRef:NULL'
+        self.vbd_rec['type'] = 'a'
+        self.vbd_rec['mode'] = 'RO'
+        self.vbd_rec['bootable'] = True
+        self.vbd_rec['empty'] = True
+        self.vbd_rec['unpluggable'] = False
+        self.session.call_xenapi('VBD.create',
+                self.vbd_rec).AndReturn("vbd_ref")
+        self.mock.ReplayAll()
+
+        result = vm_utils.create_vbd(self.session, "vm_ref", None, 0,
+                vbd_type="a", read_only=True, bootable=True,
+                empty=True, unpluggable=False)
+        self.assertEquals(result, "vbd_ref")
+        self.mock.VerifyAll()
+
+    def test_attach_cd(self):
+        self.mock.StubOutWithMock(vm_utils, 'create_vbd')
+
+        vm_utils.create_vbd(self.session, "vm_ref", None, 1,
+                vbd_type='cd', read_only=True, bootable=True,
+                empty=True, unpluggable=False).AndReturn("vbd_ref")
+        self.session.call_xenapi('VBD.insert', "vbd_ref", "vdi_ref")
+        self.mock.ReplayAll()
+
+        result = vm_utils.attach_cd(self.session, "vm_ref", "vdi_ref", 1)
+        self.assertEquals(result, "vbd_ref")
+        self.mock.VerifyAll()

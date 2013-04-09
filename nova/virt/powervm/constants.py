@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -30,6 +30,7 @@ POWERVM_POWER_STATE = {
 POWERVM_CPU_INFO = ('ppc64', 'powervm', '3940')
 POWERVM_HYPERVISOR_TYPE = 'powervm'
 POWERVM_HYPERVISOR_VERSION = '7.1'
+POWERVM_SUPPORTED_INSTANCES = [('ppc64', 'powervm', 'hvm')]
 
 POWERVM_MIN_ROOT_GB = 10
 

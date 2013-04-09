@@ -1,7 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -18,11 +17,9 @@
 
 import webob.exc
 
-from nova.api.openstack.compute.contrib import cloudpipe
 from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import db
-from nova import exception
 from nova.openstack.common import log as logging
 
 LOG = logging.getLogger(__name__)
@@ -37,7 +34,7 @@ class CloudpipeUpdateController(wsgi.Controller):
 
     @wsgi.action("update")
     def update(self, req, id, body):
-        """Configure cloudpipe parameters for the project"""
+        """Configure cloudpipe parameters for the project."""
 
         context = req.environ['nova.context']
         authorize(context)

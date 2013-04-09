@@ -1,5 +1,4 @@
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -14,8 +13,10 @@
 #    under the License.
 
 
-from datetime import datetime
+import datetime
+
 from nova.api.openstack.compute.contrib import services
+from nova import availability_zones
 from nova import context
 from nova import db
 from nova import exception
@@ -24,35 +25,36 @@ from nova import test
 from nova.tests.api.openstack import fakes
 
 
-fake_services_list = [{'binary': 'nova-scheduler',
-                       'host': 'host1',
-                       'availability_zone': 'nova',
-                       'id': 1,
-                       'disabled': True,
-                       'updated_at': datetime(2012, 10, 29, 13, 42, 2),
-                       'created_at': datetime(2012, 9, 18, 2, 46, 27)},
-                      {'binary': 'nova-compute',
-                       'host': 'host1',
-                       'availability_zone': 'nova',
-                       'id': 2,
-                       'disabled': True,
-                       'updated_at': datetime(2012, 10, 29, 13, 42, 5),
-                       'created_at': datetime(2012, 9, 18, 2, 46, 27)},
-                      {'binary': 'nova-scheduler',
-                       'host': 'host2',
-                       'availability_zone': 'nova',
-                       'id': 3,
-                       'disabled': False,
-                       'updated_at': datetime(2012, 9, 19, 6, 55, 34),
-                       'created_at': datetime(2012, 9, 18, 2, 46, 28)},
-                      {'binary': 'nova-compute',
-                       'host': 'host2',
-                       'availability_zone': 'nova',
-                       'id': 4,
-                       'disabled': True,
-                       'updated_at': datetime(2012, 9, 18, 8, 3, 38),
-                       'created_at': datetime(2012, 9, 18, 2, 46, 28)},
-                      ]
+fake_services_list = [
+        {'binary': 'nova-scheduler',
+         'host': 'host1',
+         'id': 1,
+         'disabled': True,
+         'topic': 'scheduler',
+         'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2),
+         'created_at': datetime.datetime(2012, 9, 18, 2, 46, 27)},
+        {'binary': 'nova-compute',
+         'host': 'host1',
+         'id': 2,
+         'disabled': True,
+         'topic': 'compute',
+         'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5),
+         'created_at': datetime.datetime(2012, 9, 18, 2, 46, 27)},
+        {'binary': 'nova-scheduler',
+         'host': 'host2',
+         'id': 3,
+         'disabled': False,
+         'topic': 'scheduler',
+         'updated_at': datetime.datetime(2012, 9, 19, 6, 55, 34),
+         'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28)},
+        {'binary': 'nova-compute',
+         'host': 'host2',
+         'id': 4,
+         'disabled': True,
+         'topic': 'compute',
+         'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38),
+         'created_at': datetime.datetime(2012, 9, 18, 2, 46, 28)},
+        ]
 
 
 class FakeRequest(object):
@@ -60,9 +62,9 @@ class FakeRequest(object):
         GET = {}
 
 
-class FakeRequestWithSevice(object):
+class FakeRequestWithService(object):
         environ = {"nova.context": context.get_admin_context()}
-        GET = {"service": "nova-compute"}
+        GET = {"binary": "nova-compute"}
 
 
 class FakeRequestWithHost(object):
@@ -72,10 +74,16 @@ class FakeRequestWithHost(object):
 
 class FakeRequestWithHostService(object):
         environ = {"nova.context": context.get_admin_context()}
-        GET = {"host": "host1", "service": "nova-compute"}
+        GET = {"host": "host1", "binary": "nova-compute"}
 
 
-def fake_servcie_get_all(context):
+def fake_host_api_service_get_all(context, filters=None, set_zones=False):
+    if set_zones or 'availability_zone' in filters:
+        return availability_zones.set_availability_zones(context,
+                                                         fake_services_list)
+
+
+def fake_db_api_service_get_all(context, disabled=None):
     return fake_services_list
 
 
@@ -103,7 +111,7 @@ def fake_service_update(context, service_id, values):
 
 
 def fake_utcnow():
-    return datetime(2012, 10, 29, 13, 42, 11)
+    return datetime.datetime(2012, 10, 29, 13, 42, 11)
 
 
 class ServicesTest(test.TestCase):
@@ -111,38 +119,36 @@ class ServicesTest(test.TestCase):
     def setUp(self):
         super(ServicesTest, self).setUp()
 
-        self.stubs.Set(db, "service_get_all", fake_servcie_get_all)
+        self.context = context.get_admin_context()
+        self.controller = services.ServiceController()
+
+        self.stubs.Set(self.controller.host_api, "service_get_all",
+                       fake_host_api_service_get_all)
         self.stubs.Set(timeutils, "utcnow", fake_utcnow)
         self.stubs.Set(db, "service_get_by_args",
                        fake_service_get_by_host_binary)
         self.stubs.Set(db, "service_update", fake_service_update)
-
-        self.context = context.get_admin_context()
-        self.controller = services.ServiceController()
-
-    def tearDown(self):
-        super(ServicesTest, self).tearDown()
 
     def test_services_list(self):
         req = FakeRequest()
         res_dict = self.controller.index(req)
 
         response = {'services': [{'binary': 'nova-scheduler',
-                    'host': 'host1', 'zone': 'nova',
+                    'host': 'host1', 'zone': 'internal',
                     'status': 'disabled', 'state': 'up',
-                    'updated_at': datetime(2012, 10, 29, 13, 42, 2)},
+                    'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2)},
                     {'binary': 'nova-compute',
                      'host': 'host1', 'zone': 'nova',
                      'status': 'disabled', 'state': 'up',
-                     'updated_at': datetime(2012, 10, 29, 13, 42, 5)},
+                     'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5)},
                     {'binary': 'nova-scheduler', 'host': 'host2',
-                     'zone': 'nova',
+                     'zone': 'internal',
                      'status': 'enabled', 'state': 'down',
-                     'updated_at': datetime(2012, 9, 19, 6, 55, 34)},
+                     'updated_at': datetime.datetime(2012, 9, 19, 6, 55, 34)},
                     {'binary': 'nova-compute', 'host': 'host2',
                      'zone': 'nova',
                      'status': 'disabled', 'state': 'down',
-                     'updated_at': datetime(2012, 9, 18, 8, 3, 38)}]}
+                     'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38)}]}
         self.assertEqual(res_dict, response)
 
     def test_services_list_with_host(self):
@@ -150,27 +156,27 @@ class ServicesTest(test.TestCase):
         res_dict = self.controller.index(req)
 
         response = {'services': [{'binary': 'nova-scheduler', 'host': 'host1',
-                    'zone': 'nova',
+                    'zone': 'internal',
                     'status': 'disabled', 'state': 'up',
-                    'updated_at': datetime(2012, 10, 29, 13, 42, 2)},
+                    'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 2)},
                    {'binary': 'nova-compute', 'host': 'host1',
                     'zone': 'nova',
                     'status': 'disabled', 'state': 'up',
-                    'updated_at': datetime(2012, 10, 29, 13, 42, 5)}]}
+                    'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5)}]}
         self.assertEqual(res_dict, response)
 
     def test_services_list_with_service(self):
-        req = FakeRequestWithSevice()
+        req = FakeRequestWithService()
         res_dict = self.controller.index(req)
 
         response = {'services': [{'binary': 'nova-compute', 'host': 'host1',
                     'zone': 'nova',
                     'status': 'disabled', 'state': 'up',
-                    'updated_at': datetime(2012, 10, 29, 13, 42, 5)},
+                    'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5)},
                     {'binary': 'nova-compute', 'host': 'host2',
                      'zone': 'nova',
                      'status': 'disabled', 'state': 'down',
-                     'updated_at': datetime(2012, 9, 18, 8, 3, 38)}]}
+                     'updated_at': datetime.datetime(2012, 9, 18, 8, 3, 38)}]}
         self.assertEqual(res_dict, response)
 
     def test_services_list_with_host_service(self):
@@ -180,19 +186,19 @@ class ServicesTest(test.TestCase):
         response = {'services': [{'binary': 'nova-compute', 'host': 'host1',
                     'zone': 'nova',
                     'status': 'disabled', 'state': 'up',
-                    'updated_at': datetime(2012, 10, 29, 13, 42, 5)}]}
+                    'updated_at': datetime.datetime(2012, 10, 29, 13, 42, 5)}]}
         self.assertEqual(res_dict, response)
 
     def test_services_enable(self):
-        body = {'host': 'host1', 'service': 'nova-compute'}
+        body = {'host': 'host1', 'binary': 'nova-compute'}
         req = fakes.HTTPRequest.blank('/v2/fake/os-services/enable')
         res_dict = self.controller.update(req, "enable", body)
 
-        self.assertEqual(res_dict['disabled'], False)
+        self.assertEqual(res_dict['service']['status'], 'enabled')
 
     def test_services_disable(self):
         req = fakes.HTTPRequest.blank('/v2/fake/os-services/disable')
-        body = {'host': 'host1', 'service': 'nova-compute'}
+        body = {'host': 'host1', 'binary': 'nova-compute'}
         res_dict = self.controller.update(req, "disable", body)
 
-        self.assertEqual(res_dict['disabled'], True)
+        self.assertEqual(res_dict['service']['status'], 'disabled')

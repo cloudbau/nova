@@ -18,12 +18,15 @@
 import setuptools
 
 from nova.openstack.common import setup as common_setup
-from nova import version
 
 requires = common_setup.parse_requirements()
+depend_links = common_setup.parse_dependency_links()
+project = 'nova'
 
-setuptools.setup(name='nova',
-      version=version.canonical_version_string(),
+
+setuptools.setup(
+      name=project,
+      version=common_setup.get_version(project, '2013.2'),
       description='cloud computing fabric controller',
       author='OpenStack',
       author_email='nova@lists.launchpad.net',
@@ -41,28 +44,37 @@ setuptools.setup(name='nova',
       cmdclass=common_setup.get_cmdclass(),
       packages=setuptools.find_packages(exclude=['bin', 'smoketests']),
       install_requires=requires,
+      dependency_links=depend_links,
       include_package_data=True,
       test_suite='nose.collector',
       setup_requires=['setuptools_git>=0.4'],
-      scripts=['bin/nova-all',
-               'bin/nova-api',
-               'bin/nova-api-ec2',
-               'bin/nova-api-metadata',
-               'bin/nova-api-os-compute',
-               'bin/nova-rpc-zmq-receiver',
-               'bin/nova-cert',
-               'bin/nova-clear-rabbit-queues',
-               'bin/nova-compute',
-               'bin/nova-conductor',
-               'bin/nova-console',
-               'bin/nova-consoleauth',
-               'bin/nova-dhcpbridge',
-               'bin/nova-manage',
-               'bin/nova-network',
-               'bin/nova-novncproxy',
-               'bin/nova-objectstore',
-               'bin/nova-rootwrap',
-               'bin/nova-scheduler',
-               'bin/nova-xvpvncproxy',
-              ],
-        py_modules=[])
+      entry_points={
+          'console_scripts': [
+              'nova-all = nova.cmd.all:main',
+              'nova-api = nova.cmd.api:main',
+              'nova-api-ec2 = nova.cmd.api_ec2:main',
+              'nova-api-metadata = nova.cmd.api_metadata:main',
+              'nova-api-os-compute = nova.cmd.api_os_compute:main',
+              'nova-baremetal-deploy-helper'
+              ' = nova.cmd.baremetal_deploy_helper:main',
+              'nova-baremetal-manage = nova.cmd.baremetal_manage:main',
+              'nova-rpc-zmq-receiver = nova.cmd.rpc_zmq_receiver:main',
+              'nova-cells = nova.cmd.cells:main',
+              'nova-cert = nova.cmd.cert:main',
+              'nova-clear-rabbit-queues = nova.cmd.clear_rabbit_queues:main',
+              'nova-compute = nova.cmd.compute:main',
+              'nova-conductor = nova.cmd.conductor:main',
+              'nova-console = nova.cmd.console:main',
+              'nova-consoleauth = nova.cmd.consoleauth:main',
+              'nova-dhcpbridge = nova.cmd.dhcpbridge:main',
+              'nova-manage = nova.cmd.manage:main',
+              'nova-network = nova.cmd.network:main',
+              'nova-novncproxy = nova.cmd.novncproxy:main',
+              'nova-objectstore = nova.cmd.objectstore:main',
+              'nova-rootwrap = nova.cmd.rootwrap:main',
+              'nova-scheduler = nova.cmd.scheduler:main',
+              'nova-spicehtml5proxy = nova.cmd.spicehtml5proxy:main',
+              'nova-xvpvncproxy = nova.cmd.xvpvncproxy:main'
+          ]
+      },
+      py_modules=[])

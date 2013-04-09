@@ -18,11 +18,18 @@
 Client side of the console RPC API.
 """
 
-from nova.openstack.common import cfg
+from oslo.config import cfg
+
 import nova.openstack.common.rpc.proxy
 
+rpcapi_opts = [
+    cfg.StrOpt('console_topic',
+               default='console',
+               help='the topic console proxy nodes listen on'),
+]
+
 CONF = cfg.CONF
-CONF.import_opt('console_topic', 'nova.config')
+CONF.register_opts(rpcapi_opts)
 
 
 class ConsoleAPI(nova.openstack.common.rpc.proxy.RpcProxy):
@@ -31,6 +38,7 @@ class ConsoleAPI(nova.openstack.common.rpc.proxy.RpcProxy):
     API version history:
 
         1.0 - Initial version.
+        1.1 - Added get_backdoor_port()
     '''
 
     #
@@ -54,3 +62,7 @@ class ConsoleAPI(nova.openstack.common.rpc.proxy.RpcProxy):
 
     def remove_console(self, ctxt, console_id):
         self.cast(ctxt, self.make_msg('remove_console', console_id=console_id))
+
+    def get_backdoor_port(self, ctxt, host):
+        return self.call(ctxt, self.make_msg('get_backdoor_port'),
+                         version='1.1')

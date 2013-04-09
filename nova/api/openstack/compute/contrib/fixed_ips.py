@@ -1,7 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM
-# All Rights Reserved.
+# Copyright 2012 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -35,7 +34,7 @@ class FixedIPController(object):
         try:
             fixed_ip = db.fixed_ip_get_by_address_detailed(context, id)
         except exception.FixedIpNotFoundForAddress as ex:
-            raise webob.exc.HTTPNotFound(explanation=str(ex))
+            raise webob.exc.HTTPNotFound(explanation=ex.format_message())
 
         fixed_ip_info = {"fixed_ip": {}}
         if fixed_ip[1] is None:
@@ -78,7 +77,7 @@ class FixedIPController(object):
 
 
 class Fixed_ips(extensions.ExtensionDescriptor):
-    """Fixed IPs support"""
+    """Fixed IPs support."""
 
     name = "FixedIPs"
     alias = "os-fixed-ips"

@@ -1,5 +1,5 @@
 # Copyright 2011 Grid Dynamics
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -40,8 +40,6 @@ class FpingTest(test.TestCase):
                        return_servers)
         self.stubs.Set(nova.db, "instance_get_by_uuid",
                        return_server)
-        self.stubs.Set(nova.db, "instance_get_all_by_project",
-                       return_servers)
         self.stubs.Set(nova.utils, "execute",
                        execute)
         self.stubs.Set(fping.FpingController, "check_fping",

@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,12 +17,12 @@
 
 import os
 
+from oslo.config import cfg
 import webob.dec
 import webob.exc
 
 from nova.api.openstack import wsgi
 from nova import context
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova import wsgi as base_wsgi
 

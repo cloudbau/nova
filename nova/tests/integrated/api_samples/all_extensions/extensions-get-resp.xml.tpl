@@ -6,10 +6,22 @@
   <extension alias="OS-DCF" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/disk_config/api/v1.1" name="DiskConfig">
     <description>%(text)s</description>
   </extension>
+  <extension alias="OS-EXT-AZ" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_availability_zone/api/v2" name="ExtendedAvailabilityZone">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="OS-EXT-IPS" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_ips/api/v1.1" name="ExtendedIps">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="OS-EXT-IMG-SIZE" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/image_size/api/v1.1" name="ImageSize">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="OS-EXT-SRV-ATTR" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_status/api/v1.1" name="ExtendedServerAttributes">
     <description>%(text)s</description>
   </extension>
   <extension alias="OS-EXT-STS" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_status/api/v1.1" name="ExtendedStatus">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="OS-EXT-VIF-NET" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended-virtual-interfaces-net/api/v1.1" name="ExtendedVIFNet">
     <description>%(text)s</description>
   </extension>
   <extension alias="OS-FLV-DISABLED" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/flavor_disabled/api/v1.1" name="FlavorDisabled">
@@ -27,10 +39,19 @@
   <extension alias="os-aggregates" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/aggregates/api/v1.1" name="Aggregates">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-attach-interfaces" updated="2012-07-22T00:00:00+00:00" namespace="http://docs.openstack.org/compute/ext/interfaces/api/v1.1" name="AttachInterfaces">
+    <description>Attach interface support.</description>
+  </extension>
   <extension alias="os-availability-zone" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/availabilityzone/api/v1.1" name="AvailabilityZone">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-agents" name="Agents" namespace="http://docs.openstack.org/compute/ext/agents/api/v2" updated="%(timestamp)s">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-baremetal-nodes" name="BareMetalNodes" namespace="http://docs.openstack.org/compute/ext/baremetal_nodes/api/v2" updated="%(timestamp)s">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-cells" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/cells/api/v1.1" name="Cells">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-certificates" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/certificates/api/v1.1" name="Certificates">
@@ -60,8 +81,11 @@
   <extension alias="os-deferred-delete" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/deferred-delete/api/v1.1" name="DeferredDelete">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-evacuate" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/evacuate/api/v2" name="Evacuate">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-fixed-ips" name="FixedIPs" namespace="http://docs.openstack.org/compute/ext/fixed_ips/api/v2" updated="2012-10-18T13:25:27-06:00">
-    <description>Fixed IPs support</description>
+    <description>Fixed IPs support.</description>
   </extension>
   <extension alias="os-flavor-access" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/flavor_access/api/v2" name="FlavorAccess">
     <description>%(text)s</description>
@@ -90,6 +114,9 @@
   <extension alias="os-floating-ips-bulk" name="FloatingIpsBulk" namespace="http://docs.openstack.org/compute/ext/floating_ips_bulk/api/v2" updated="2012-10-29T13:25:27-06:00">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-hide-server-addresses" updated="2012-12-11T00:00:00+00:00" namespace="http://docs.openstack.org/compute/ext/hide_server_addresses/api/v1.1" name="HideServerAddresses">
+    <description>Support hiding server addresses in certain states.</description>
+  </extension>
   <extension alias="os-hosts" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/hosts/api/v1.1" name="Hosts">
     <description>%(text)s</description>
   </extension>
@@ -111,7 +138,10 @@
   <extension alias="os-multiple-create" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/multiplecreate/api/v1.1" name="MultipleCreate">
     <description>%(text)s</description>
   </extension>
-  <extension alias="os-networks" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/networks/api/v1.1" name="Networks">
+  <extension alias="os-networks" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/os-networks/api/v1.1" name="Networks">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-tenant-networks" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/os-tenant-networks/api/v2" name="OSTenantNetworks">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-networks-associate" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/networks_associate/api/v2" name="NetworkAssociationSupport">
@@ -126,10 +156,16 @@
   <extension alias="os-rescue" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/rescue/api/v1.1" name="Rescue">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-security-group-default-rules" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/securitygroupdefaultrules/api/v1.1" name="SecurityGroupDefaultRules">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-security-groups" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/securitygroups/api/v1.1" name="SecurityGroups">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-server-diagnostics" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/server-diagnostics/api/v1.1" name="ServerDiagnostics">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-server-password" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/server-password/api/v2" name="ServerPassword">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-server-start-stop" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/servers/api/v1.1" name="ServerStartStop">
@@ -148,6 +184,9 @@
     <description>%(text)s</description>
   </extension>
   <extension alias="os-volumes" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/volumes/api/v1.1" name="Volumes">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-instance-actions" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/instance-actions/api/v1.1" name="InstanceActions">
     <description>%(text)s</description>
   </extension>
 </extensions>

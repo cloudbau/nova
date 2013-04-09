@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright (c) 2012 OpenStack, LLC.
+# Copyright (c) 2012 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -19,6 +19,8 @@
 
 import copy
 
+from oslo.config import cfg
+
 from nova.compute import instance_types
 from nova.compute import task_states
 from nova.compute import vm_states
@@ -26,7 +28,6 @@ from nova import context
 from nova import db
 from nova.network import api as network_api
 from nova import notifications
-from nova.openstack.common import cfg
 from nova.openstack.common import log as logging
 from nova.openstack.common.notifier import api as notifier_api
 from nova.openstack.common.notifier import test_notifier
@@ -55,6 +56,7 @@ class NotificationsTestCase(test.TestCase):
         fake_network.set_stub_network_methods(self.stubs)
 
         notifier_api._reset_drivers()
+        self.addCleanup(notifier_api._reset_drivers)
         self.flags(compute_driver='nova.virt.fake.FakeDriver',
                    notification_driver=[test_notifier.__name__],
                    network_manager='nova.network.manager.FlatManager',
@@ -68,23 +70,21 @@ class NotificationsTestCase(test.TestCase):
 
         self.instance = self._wrapped_create()
 
-    def tearDown(self):
-        notifier_api._reset_drivers()
-        super(NotificationsTestCase, self).tearDown()
-
     def _wrapped_create(self, params=None):
+        instance_type = instance_types.get_instance_type_by_name('m1.tiny')
+        sys_meta = instance_types.save_instance_type_info({}, instance_type)
         inst = {}
         inst['image_ref'] = 1
         inst['user_id'] = self.user_id
         inst['project_id'] = self.project_id
-        type_id = instance_types.get_instance_type_by_name('m1.tiny')['id']
-        inst['instance_type_id'] = type_id
+        inst['instance_type_id'] = instance_type['id']
         inst['root_gb'] = 0
         inst['ephemeral_gb'] = 0
         inst['access_ip_v4'] = '1.2.3.4'
         inst['access_ip_v6'] = 'feed:5eed'
         inst['display_name'] = 'test_instance'
         inst['hostname'] = 'test_instance_hostname'
+        inst['system_metadata'] = sys_meta
         if params:
             inst.update(params)
         return db.instance_create(self.context, inst)
@@ -190,8 +190,6 @@ class NotificationsTestCase(test.TestCase):
         params = {"task_state": task_states.SPAWNING}
         (old_ref, new_ref) = db.instance_update_and_get_original(self.context,
                 self.instance['uuid'], params)
-        print old_ref["task_state"]
-        print new_ref["task_state"]
         notifications.send_update(self.context, old_ref, new_ref)
 
         self.assertEquals(1, len(test_notifier.NOTIFICATIONS))

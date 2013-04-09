@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2011 OpenStack LLC.
+# Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
@@ -17,10 +17,14 @@
 
 
 import datetime
+import filecmp
+import os
 import random
+import tempfile
 import time
 
 import glanceclient.exc
+from oslo.config import cfg
 
 from nova import context
 from nova import exception
@@ -30,9 +34,11 @@ from nova.tests.api.openstack import fakes
 from nova.tests.glance import stubs as glance_stubs
 from nova.tests import matchers
 
+CONF = cfg.CONF
+
 
 class NullWriter(object):
-    """Used to test ImageService.get which takes a writer object"""
+    """Used to test ImageService.get which takes a writer object."""
 
     def write(self, *arg, **kwargs):
         pass
@@ -131,7 +137,7 @@ class TestGlanceImageService(test.TestCase):
                                   deleted_at=self.NOW_GLANCE_FORMAT)
 
     def test_create_with_instance_id(self):
-        """Ensure instance_id is persisted as an image-property"""
+        # Ensure instance_id is persisted as an image-property.
         fixture = {'name': 'test image',
                    'is_public': False,
                    'properties': {'instance_id': '42', 'user_id': 'fake'}}
@@ -333,7 +339,6 @@ class TestGlanceImageService(test.TestCase):
     def test_update(self):
         fixture = self._make_fixture(name='test image')
         image = self.service.create(self.context, fixture)
-        print image
         image_id = image['id']
         fixture['name'] = 'new image name'
         self.service.update(self.context, image_id, fixture)
@@ -358,8 +363,16 @@ class TestGlanceImageService(test.TestCase):
         self.assertEquals(2, num_images)
 
         self.service.delete(self.context, ids[0])
+        # When you delete an image from glance, it sets the status to DELETED
+        # and doesn't actually remove the image.
 
+        # Check the image is still there.
         num_images = len(self.service.detail(self.context))
+        self.assertEquals(2, num_images)
+
+        # Check the image is marked as deleted.
+        num_images = reduce(lambda x, y: x + (0 if y['deleted'] else 1),
+                            self.service.detail(self.context), 0)
         self.assertEquals(1, num_images)
 
     def test_show_passes_through_to_client(self):
@@ -464,6 +477,40 @@ class TestGlanceImageService(test.TestCase):
         tries = [0]
         self.flags(glance_num_retries=1)
         service.download(self.context, image_id, writer)
+
+    def test_download_file_url(self):
+        class MyGlanceStubClient(glance_stubs.StubGlanceClient):
+            """A client that returns a file url."""
+
+            (outfd, s_tmpfname) = tempfile.mkstemp(prefix='directURLsrc')
+            outf = os.fdopen(outfd, 'w')
+            inf = open('/dev/urandom', 'r')
+            for i in range(10):
+                _data = inf.read(1024)
+                outf.write(_data)
+            outf.close()
+
+            def get(self, image_id):
+                return type('GlanceTestDirectUrlMeta', (object,),
+                            {'direct_url': 'file://%s' + self.s_tmpfname})
+
+        client = MyGlanceStubClient()
+        (outfd, tmpfname) = tempfile.mkstemp(prefix='directURLdst')
+        writer = os.fdopen(outfd, 'w')
+
+        service = self._create_image_service(client)
+        image_id = 1  # doesn't matter
+
+        self.flags(allowed_direct_url_schemes=['file'])
+        service.download(self.context, image_id, writer)
+        writer.close()
+
+        # compare the two files
+        rc = filecmp.cmp(tmpfname, client.s_tmpfname)
+        self.assertTrue(rc, "The file %s and %s should be the same" %
+                        (tmpfname, client.s_tmpfname))
+        os.remove(client.s_tmpfname)
+        os.remove(tmpfname)
 
     def test_client_forbidden_converts_to_imagenotauthed(self):
         class MyGlanceStubClient(glance_stubs.StubGlanceClient):
@@ -703,3 +750,17 @@ class TestGlanceClientWrapper(test.TestCase):
 
         client2.call(ctxt, 1, 'get', 'meow')
         self.assertEqual(info['num_calls'], 2)
+
+
+class TestGlanceUrl(test.TestCase):
+
+    def test_generate_glance_http_url(self):
+        generated_url = glance.generate_glance_url()
+        http_url = "http://%s:%d" % (CONF.glance_host, CONF.glance_port)
+        self.assertEqual(generated_url, http_url)
+
+    def test_generate_glance_https_url(self):
+        self.flags(glance_protocol="https")
+        generated_url = glance.generate_glance_url()
+        https_url = "https://%s:%d" % (CONF.glance_host, CONF.glance_port)
+        self.assertEqual(generated_url, https_url)

@@ -1,4 +1,4 @@
-# Copyright 2010 OpenStack LLC.
+# Copyright 2010 OpenStack Foundation
 # Copyright 2011 Piston Cloud Computing, Inc
 # All Rights Reserved.
 #
@@ -17,11 +17,10 @@
 import base64
 import os
 import re
-import socket
 
+from oslo.config import cfg
 import webob
 from webob import exc
-from xml.dom import minidom
 
 from nova.api.openstack import common
 from nova.api.openstack.compute import ips
@@ -31,7 +30,6 @@ from nova.api.openstack import xmlutil
 from nova import compute
 from nova.compute import instance_types
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova.openstack.common.rpc import common as rpc_common
@@ -48,7 +46,7 @@ server_opts = [
 ]
 CONF = cfg.CONF
 CONF.register_opts(server_opts)
-CONF.import_opt('network_api_class', 'nova.config')
+CONF.import_opt('network_api_class', 'nova.network')
 CONF.import_opt('reclaim_instance_interval', 'nova.compute.manager')
 
 LOG = logging.getLogger(__name__)
@@ -136,6 +134,13 @@ class ServerAdminPassTemplate(xmlutil.TemplateBuilder):
         return xmlutil.SlaveTemplate(root, 1, nsmap=server_nsmap)
 
 
+class ServerMultipleCreateTemplate(xmlutil.TemplateBuilder):
+    def construct(self):
+        root = xmlutil.TemplateElement('server')
+        root.set('reservation_id')
+        return xmlutil.MasterTemplate(root, 1, nsmap=server_nsmap)
+
+
 def FullServerTemplate():
     master = ServerTemplate()
     master.attach(ServerAdminPassTemplate())
@@ -217,16 +222,20 @@ class CommonDeserializer(wsgi.MetadataXMLDeserializer):
         #             anyone that might be using it.
         auto_disk_config = server_node.getAttribute('auto_disk_config')
         if auto_disk_config:
-            server['OS-DCF:diskConfig'] = utils.bool_from_str(auto_disk_config)
+            server['OS-DCF:diskConfig'] = auto_disk_config
 
         auto_disk_config = server_node.getAttribute('OS-DCF:diskConfig')
         if auto_disk_config:
-            server['OS-DCF:diskConfig'] = utils.bool_from_str(auto_disk_config)
+            server['OS-DCF:diskConfig'] = auto_disk_config
+
+        config_drive = server_node.getAttribute('config_drive')
+        if config_drive:
+            server['config_drive'] = config_drive
 
         return server
 
     def _extract_block_device_mapping(self, server_node):
-        """Marshal the block_device_mapping node of a parsed request"""
+        """Marshal the block_device_mapping node of a parsed request."""
         node = self.find_first_child_named(server_node, "block_device_mapping")
         if node:
             block_device_mapping = []
@@ -251,7 +260,7 @@ class CommonDeserializer(wsgi.MetadataXMLDeserializer):
             return None
 
     def _extract_scheduler_hints(self, server_node):
-        """Marshal the scheduler hints attribute of a parsed request"""
+        """Marshal the scheduler hints attribute of a parsed request."""
         node = self.find_first_child_named_in_namespace(server_node,
             "http://docs.openstack.org/compute/ext/scheduler-hints/api/v2",
             "scheduler_hints")
@@ -308,7 +317,7 @@ class ActionDeserializer(CommonDeserializer):
     """
 
     def default(self, string):
-        dom = minidom.parseString(string)
+        dom = xmlutil.safe_minidom_parse_string(string)
         action_node = dom.childNodes[0]
         action_name = action_node.tagName
 
@@ -348,7 +357,12 @@ class ActionDeserializer(CommonDeserializer):
             rebuild['name'] = name
 
         if node.hasAttribute("auto_disk_config"):
-            rebuild['auto_disk_config'] = node.getAttribute("auto_disk_config")
+            rebuild['OS-DCF:diskConfig'] = node.getAttribute(
+                "auto_disk_config")
+
+        if node.hasAttribute("OS-DCF:diskConfig"):
+            rebuild['OS-DCF:diskConfig'] = node.getAttribute(
+                "OS-DCF:diskConfig")
 
         metadata_node = self.find_first_child_named(node, "metadata")
         if metadata_node is not None:
@@ -382,7 +396,11 @@ class ActionDeserializer(CommonDeserializer):
             raise AttributeError("No flavorRef was specified in request")
 
         if node.hasAttribute("auto_disk_config"):
-            resize['auto_disk_config'] = node.getAttribute("auto_disk_config")
+            resize['OS-DCF:diskConfig'] = node.getAttribute("auto_disk_config")
+
+        if node.hasAttribute("OS-DCF:diskConfig"):
+            resize['OS-DCF:diskConfig'] = node.getAttribute(
+                "OS-DCF:diskConfig")
 
         return resize
 
@@ -415,7 +433,7 @@ class CreateDeserializer(CommonDeserializer):
 
     def default(self, string):
         """Deserialize an xml-formatted server create request."""
-        dom = minidom.parseString(string)
+        dom = xmlutil.safe_minidom_parse_string(string)
         server = self._extract_server(dom)
         return {'body': {'server': server}}
 
@@ -452,9 +470,6 @@ class Controller(wsgi.Controller):
             servers = self._get_servers(req, is_detail=False)
         except exception.Invalid as err:
             raise exc.HTTPBadRequest(explanation=str(err))
-        except exception.NotFound:
-            msg = _("Instance could not be found")
-            raise exc.HTTPNotFound(explanation=msg)
         return servers
 
     @wsgi.serializers(xml=ServersTemplate)
@@ -464,9 +479,6 @@ class Controller(wsgi.Controller):
             servers = self._get_servers(req, is_detail=True)
         except exception.Invalid as err:
             raise exc.HTTPBadRequest(explanation=str(err))
-        except exception.NotFound as err:
-            msg = _("Instance could not be found")
-            raise exc.HTTPNotFound(explanation=msg)
         return servers
 
     def _add_instance_faults(self, ctxt, instances):
@@ -540,10 +552,11 @@ class Controller(wsgi.Controller):
                                                      marker=marker)
         except exception.MarkerNotFound as e:
             msg = _('marker [%s] not found') % marker
-            raise webob.exc.HTTPBadRequest(explanation=msg)
+            raise exc.HTTPBadRequest(explanation=msg)
         except exception.FlavorNotFound as e:
-            msg = _("Flavor could not be found")
-            raise webob.exc.HTTPUnprocessableEntity(explanation=msg)
+            log_msg = _("Flavor '%s' could not be found ")
+            LOG.debug(log_msg, search_opts['flavor'])
+            instance_list = []
 
         if is_detail:
             self._add_instance_faults(context, instance_list)
@@ -563,17 +576,21 @@ class Controller(wsgi.Controller):
         req.cache_db_instance(instance)
         return instance
 
+    def _check_string_length(self, value, name, max_length=None):
+        try:
+            utils.check_string_length(value, name, min_length=1,
+                                      max_length=max_length)
+        except exception.InvalidInput as e:
+            raise exc.HTTPBadRequest(explanation=str(e))
+
     def _validate_server_name(self, value):
-        if not isinstance(value, basestring):
-            msg = _("Server name is not a string or unicode")
-            raise exc.HTTPBadRequest(explanation=msg)
+        self._check_string_length(value, 'Server name', max_length=255)
 
-        if not value.strip():
-            msg = _("Server name is an empty string")
-            raise exc.HTTPBadRequest(explanation=msg)
+    def _validate_device_name(self, value):
+        self._check_string_length(value, 'Device name', max_length=255)
 
-        if not len(value) < 256:
-            msg = _("Server name must be less than 256 characters.")
+        if ' ' in value:
+            msg = _("Device name cannot include spaces.")
             raise exc.HTTPBadRequest(explanation=msg)
 
     def _get_injected_files(self, personality):
@@ -595,8 +612,7 @@ class Controller(wsgi.Controller):
             except TypeError:
                 expl = _('Bad personality format')
                 raise exc.HTTPBadRequest(explanation=expl)
-            contents = self._decode_base64(contents)
-            if contents is None:
+            if self._decode_base64(contents) is None:
                 expl = _('Personality content for %s cannot be decoded') % path
                 raise exc.HTTPBadRequest(explanation=expl)
             injected_files.append((path, contents))
@@ -627,7 +643,7 @@ class Controller(wsgi.Controller):
                 if port_id:
                     network_uuid = None
                     if not self._is_quantum_v2():
-                        # port parameter is only for qunatum v2.0
+                        # port parameter is only for quantum v2.0
                         msg = _("Unknown argment : port")
                         raise exc.HTTPBadRequest(explanation=msg)
                     if not uuidutils.is_uuid_like(port_id):
@@ -703,16 +719,12 @@ class Controller(wsgi.Controller):
             raise exc.HTTPBadRequest(explanation=expl)
 
     def _validate_access_ipv4(self, address):
-        try:
-            socket.inet_aton(address)
-        except socket.error:
+        if not utils.is_valid_ipv4(address):
             expl = _('accessIPv4 is not proper IPv4 format')
             raise exc.HTTPBadRequest(explanation=expl)
 
     def _validate_access_ipv6(self, address):
-        try:
-            socket.inet_pton(socket.AF_INET6, address)
-        except socket.error:
+        if not utils.is_valid_ipv6(address):
             expl = _('accessIPv6 is not proper IPv6 format')
             raise exc.HTTPBadRequest(explanation=expl)
 
@@ -741,7 +753,7 @@ class Controller(wsgi.Controller):
         server_dict = body['server']
         password = self._get_server_admin_password(server_dict)
 
-        if not 'name' in server_dict:
+        if 'name' not in server_dict:
             msg = _("Server name is not defined")
             raise exc.HTTPBadRequest(explanation=msg)
 
@@ -772,7 +784,8 @@ class Controller(wsgi.Controller):
         sg_names = list(set(sg_names))
 
         requested_networks = None
-        if self.ext_mgr.is_loaded('os-networks'):
+        if (self.ext_mgr.is_loaded('os-networks')
+                or self._is_quantum_v2()):
             requested_networks = server_dict.get('networks')
 
         if requested_networks is not None:
@@ -811,6 +824,7 @@ class Controller(wsgi.Controller):
         if self.ext_mgr.is_loaded('os-volumes'):
             block_device_mapping = server_dict.get('block_device_mapping', [])
             for bdm in block_device_mapping:
+                self._validate_device_name(bdm["device_name"])
                 if 'delete_on_termination' in bdm:
                     bdm['delete_on_termination'] = utils.bool_from_str(
                         bdm['delete_on_termination'])
@@ -828,23 +842,26 @@ class Controller(wsgi.Controller):
             max_count = server_dict.get('max_count', min_count)
 
         try:
-            min_count = int(min_count)
+            min_count = int(str(min_count))
         except ValueError:
-            raise webob.exc.HTTPBadRequest(_('min_count must be an '
-                                             'integer value'))
+            msg = _('min_count must be an integer value')
+            raise exc.HTTPBadRequest(explanation=msg)
         if min_count < 1:
-            raise webob.exc.HTTPBadRequest(_('min_count must be > 0'))
+            msg = _('min_count must be > 0')
+            raise exc.HTTPBadRequest(explanation=msg)
 
         try:
-            max_count = int(max_count)
+            max_count = int(str(max_count))
         except ValueError:
-            raise webob.exc.HTTPBadRequest(_('max_count must be an '
-                                             'integer value'))
+            msg = _('max_count must be an integer value')
+            raise exc.HTTPBadRequest(explanation=msg)
         if max_count < 1:
-            raise webob.exc.HTTPBadRequest(_('max_count must be > 0'))
+            msg = _('max_count must be > 0')
+            raise exc.HTTPBadRequest(explanation=msg)
 
         if min_count > max_count:
-            raise webob.exc.HTTPBadRequest(_('min_count must be <= max_count'))
+            msg = _('min_count must be <= max_count')
+            raise exc.HTTPBadRequest(explanation=msg)
 
         auto_disk_config = False
         if self.ext_mgr.is_loaded('OS-DCF'):
@@ -880,21 +897,27 @@ class Controller(wsgi.Controller):
                             auto_disk_config=auto_disk_config,
                             scheduler_hints=scheduler_hints)
         except exception.QuotaError as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error),
-                                                headers={'Retry-After': 0})
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message(),
+                headers={'Retry-After': 0})
         except exception.InstanceTypeMemoryTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InstanceTypeNotFound as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error)
         except exception.InstanceTypeDiskTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InvalidMetadata as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InvalidMetadataSize as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error))
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message())
+        except exception.InvalidRequest as error:
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.ImageNotFound as error:
             msg = _("Can not find requested image")
             raise exc.HTTPBadRequest(explanation=msg)
+        except exception.ImageNotActive as error:
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.FlavorNotFound as error:
             msg = _("Invalid flavorRef provided.")
             raise exc.HTTPBadRequest(explanation=msg)
@@ -902,7 +925,7 @@ class Controller(wsgi.Controller):
             msg = _("Invalid key_name provided.")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.SecurityGroupNotFound as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except rpc_common.RemoteError as err:
             msg = "%(err_type)s: %(err_msg)s" % {'err_type': err.exc_type,
                                                  'err_msg': err.value}
@@ -913,14 +936,9 @@ class Controller(wsgi.Controller):
         # Let the caller deal with unhandled exceptions.
 
         # If the caller wanted a reservation_id, return it
-
-        # NOTE(treinish): XML serialization will not work without a root
-        # selector of 'server' however JSON return is not expecting a server
-        # field/object
-        if ret_resv_id and (req.get_content_type() == 'application/xml'):
-            return {'server': {'reservation_id': resv_id}}
-        elif ret_resv_id:
-            return {'reservation_id': resv_id}
+        if ret_resv_id:
+            return wsgi.ResponseObject({'reservation_id': resv_id},
+                                       xml=ServerMultipleCreateTemplate)
 
         req.cache_db_instances(instances)
         server = self._view_builder.create(req, instances[0])
@@ -981,6 +999,10 @@ class Controller(wsgi.Controller):
             msg = _("HostId cannot be updated.")
             raise exc.HTTPBadRequest(explanation=msg)
 
+        if 'personality' in body['server']:
+            msg = _("Personality cannot be updated.")
+            raise exc.HTTPBadRequest(explanation=msg)
+
         try:
             instance = self.compute_api.get(ctxt, id)
             req.cache_db_instance(instance)
@@ -1025,6 +1047,9 @@ class Controller(wsgi.Controller):
             self.compute_api.revert_resize(context, instance)
         except exception.MigrationNotFound:
             msg = _("Instance has not been resized.")
+            raise exc.HTTPBadRequest(explanation=msg)
+        except exception.InstanceTypeNotFound:
+            msg = _("Flavor used by the instance could not be found.")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
@@ -1147,7 +1172,7 @@ class Controller(wsgi.Controller):
     def _action_change_password(self, req, id, body):
         context = req.environ['nova.context']
         if (not 'changePassword' in body
-            or not 'adminPass' in body['changePassword']):
+            or 'adminPass' not in body['changePassword']):
             msg = _("No adminPass was specified")
             raise exc.HTTPBadRequest(explanation=msg)
         password = body['changePassword']['adminPass']
@@ -1155,7 +1180,11 @@ class Controller(wsgi.Controller):
             msg = _("Invalid adminPass")
             raise exc.HTTPBadRequest(explanation=msg)
         server = self._get_server(context, req, id)
-        self.compute_api.set_admin_password(context, server, password)
+        try:
+            self.compute_api.set_admin_password(context, server, password)
+        except NotImplementedError:
+            msg = _("Unable to set password on instance")
+            raise exc.HTTPNotImplemented(explanation=msg)
         return webob.Response(status_int=202)
 
     def _validate_metadata(self, metadata):
@@ -1174,7 +1203,7 @@ class Controller(wsgi.Controller):
     def _action_resize(self, req, id, body):
         """Resizes a given instance to the flavor size requested."""
         try:
-            flavor_ref = body["resize"]["flavorRef"]
+            flavor_ref = str(body["resize"]["flavorRef"])
             if not flavor_ref:
                 msg = _("Resize request has invalid 'flavorRef' attribute.")
                 raise exc.HTTPBadRequest(explanation=msg)
@@ -1197,7 +1226,8 @@ class Controller(wsgi.Controller):
         try:
             body = body['rebuild']
         except (KeyError, TypeError):
-            raise exc.HTTPBadRequest(_("Invalid request body"))
+            msg = _('Invalid request body')
+            raise exc.HTTPBadRequest(explanation=msg)
 
         try:
             image_href = body["imageRef"]
@@ -1260,16 +1290,18 @@ class Controller(wsgi.Controller):
             msg = _("Instance could not be found")
             raise exc.HTTPNotFound(explanation=msg)
         except exception.InvalidMetadata as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(
+                explanation=error.format_message())
         except exception.InvalidMetadataSize as error:
-            raise exc.HTTPRequestEntityTooLarge(explanation=unicode(error))
+            raise exc.HTTPRequestEntityTooLarge(
+                explanation=error.format_message())
         except exception.ImageNotFound:
             msg = _("Cannot find image for rebuild")
             raise exc.HTTPBadRequest(explanation=msg)
         except exception.InstanceTypeMemoryTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
         except exception.InstanceTypeDiskTooSmall as error:
-            raise exc.HTTPBadRequest(explanation=unicode(error))
+            raise exc.HTTPBadRequest(explanation=error.format_message())
 
         instance = self._get_server(context, req, id)
 

@@ -16,17 +16,43 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import functools
 import re
 
+from nova import availability_zones
 from nova import context
 from nova import db
 from nova import exception
 from nova.network import model as network_model
 from nova.openstack.common import log as logging
+from nova.openstack.common import memorycache
 from nova.openstack.common import timeutils
 from nova.openstack.common import uuidutils
 
 LOG = logging.getLogger(__name__)
+# NOTE(vish): cache mapping for one week
+_CACHE_TIME = 7 * 24 * 60 * 60
+_CACHE = None
+
+
+def memoize(func):
+    @functools.wraps(func)
+    def memoizer(context, reqid):
+        global _CACHE
+        if not _CACHE:
+            _CACHE = memorycache.get_client()
+        key = "%s:%s" % (func.__name__, reqid)
+        value = _CACHE.get(key)
+        if value is None:
+            value = func(context, reqid)
+            _CACHE.set(key, value, time=_CACHE_TIME)
+        return value
+    return memoizer
+
+
+def reset_cache():
+    global _CACHE
+    _CACHE = None
 
 
 def image_type(image_type):
@@ -46,11 +72,38 @@ def image_type(image_type):
     return image_type
 
 
+def resource_type_from_id(context, resource_id):
+    """Get resource type by ID
+
+    Returns a string representation of the Amazon resource type, if known.
+    Returns None on failure.
+
+    :param context: context under which the method is called
+    :param resource_id: resource_id to evaluate
+    """
+
+    known_types = {
+        'i': 'instance',
+        'r': 'reservation',
+        'vol': 'volume',
+        'snap': 'snapshot',
+        'ami': 'image',
+        'aki': 'image',
+        'ari': 'image'
+    }
+
+    type_marker = resource_id.split('-')[0]
+
+    return known_types.get(type_marker)
+
+
+@memoize
 def id_to_glance_id(context, image_id):
     """Convert an internal (db) id to a glance id."""
     return db.s3_image_get(context, image_id)['uuid']
 
 
+@memoize
 def glance_id_to_id(context, glance_id):
     """Convert a glance id to an internal (db) id."""
     if glance_id is None:
@@ -72,7 +125,7 @@ def glance_id_to_ec2_id(context, glance_id, image_type='ami'):
 
 
 def ec2_id_to_id(ec2_id):
-    """Convert an ec2 ID (i-[base 16 number]) to an instance id (int)"""
+    """Convert an ec2 ID (i-[base 16 number]) to an instance id (int)."""
     try:
         return int(ec2_id.split('-')[-1], 16)
     except ValueError:
@@ -82,12 +135,7 @@ def ec2_id_to_id(ec2_id):
 def image_ec2_id(image_id, image_type='ami'):
     """Returns image ec2_id using id and three letter type."""
     template = image_type + '-%08x'
-    try:
-        return id_to_ec2_id(image_id, template=template)
-    except ValueError:
-        #TODO(wwolf): once we have ec2_id -> glance_id mapping
-        # in place, this wont be necessary
-        return "ami-00000000"
+    return id_to_ec2_id(image_id, template=template)
 
 
 def get_ip_info_for_instance_from_nw_info(nw_info):
@@ -103,7 +151,7 @@ def get_ip_info_for_instance_from_nw_info(nw_info):
 
 
 def get_ip_info_for_instance(context, instance):
-    """Return a dictionary of IP information for an instance"""
+    """Return a dictionary of IP information for an instance."""
 
     info_cache = instance['info_cache'] or {}
     cached_nwinfo = info_cache.get('network_info')
@@ -114,14 +162,13 @@ def get_ip_info_for_instance(context, instance):
     return get_ip_info_for_instance_from_nw_info(nw_info)
 
 
-def get_availability_zone_by_host(services, host):
-    if len(services) > 0:
-        return services[0]['availability_zone']
-    return 'unknown zone'
+def get_availability_zone_by_host(host, conductor_api=None):
+    return availability_zones.get_host_availability_zone(
+        context.get_admin_context(), host, conductor_api)
 
 
 def id_to_ec2_id(instance_id, template='i-%08x'):
-    """Convert an instance ID (int) to an ec2 ID (i-[base 16 number])"""
+    """Convert an instance ID (int) to an ec2 ID (i-[base 16 number])."""
     return template % int(instance_id)
 
 
@@ -143,6 +190,7 @@ def ec2_inst_id_to_uuid(context, ec2_id):
     return get_instance_uuid_from_int_id(context, int_id)
 
 
+@memoize
 def get_instance_uuid_from_int_id(context, int_id):
     return db.get_instance_uuid_by_ec2_id(context, int_id)
 
@@ -176,13 +224,25 @@ def ec2_vol_id_to_uuid(ec2_id):
     return get_volume_uuid_from_int_id(ctxt, int_id)
 
 
+_ms_time_regex = re.compile('^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3,6}Z$')
+
+
 def is_ec2_timestamp_expired(request, expires=None):
-    """Checks the timestamp or expiry time included in a EC2 request
+    """Checks the timestamp or expiry time included in an EC2 request
     and returns true if the request is expired
     """
     query_time = None
     timestamp = request.get('Timestamp')
     expiry_time = request.get('Expires')
+
+    def parse_strtime(strtime):
+        if _ms_time_regex.match(strtime):
+            # NOTE(MotoKen): time format for aws-sdk-java contains millisecond
+            time_format = "%Y-%m-%dT%H:%M:%S.%fZ"
+        else:
+            time_format = "%Y-%m-%dT%H:%M:%SZ"
+        return timeutils.parse_strtime(strtime, time_format)
+
     try:
         if timestamp and expiry_time:
             msg = _("Request must include either Timestamp or Expires,"
@@ -190,12 +250,10 @@ def is_ec2_timestamp_expired(request, expires=None):
             LOG.error(msg)
             raise exception.InvalidRequest(msg)
         elif expiry_time:
-            query_time = timeutils.parse_strtime(expiry_time,
-                                        "%Y-%m-%dT%H:%M:%SZ")
+            query_time = parse_strtime(expiry_time)
             return timeutils.is_older_than(query_time, -1)
         elif timestamp:
-            query_time = timeutils.parse_strtime(timestamp,
-                                        "%Y-%m-%dT%H:%M:%SZ")
+            query_time = parse_strtime(timestamp)
 
             # Check if the difference between the timestamp in the request
             # and the time on our servers is larger than 5 minutes, the
@@ -209,6 +267,7 @@ def is_ec2_timestamp_expired(request, expires=None):
         return True
 
 
+@memoize
 def get_int_id_from_instance_uuid(context, instance_uuid):
     if instance_uuid is None:
         return
@@ -218,6 +277,7 @@ def get_int_id_from_instance_uuid(context, instance_uuid):
         return db.ec2_instance_create(context, instance_uuid)['id']
 
 
+@memoize
 def get_int_id_from_volume_uuid(context, volume_uuid):
     if volume_uuid is None:
         return
@@ -227,6 +287,7 @@ def get_int_id_from_volume_uuid(context, volume_uuid):
         return db.ec2_volume_create(context, volume_uuid)['id']
 
 
+@memoize
 def get_volume_uuid_from_int_id(context, int_id):
     return db.get_volume_uuid_by_ec2_id(context, int_id)
 
@@ -240,6 +301,7 @@ def ec2_snap_id_to_uuid(ec2_id):
     return get_snapshot_uuid_from_int_id(ctxt, int_id)
 
 
+@memoize
 def get_int_id_from_snapshot_uuid(context, snapshot_uuid):
     if snapshot_uuid is None:
         return
@@ -249,6 +311,7 @@ def get_int_id_from_snapshot_uuid(context, snapshot_uuid):
         return db.ec2_snapshot_create(context, snapshot_uuid)['id']
 
 
+@memoize
 def get_snapshot_uuid_from_int_id(context, int_id):
     return db.get_snapshot_uuid_by_ec2_id(context, int_id)
 

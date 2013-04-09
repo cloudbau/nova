@@ -16,14 +16,12 @@
 #    under the License.
 
 
-import fixtures
 import os
-from testtools.matchers import Equals
-from testtools.matchers import MatchesListwise
+import tempfile
+
+import fixtures
 
 from nova import test
-
-from nova import utils
 from nova.virt.disk.mount import nbd
 
 ORIG_EXISTS = os.path.exists
@@ -42,14 +40,6 @@ def _fake_listdir_nbd_devices(path):
     if path.startswith('/sys/block'):
         return ['nbd0', 'nbd1']
     return ORIG_LISTDIR(path)
-
-
-def _fake_exists_no_users(path):
-    if path.startswith('/sys/block/nbd'):
-        if path.endswith('pid'):
-            return False
-        return True
-    return ORIG_EXISTS(path)
 
 
 def _fake_exists_all_used(path):
@@ -143,6 +133,8 @@ class NbdTestCase(test.TestCase):
 
     def test_inner_get_dev_no_devices(self):
         tempdir = self.useFixture(fixtures.TempDir()).path
+        self.stubs.Set(nbd.NbdMount, '_detect_nbd_devices',
+                       _fake_detect_nbd_devices_none)
         n = nbd.NbdMount(None, tempdir)
         self.assertFalse(n._inner_get_dev())
 
@@ -268,8 +260,27 @@ class NbdTestCase(test.TestCase):
                                              self.fake_exists_one))
         self.useFixture(fixtures.MonkeyPatch('nova.utils.trycmd',
                                              self.fake_trycmd_creates_pid))
-        self.useFixture(fixtures.MonkeyPatch(('nova.virt.disk.mount.nbd.'
-                                              'MAX_NBD_WAIT'), -10))
+        self.useFixture(fixtures.MonkeyPatch(('nova.virt.disk.mount.api.'
+                                              'MAX_DEVICE_WAIT'), -10))
 
         # No error logged, device consumed
         self.assertFalse(n.get_dev())
+
+    def test_do_mount_need_to_specify_fs_type(self):
+        # NOTE(mikal): Bug 1094373 saw a regression where we failed to
+        # communicate a failed mount properly.
+        def fake_trycmd(*args, **kwargs):
+            return '', 'broken'
+        self.useFixture(fixtures.MonkeyPatch('nova.utils.trycmd', fake_trycmd))
+
+        imgfile = tempfile.NamedTemporaryFile()
+        self.addCleanup(imgfile.close)
+        tempdir = self.useFixture(fixtures.TempDir()).path
+        mount = nbd.NbdMount(imgfile.name, tempdir)
+
+        def fake_returns_true(*args, **kwargs):
+            return True
+        mount.get_dev = fake_returns_true
+        mount.map_dev = fake_returns_true
+
+        self.assertFalse(mount.do_mount())

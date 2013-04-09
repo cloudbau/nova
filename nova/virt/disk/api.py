@@ -32,10 +32,12 @@ import tempfile
 if os.name != 'nt':
     import crypt
 
+from oslo.config import cfg
+
 from nova import exception
-from nova.openstack.common import cfg
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
+from nova import paths
 from nova import utils
 from nova.virt.disk.mount import api as mount
 from nova.virt.disk.vfs import api as vfs
@@ -46,7 +48,7 @@ LOG = logging.getLogger(__name__)
 
 disk_opts = [
     cfg.StrOpt('injected_network_template',
-               default='$pybasedir/nova/virt/interfaces.template',
+               default=paths.basedir_def('nova/virt/interfaces.template'),
                help='Template file for injected network'),
 
     # NOTE(yamahata): ListOpt won't work because the command may include a
@@ -73,7 +75,6 @@ disk_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(disk_opts)
-CONF.import_opt('pybasedir', 'nova.config')
 
 _MKFS_COMMAND = {}
 _DEFAULT_MKFS_COMMAND = None
@@ -93,12 +94,16 @@ def mkfs(os_type, fs_label, target):
     mkfs_command = (_MKFS_COMMAND.get(os_type, _DEFAULT_MKFS_COMMAND) or
                     '') % locals()
     if mkfs_command:
-        utils.execute(*mkfs_command.split())
+        utils.execute(*mkfs_command.split(), run_as_root=True)
 
 
-def resize2fs(image, check_exit_code=False):
-    utils.execute('e2fsck', '-fp', image, check_exit_code=check_exit_code)
-    utils.execute('resize2fs', image, check_exit_code=check_exit_code)
+def resize2fs(image, check_exit_code=False, run_as_root=False):
+    utils.execute('e2fsck', '-fp', image,
+                  check_exit_code=check_exit_code,
+                  run_as_root=run_as_root)
+    utils.execute('resize2fs', image,
+                  check_exit_code=check_exit_code,
+                  run_as_root=run_as_root)
 
 
 def get_disk_size(path):
@@ -112,7 +117,7 @@ def get_disk_size(path):
 
 
 def extend(image, size):
-    """Increase image to size"""
+    """Increase image to size."""
     virt_size = get_disk_size(image)
     if virt_size >= size:
         return
@@ -124,39 +129,40 @@ def extend(image, size):
 def can_resize_fs(image, size, use_cow=False):
     """Check whether we can resize contained file system."""
 
+    LOG.debug(_('Checking if we can resize image %(image)s. '
+                'size=%(size)s, CoW=%(use_cow)s'), locals())
+
     # Check that we're increasing the size
     virt_size = get_disk_size(image)
     if virt_size >= size:
+        LOG.debug(_('Cannot resize filesystem %s to a smaller size.'),
+                  image)
         return False
 
     # Check the image is unpartitioned
     if use_cow:
-        # Try to mount an unpartitioned qcow2 image
         try:
-            inject_data(image, use_cow=True)
-        except exception.NovaException:
+            fs = vfs.VFS.instance_for_image(image, 'qcow2', None)
+            fs.setup()
+            fs.teardown()
+        except exception.NovaException, e:
+            LOG.debug(_('Unable to mount image %(image)s with '
+                        'error %(error)s. Cannot resize.'),
+                      {'image': image,
+                       'error': e})
             return False
     else:
         # For raw, we can directly inspect the file system
         try:
             utils.execute('e2label', image)
-        except exception.ProcessExecutionError:
+        except exception.ProcessExecutionError, e:
+            LOG.debug(_('Unable to determine label for image %(image)s with '
+                        'error %(errror)s. Cannot resize.'),
+                      {'image': image,
+                       'error': e})
             return False
 
     return True
-
-
-def bind(src, target, instance_name):
-    """Bind device to a filesytem"""
-    if src:
-        utils.execute('touch', target, run_as_root=True)
-        utils.execute('mount', '-o', 'bind', src, target,
-                run_as_root=True)
-
-
-def unbind(target):
-    if target:
-        utils.execute('umount', target, run_as_root=True)
 
 
 class _DiskImage(object):
@@ -240,10 +246,16 @@ class _DiskImage(object):
         return bool(self._mounter)
 
     def umount(self):
-        """Unmount a disk image from the file system."""
+        """Umount a mount point from the filesystem."""
+        if self._mounter:
+            self._mounter.do_umount()
+            self._mounter = None
+
+    def teardown(self):
+        """Remove a disk image from the file system."""
         try:
             if self._mounter:
-                self._mounter.do_umount()
+                self._mounter.do_teardown()
                 self._mounter = None
         finally:
             if self._mkdir:
@@ -252,16 +264,20 @@ class _DiskImage(object):
 
 # Public module functions
 
-def inject_data(image,
-                key=None, net=None, metadata=None, admin_password=None,
-                files=None, partition=None, use_cow=False):
-    """Injects a ssh key and optionally net data into a disk image.
+def inject_data(image, key=None, net=None, metadata=None, admin_password=None,
+                files=None, partition=None, use_cow=False, mandatory=()):
+    """Inject the specified items into a disk image.
+
+    If an item name is not specified in the MANDATORY iterable, then a warning
+    is logged on failure to inject that item, rather than raising an exception.
 
     it will mount the image as a fully partitioned disk and attempt to inject
     into the specified partition number.
 
-    If partition is not specified it mounts the image as a single partition.
+    If PARTITION is not specified the image is mounted as a single partition.
 
+    Returns True if all requested operations completed without issue.
+    Raises an exception if a mandatory item can't be injected.
     """
     LOG.debug(_("Inject data image=%(image)s key=%(key)s net=%(net)s "
                 "metadata=%(metadata)s admin_password=ha-ha-not-telling-you "
@@ -270,11 +286,23 @@ def inject_data(image,
     fmt = "raw"
     if use_cow:
         fmt = "qcow2"
-    fs = vfs.VFS.instance_for_image(image, fmt, partition)
-    fs.setup()
     try:
-        inject_data_into_fs(fs,
-                            key, net, metadata, admin_password, files)
+        fs = vfs.VFS.instance_for_image(image, fmt, partition)
+        fs.setup()
+    except Exception as e:
+        # If a mandatory item is passed to this function,
+        # then reraise the exception to indicate the error.
+        for inject in mandatory:
+            inject_val = locals()[inject]
+            if inject_val:
+                raise
+        LOG.warn(_('Ignoring error injecting data into image '
+                   '(%(e)s)') % locals())
+        return False
+
+    try:
+        return inject_data_into_fs(fs, key, net, metadata,
+                                   admin_password, files, mandatory)
     finally:
         fs.teardown()
 
@@ -294,35 +322,63 @@ def setup_container(image, container_dir, use_cow=False):
         raise exception.NovaException(img.errors)
 
 
-def destroy_container(container_dir):
-    """Destroy the container once it terminates.
+def teardown_container(container_dir):
+    """Teardown the container rootfs mounting once it is spawned.
 
     It will umount the container that is mounted,
-    and delete any  linked devices.
+    and delete any linked devices.
+    """
+    try:
+        img = _DiskImage(image=None, mount_dir=container_dir)
+        img.teardown()
+    except Exception, exn:
+        LOG.exception(_('Failed to teardown ntainer filesystem: %s'), exn)
+
+
+def clean_lxc_namespace(container_dir):
+    """Clean up the container namespace rootfs mounting one spawned.
+
+    It will umount the mounted names that is mounted
+    but leave the linked deivces alone.
     """
     try:
         img = _DiskImage(image=None, mount_dir=container_dir)
         img.umount()
     except Exception, exn:
-        LOG.exception(_('Failed to unmount container filesystem: %s'), exn)
+        LOG.exception(_('Failed to umount container filesystem: %s'), exn)
 
 
-def inject_data_into_fs(fs, key, net, metadata, admin_password, files):
+def inject_data_into_fs(fs, key, net, metadata, admin_password, files,
+                        mandatory=()):
     """Injects data into a filesystem already mounted by the caller.
     Virt connections can call this directly if they mount their fs
-    in a different way to inject_data
+    in a different way to inject_data.
+
+    If an item name is not specified in the MANDATORY iterable, then a warning
+    is logged on failure to inject that item, rather than raising an exception.
+
+    Returns True if all requested operations completed without issue.
+    Raises an exception if a mandatory item can't be injected.
     """
-    if key:
-        _inject_key_into_fs(key, fs)
-    if net:
-        _inject_net_into_fs(net, fs)
-    if metadata:
-        _inject_metadata_into_fs(metadata, fs)
-    if admin_password:
-        _inject_admin_password_into_fs(admin_password, fs)
-    if files:
-        for (path, contents) in files:
-            _inject_file_into_fs(fs, path, contents)
+    status = True
+    for inject in ('key', 'net', 'metadata', 'admin_password', 'files'):
+        inject_val = locals()[inject]
+        inject_func = globals()['_inject_%s_into_fs' % inject]
+        if inject_val:
+            try:
+                inject_func(inject_val, fs)
+            except Exception as e:
+                if inject in mandatory:
+                    raise
+                LOG.warn(_('Ignoring error injecting %(inject)s into image '
+                           '(%(e)s)') % locals())
+                status = False
+    return status
+
+
+def _inject_files_into_fs(files, fs):
+    for (path, contents) in files:
+        _inject_file_into_fs(fs, path, contents)
 
 
 def _inject_file_into_fs(fs, path, contents, append=False):
@@ -357,10 +413,13 @@ def _setup_selinux_for_keys(fs, sshdir):
     # and so to append there you'd need something like:
     #  utils.execute('sed', '-i', '${/^exit 0$/d}' rclocal, run_as_root=True)
     restorecon = [
-        '#!/bin/sh\n',
+        '\n',
         '# Added by Nova to ensure injected ssh keys have the right context\n',
         'restorecon -RF %s 2>/dev/null || :\n' % sshdir,
     ]
+
+    if not fs.has_file(rclocal):
+        restorecon.insert(0, '#!/bin/sh')
 
     _inject_file_into_fs(fs, rclocal, ''.join(restorecon), append=True)
     fs.set_permissions(rclocal, 0700)
@@ -391,6 +450,7 @@ def _inject_key_into_fs(key, fs):
     ])
 
     _inject_file_into_fs(fs, keyfile, key_data, append=True)
+    fs.set_permissions(keyfile, 0600)
 
     _setup_selinux_for_keys(fs, sshdir)
 

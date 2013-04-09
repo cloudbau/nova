@@ -18,14 +18,14 @@
 Unit Tests for nova.scheduler.rpcapi
 """
 
+from oslo.config import cfg
+
 from nova import context
-from nova.openstack.common import cfg
 from nova.openstack.common import rpc
 from nova.scheduler import rpcapi as scheduler_rpcapi
 from nova import test
 
 CONF = cfg.CONF
-CONF.import_opt('scheduler_topic', 'nova.config')
 
 
 class SchedulerRpcAPITestCase(test.TestCase):
@@ -36,6 +36,9 @@ class SchedulerRpcAPITestCase(test.TestCase):
         expected_version = kwargs.pop('version', rpcapi.BASE_RPC_API_VERSION)
         expected_msg = rpcapi.make_msg(method, **kwargs)
         expected_msg['version'] = expected_version
+
+        if method == 'get_backdoor_port':
+            del expected_msg['args']['host']
 
         self.fake_args = None
         self.fake_kwargs = None
@@ -84,3 +87,13 @@ class SchedulerRpcAPITestCase(test.TestCase):
                 rpc_method='fanout_cast', service_name='fake_name',
                 host='fake_host', capabilities='fake_capabilities',
                 version='2.4')
+
+    def test_get_backdoor_port(self):
+        self._test_scheduler_api('get_backdoor_port', rpc_method='call',
+                                 host='fake_host', version='2.5')
+
+    def test_select_hosts(self):
+        self._test_scheduler_api('select_hosts', rpc_method='call',
+                request_spec='fake_request_spec',
+                filter_properties='fake_prop',
+                version='2.6')
