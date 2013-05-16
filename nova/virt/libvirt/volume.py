@@ -843,8 +843,12 @@ class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
 
     def connect_volume(self, connection_info, mount_device):
         """Connect the volume. Returns xml for libvirt."""
-        conf = super(LibvirtXtreemfsVolumeDriver,
-                     self).connect_volume(connection_info, mount_device)
+        conf = vconfig.LibvirtConfigGuestDisk()
+        conf.driver_name = virtutils.pick_disk_driver_name(self.is_block_dev)
+        conf.driver_format = "raw"
+        conf.target_dev = mount_device['dev']
+        conf.target_bus = mount_device['bus']
+        conf.serial = connection_info.get('serial')
         path = self._ensure_mounted(connection_info['data']['export'])
         path = os.path.join(path, connection_info['data']['name'])
         conf.source_type = 'file'
