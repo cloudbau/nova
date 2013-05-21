@@ -16,8 +16,9 @@
 
 """Generic linux scsi subsystem utilities."""
 
-from nova import exception
 from nova.openstack.common import log as logging
+from nova.openstack.common import loopingcall
+from nova.openstack.common import processutils
 from nova import utils
 
 LOG = logging.getLogger(__name__)
@@ -77,12 +78,13 @@ def _wait_for_remove(device, tries):
 
     devices = get_device_list()
     if device["device"] not in devices:
-        raise utils.LoopingCallDone()
+        raise loopingcall.LoopingCallDone()
 
 
 def remove_device(device):
     tries = 0
-    timer = utils.FixedIntervalLoopingCall(_wait_for_remove, device, tries)
+    timer = loopingcall.FixedIntervalLoopingCall(_wait_for_remove, device,
+                                                 tries)
     timer.start(interval=2).wait()
     timer.stop()
 
@@ -95,7 +97,7 @@ def find_multipath_device(device):
     try:
         (out, err) = utils.execute('multipath', '-l', device,
                                run_as_root=True)
-    except exception.ProcessExecutionError as exc:
+    except processutils.ProcessExecutionError as exc:
         LOG.warn(_("Multipath call failed exit (%(code)s)")
                  % {'code': exc.exit_code})
         return None
@@ -123,9 +125,10 @@ def find_multipath_device(device):
             for dev_line in device_lines:
                 dev_line = dev_line.strip()
                 dev_line = dev_line[3:]
-                dev_info = dev_line.split(" ")
-                if dev_line.find("policy") != -1:
+                dev_info = dev_line.split()
+                if dev_line.find("policy") == -1:
                     address = dev_info[0].split(":")
+
                     dev = {'device': '/dev/%s' % dev_info[1],
                            'host': address[0], 'channel': address[1],
                            'id': address[2], 'lun': address[3]

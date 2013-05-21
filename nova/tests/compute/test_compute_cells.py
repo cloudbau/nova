@@ -25,12 +25,9 @@ from nova.compute import cells_api as compute_cells_api
 from nova import db
 from nova import exception
 from nova.openstack.common import jsonutils
-from nova.openstack.common import log as logging
 from nova import quota
 from nova.tests.compute import test_compute
 
-
-LOG = logging.getLogger('nova.tests.test_compute_cells')
 
 ORIG_COMPUTE_API = None
 cfg.CONF.import_opt('enable', 'nova.cells.opts', group='cells')
@@ -149,9 +146,6 @@ class CellsComputeAPITestCase(test_compute.ComputeAPITestCase):
         self.skipTest("Test is incompatible with cells.")
 
     def test_live_migrate(self):
-        self.skipTest("Test is incompatible with cells.")
-
-    def test_get_backdoor_port(self):
         self.skipTest("Test is incompatible with cells.")
 
     def test_snapshot_given_image_uuid(self):

@@ -39,7 +39,6 @@ from nova import exception
 from nova.openstack.common import excutils
 from nova.openstack.common import log as logging
 from nova.virt import driver
-from nova.virt.vmwareapi import network_util
 from nova.virt.vmwareapi import vif as vmwarevif
 from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
@@ -164,13 +163,6 @@ class VMwareVMOps(object):
         vm_folder_ref = self._get_vmfolder_ref()
         res_pool_ref = self._get_res_pool_ref()
 
-        def _check_if_network_bridge_exists(network_name):
-            network_ref = network_util.get_network_with_the_name(
-                          self._session, network_name, self._cluster)
-            if network_ref is None:
-                raise exception.NetworkNotFoundForBridge(bridge=network_name)
-            return network_ref
-
         def _get_vif_infos():
             vif_infos = []
             if network_info is None:
@@ -184,7 +176,9 @@ class VMwareVMOps(object):
                                                         self._session, vif,
                                                         self._cluster)
                 else:
-                    network_ref = _check_if_network_bridge_exists(network_name)
+                    # FlatDHCP network without vlan.
+                    network_ref = vmwarevif.ensure_vlan_bridge(
+                        self._session, vif, self._cluster, create_vlan=False)
                 vif_infos.append({'network_name': network_name,
                                   'mac_address': mac_address,
                                   'network_ref': network_ref,
@@ -654,13 +648,13 @@ class VMwareVMOps(object):
                     "Destroy_Task", vm_ref)
                 self._session._wait_for_task(instance['uuid'], destroy_task)
                 LOG.debug(_("Destroyed the VM"), instance=instance)
-            except Exception, excep:
+            except Exception as excep:
                 LOG.warn(_("In vmwareapi:vmops:delete, got this exception"
                            " while destroying the VM: %s") % str(excep))
 
             if network_info:
                 self.unplug_vifs(instance, network_info)
-        except Exception, exc:
+        except Exception as exc:
             LOG.exception(exc, instance=instance)
 
     def destroy(self, instance, network_info, destroy_disks=True):
@@ -706,7 +700,7 @@ class VMwareVMOps(object):
                 self._session._call_method(self._session._get_vim(),
                                            "UnregisterVM", vm_ref)
                 LOG.debug(_("Unregistered the VM"), instance=instance)
-            except Exception, excep:
+            except Exception as excep:
                 LOG.warn(_("In vmwareapi:vmops:destroy, got this exception"
                            " while un-registering the VM: %s") % str(excep))
 
@@ -736,12 +730,12 @@ class VMwareVMOps(object):
                                 "datastore %(datastore_name)s") %
                                {'datastore_name': datastore_name},
                               instance=instance)
-                except Exception, excep:
+                except Exception as excep:
                     LOG.warn(_("In vmwareapi:vmops:destroy, "
                                  "got this exception while deleting"
                                  " the VM contents from the disk: %s")
                                  % str(excep))
-        except Exception, exc:
+        except Exception as exc:
             LOG.exception(exc, instance=instance)
 
     def pause(self, instance):
@@ -977,7 +971,7 @@ class VMwareVMOps(object):
                                         "Destroy_Task", vm_ref)
             self._session._wait_for_task(instance['uuid'], destroy_task)
             LOG.debug(_("Destroyed the VM"), instance=instance)
-        except Exception, excep:
+        except Exception as excep:
             LOG.warn(_("In vmwareapi:vmops:confirm_migration, got this "
                      "exception while destroying the VM: %s") % str(excep))
 
@@ -1092,7 +1086,7 @@ class VMwareVMOps(object):
         vm_ref = vm_util.get_vm_ref_from_name(self._session, instance['name'])
         if vm_ref is None:
             raise exception.InstanceNotFound(instance_id=instance['uuid'])
-        param_list = {"id": str(vm_ref)}
+        param_list = {"id": str(vm_ref.value)}
         base_url = "%s://%s/screen?%s" % (self._session._scheme,
                                          self._session._host_ip,
                                          urllib.urlencode(param_list))

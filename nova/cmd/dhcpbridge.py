@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright 2010 United States Government as represented by the
@@ -21,13 +20,10 @@
 Handle lease database updates from DHCP servers.
 """
 
-import gettext
 import os
 import sys
 
 from oslo.config import cfg
-
-gettext.install('nova', unicode=1)
 
 from nova import config
 from nova import context
@@ -41,6 +37,7 @@ from nova.openstack.common import rpc
 CONF = cfg.CONF
 CONF.import_opt('host', 'nova.netconf')
 CONF.import_opt('network_manager', 'nova.service')
+LOG = logging.getLogger(__name__)
 
 
 def add_lease(mac, ip_address):

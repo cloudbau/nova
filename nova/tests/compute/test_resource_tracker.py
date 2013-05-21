@@ -21,18 +21,15 @@ import uuid
 
 from oslo.config import cfg
 
-from nova.compute import instance_types
+from nova.compute import flavors
 from nova.compute import resource_tracker
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import db
-from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova import test
 from nova.virt import driver
-
-LOG = logging.getLogger(__name__)
 
 
 FAKE_VIRT_MEMORY_MB = 5
@@ -156,7 +153,7 @@ class BaseTestCase(test.TestCase):
 
     def _fake_instance_system_metadata(self, instance_type, prefix=''):
         sys_meta = []
-        for key in instance_types.system_metadata_instance_type_props.keys():
+        for key in flavors.system_metadata_instance_type_props.keys():
             sys_meta.append({'key': '%sinstance_type_%s' % (prefix, key),
                              'value': instance_type[key]})
         return sys_meta
@@ -773,9 +770,7 @@ class ResizeClaimTestCase(BaseTrackerTestCase):
     def test_revert(self):
         self.tracker.resize_claim(self.context, self.instance,
                 self.instance_type, self.limits)
-        migration, itype = self.tracker.tracked_migrations[
-                self.instance['uuid']]
-        self.tracker.revert_resize(self.context, migration)
+        self.tracker.drop_resize_claim(self.instance)
 
         self.assertEqual(0, len(self.tracker.tracked_instances))
         self.assertEqual(0, len(self.tracker.tracked_migrations))
@@ -916,18 +911,3 @@ class OrphanTestCase(BaseTrackerTestCase):
         orphans = self.tracker._find_orphaned_instances()
 
         self.assertEqual(2, len(orphans))
-
-
-class DeletedNodeTestCase(BaseTrackerTestCase):
-
-    def test_remove_deleted_node(self):
-        self.assertFalse(self.tracker.disabled)
-        self.assertTrue(self.updated)
-
-        def _get_available_resource(nodename):
-            return {}
-        self.tracker.driver.get_available_resource = _get_available_resource
-
-        self.tracker.update_available_resource(self.context, delete=True)
-        self.assertEqual(self.deleted, True)
-        self.assertEqual(self.compute['deleted'], 1)

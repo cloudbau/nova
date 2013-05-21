@@ -12,6 +12,9 @@
   <extension alias="OS-EXT-IPS" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_ips/api/v1.1" name="ExtendedIps">
     <description>%(text)s</description>
   </extension>
+  <extension alias="OS-EXT-IPS-MAC" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_ips_mac/api/v1.1" name="ExtendedIpsMac">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="OS-EXT-IMG-SIZE" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/image_size/api/v1.1" name="ImageSize">
     <description>%(text)s</description>
   </extension>
@@ -82,6 +85,9 @@
     <description>%(text)s</description>
   </extension>
   <extension alias="os-evacuate" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/evacuate/api/v2" name="Evacuate">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-extended-floating-ips" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_floating_ips/api/v2" name="ExtendedFloatingIps">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-fixed-ips" name="FixedIPs" namespace="http://docs.openstack.org/compute/ext/fixed_ips/api/v2" updated="2012-10-18T13:25:27-06:00">

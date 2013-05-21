@@ -18,6 +18,7 @@
 
 import base64
 import datetime
+import testtools
 import urlparse
 import uuid
 
@@ -33,13 +34,14 @@ from nova.api.openstack.compute import views
 from nova.api.openstack import extensions
 from nova.api.openstack import xmlutil
 from nova.compute import api as compute_api
-from nova.compute import instance_types
+from nova.compute import flavors
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import db
 from nova.db.sqlalchemy import models
 from nova import exception
+from nova.image import glance
 from nova.network import manager
 from nova.network.quantumv2 import api as quantum_api
 from nova.openstack.common import jsonutils
@@ -933,10 +935,10 @@ class ServersControllerTest(test.TestCase):
             self.assertNotEqual(search_opts, None)
             # Allowed by user
             self.assertTrue('name' in search_opts)
+            self.assertTrue('ip' in search_opts)
             # OSAPI converts status to vm_state
             self.assertTrue('vm_state' in search_opts)
             # Allowed only by admins with admin API on
-            self.assertFalse('ip' in search_opts)
             self.assertFalse('unknown_option' in search_opts)
             return [fakes.stub_instance(100, uuid=server_uuid)]
 
@@ -979,10 +981,8 @@ class ServersControllerTest(test.TestCase):
         self.assertEqual(len(servers), 1)
         self.assertEqual(servers[0]['id'], server_uuid)
 
-    def test_get_servers_admin_allows_ip(self):
-        """Test getting servers by ip with admin_api enabled and
-        admin context
-        """
+    def test_get_servers_allows_ip(self):
+        """Test getting servers by ip."""
         server_uuid = str(uuid.uuid4())
 
         def fake_get_all(compute_self, context, search_opts=None,
@@ -995,8 +995,7 @@ class ServersControllerTest(test.TestCase):
 
         self.stubs.Set(compute_api.API, 'get_all', fake_get_all)
 
-        req = fakes.HTTPRequest.blank('/v2/fake/servers?ip=10\..*',
-                                      use_admin_context=True)
+        req = fakes.HTTPRequest.blank('/v2/fake/servers?ip=10\..*')
         servers = self.controller.index(req)['servers']
 
         self.assertEqual(len(servers), 1)
@@ -1636,6 +1635,20 @@ class ServerStatusTest(test.TestCase):
                                         task_states.REBOOTING_HARD)
         self.assertEqual(response['server']['status'], 'HARD_REBOOT')
 
+    def test_reboot_resize_policy_fail(self):
+        def fake_get_server(context, req, id):
+            return fakes.stub_instance(id)
+
+        self.stubs.Set(self.controller, '_get_server', fake_get_server)
+
+        rule = {'compute:reboot':
+                common_policy.parse_rule('role:admin')}
+        common_policy.set_rules(common_policy.Rules(rule))
+        req = fakes.HTTPRequest.blank('/v2/fake/servers/1234/action')
+        self.assertRaises(exception.PolicyNotAuthorized,
+                self.controller._action_reboot, req, '1234',
+                {'reboot': {'type': 'HARD'}})
+
     def test_rebuild(self):
         response = self._get_with_state(vm_states.ACTIVE,
                                         task_states.REBUILDING)
@@ -1650,6 +1663,19 @@ class ServerStatusTest(test.TestCase):
                                         task_states.RESIZE_PREP)
         self.assertEqual(response['server']['status'], 'RESIZE')
 
+    def test_confirm_resize_policy_fail(self):
+        def fake_get_server(context, req, id):
+            return fakes.stub_instance(id)
+
+        self.stubs.Set(self.controller, '_get_server', fake_get_server)
+
+        rule = {'compute:confirm_resize':
+                common_policy.parse_rule('role:admin')}
+        common_policy.set_rules(common_policy.Rules(rule))
+        req = fakes.HTTPRequest.blank('/v2/fake/servers/1234/action')
+        self.assertRaises(exception.PolicyNotAuthorized,
+                self.controller._action_confirm_resize, req, '1234', {})
+
     def test_verify_resize(self):
         response = self._get_with_state(vm_states.RESIZED, None)
         self.assertEqual(response['server']['status'], 'VERIFY_RESIZE')
@@ -1658,6 +1684,19 @@ class ServerStatusTest(test.TestCase):
         response = self._get_with_state(vm_states.RESIZED,
                                         task_states.RESIZE_REVERTING)
         self.assertEqual(response['server']['status'], 'REVERT_RESIZE')
+
+    def test_revert_resize_policy_fail(self):
+        def fake_get_server(context, req, id):
+            return fakes.stub_instance(id)
+
+        self.stubs.Set(self.controller, '_get_server', fake_get_server)
+
+        rule = {'compute:revert_resize':
+                common_policy.parse_rule('role:admin')}
+        common_policy.set_rules(common_policy.Rules(rule))
+        req = fakes.HTTPRequest.blank('/v2/fake/servers/1234/action')
+        self.assertRaises(exception.PolicyNotAuthorized,
+                self.controller._action_revert_resize, req, '1234', {})
 
     def test_password_update(self):
         response = self._get_with_state(vm_states.ACTIVE,
@@ -1686,7 +1725,7 @@ class ServersControllerCreateTest(test.TestCase):
         self.controller = servers.Controller(self.ext_mgr)
 
         def instance_create(context, inst):
-            inst_type = instance_types.get_instance_type_by_flavor_id(3)
+            inst_type = flavors.get_instance_type_by_flavor_id(3)
             image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
             def_image_ref = 'http://localhost/images/%s' % image_uuid
             self.instance_cache_num += 1
@@ -1817,6 +1856,29 @@ class ServersControllerCreateTest(test.TestCase):
                           self.controller.create,
                           req,
                           body)
+
+    def test_create_server_with_deleted_image(self):
+        image_uuid = '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6'
+        # Get the fake image service so we can set the status to deleted
+        (image_service, image_id) = glance.get_remote_image_service(
+                context, '')
+        image_service.update(context, image_uuid, {'status': 'DELETED'})
+        self.addCleanup(image_service.update, context, image_uuid,
+                        {'status': 'active'})
+
+        req = fakes.HTTPRequest.blank('/v2/fake/servers')
+        req.method = 'POST'
+        body = dict(server=dict(
+            name='server_test', imageRef=image_uuid, flavorRef=2,
+            metadata={'hello': 'world', 'open': 'stack'},
+            personality={}))
+        req.body = jsonutils.dumps(body)
+
+        req.headers["content-type"] = "application/json"
+        with testtools.ExpectedException(
+            webob.exc.HTTPBadRequest,
+            'Image 76fa36fc-c930-4bf3-8c8a-ea2a2420deb6 is not active.'):
+                self.controller.create(req, body)
 
     def test_create_instance_invalid_negative_min(self):
         self.ext_mgr.extensions = {'os-multiple-create': 'fake'}
@@ -2371,7 +2433,7 @@ class ServersControllerCreateTest(test.TestCase):
                {'device_name': 'foo3', 'delete_on_termination': 'invalid'},
                {'device_name': 'foo4', 'delete_on_termination': 0},
                {'device_name': 'foo5', 'delete_on_termination': False}]
-        expected_dbm = [
+        expected_bdm = [
             {'device_name': 'foo1', 'delete_on_termination': True},
             {'device_name': 'foo2', 'delete_on_termination': True},
             {'device_name': 'foo3', 'delete_on_termination': False},
@@ -2381,7 +2443,7 @@ class ServersControllerCreateTest(test.TestCase):
         old_create = compute_api.API.create
 
         def create(*args, **kwargs):
-            self.assertEqual(kwargs['block_device_mapping'], expected_dbm)
+            self.assertEqual(expected_bdm, kwargs['block_device_mapping'])
             return old_create(*args, **kwargs)
 
         self.stubs.Set(compute_api.API, 'create', create)

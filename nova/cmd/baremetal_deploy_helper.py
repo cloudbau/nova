@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+# vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2012 NTT DOCOMO, INC.
 # All Rights Reserved.
@@ -32,14 +32,15 @@ from wsgiref import simple_server
 
 from nova import config
 from nova import context as nova_context
-from nova import exception
 from nova.openstack.common import log as logging
+from nova.openstack.common import processutils
 from nova import utils
 from nova.virt.baremetal import baremetal_states
 from nova.virt.baremetal import db
 
 
 QUEUE = Queue.Queue()
+LOG = logging.getLogger(__name__)
 
 
 # All functions are called from deploy() directly or indirectly.
@@ -86,7 +87,7 @@ def make_partitions(dev, root_mb, swap_mb):
     # we lose the space.
     # http://bazaar.launchpad.net/~ubuntu-branches/ubuntu/raring/util-linux/
     # raring/view/head:/fdisk/sfdisk.c#L1940
-    stdin_command = ('1 %d 83;\n- %d 82;\n0 0;\n0 0;\n' % (root_mb, swap_mb))
+    stdin_command = ('1,%d,83;\n,%d,82;\n0,0;\n0,0;\n' % (root_mb, swap_mb))
     utils.execute('sfdisk', '-uM', dev, process_input=stdin_command,
             run_as_root=True,
             check_exit_code=[0])
@@ -200,7 +201,7 @@ def deploy(address, port, iqn, lun, image_path, pxe_config_path,
     login_iscsi(address, port, iqn)
     try:
         root_uuid = work_on_disk(dev, root_mb, swap_mb, image_path)
-    except exception.ProcessExecutionError, err:
+    except processutils.ProcessExecutionError, err:
         # Log output if there was a error
         LOG.error("Cmd     : %s" % err.cmd)
         LOG.error("StdOut  : %s" % err.stdout)
@@ -240,7 +241,7 @@ class Worker(threading.Thread):
                           {'task_state': baremetal_states.DEPLOYING})
                     deploy(**params)
                 except Exception:
-                    LOG.error(_('deployment to node %s failed') % node_id)
+                    LOG.exception(_('deployment to node %s failed') % node_id)
                     db.bm_node_update(context, node_id,
                           {'task_state': baremetal_states.DEPLOYFAIL})
                 else:
@@ -313,6 +314,7 @@ class BareMetalDeploy(object):
 def main():
     config.parse_args(sys.argv)
     logging.setup("nova")
+    global LOG
     LOG = logging.getLogger('nova.virt.baremetal.deploy_helper')
     app = BareMetalDeploy()
     srv = simple_server.make_server('', 10000, app)

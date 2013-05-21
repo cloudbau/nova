@@ -21,13 +21,10 @@ from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
 from nova import compute
-from nova import db
 from nova import exception
-from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova import utils
 
-LOG = logging.getLogger(__name__)
 authorize = extensions.extension_authorizer('compute', 'services')
 CONF = cfg.CONF
 CONF.import_opt('service_down_time', 'nova.service')
@@ -123,7 +120,10 @@ class ServiceController(object):
         elif id == "disable":
             disabled = True
         else:
-            raise webob.exc.HTTPNotFound("Unknown action")
+            raise webob.exc.HTTPNotFound(_("Unknown action"))
+
+        status = id + 'd'
+
         try:
             host = body['host']
             binary = body['binary']
@@ -131,15 +131,11 @@ class ServiceController(object):
             raise webob.exc.HTTPUnprocessableEntity()
 
         try:
-            svc = db.service_get_by_args(context, host, binary)
-            if not svc:
-                raise webob.exc.HTTPNotFound('Unknown service')
+            svc = self.host_api.service_update(context, host, binary,
+                                               {'disabled': disabled})
+        except exception.ServiceNotFound as exc:
+            raise webob.exc.HTTPNotFound(_("Unknown service"))
 
-            db.service_update(context, svc['id'], {'disabled': disabled})
-        except exception.ServiceNotFound:
-            raise webob.exc.HTTPNotFound("service not found")
-
-        status = id + 'd'
         return {'service': {'host': host, 'binary': binary, 'status': status}}
 
 

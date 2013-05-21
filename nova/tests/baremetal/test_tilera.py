@@ -70,7 +70,6 @@ class BareMetalTileraTestCase(bm_db_base.BMDBTestCase):
                 service_host='test_host',
                 cpus=4,
                 memory_mb=2048,
-                prov_mac_address='11:11:11:11:11:11',
             )
         self.nic_info = [
                 {'address': '22:22:22:22:22:22', 'datapath_id': '0x1',
@@ -195,7 +194,6 @@ class TileraPrivateMethodsTestCase(BareMetalTileraTestCase):
     def test_collect_mac_addresses(self):
         self._create_node()
         address_list = [nic['address'] for nic in self.nic_info]
-        address_list.append(self.node_info['prov_mac_address'])
         address_list.sort()
         macs = self.driver._collect_mac_addresses(self.context, self.node)
         self.assertEqual(macs, address_list)
@@ -301,9 +299,6 @@ class TileraPublicMethodsTestCase(BareMetalTileraTestCase):
 
     def test_activate_bootloader_passes_details(self):
         self._create_node()
-        macs = [nic['address'] for nic in self.nic_info]
-        macs.append(self.node_info['prov_mac_address'])
-        macs.sort()
         image_info = {
                 'kernel': [None, 'cccc'],
             }

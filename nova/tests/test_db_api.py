@@ -19,20 +19,26 @@
 
 """Unit tests for the DB API."""
 
+import copy
 import datetime
+import types
 import uuid as stdlib_uuid
 
+import mox
 from oslo.config import cfg
 from sqlalchemy.dialects import sqlite
-from sqlalchemy import MetaData
-from sqlalchemy.schema import Table
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.sql.expression import select
 
 from nova import context
 from nova import db
+from nova.db.sqlalchemy import api as sqlalchemy_api
+from nova.db.sqlalchemy import models
+from nova.db.sqlalchemy import utils as db_utils
 from nova import exception
 from nova.openstack.common.db.sqlalchemy import session as db_session
 from nova.openstack.common import timeutils
+from nova.openstack.common import uuidutils
 from nova import test
 from nova.tests import matchers
 from nova import utils
@@ -64,6 +70,20 @@ class DbTestCase(test.TestCase):
             ctxt = self.context
         args.update(kwargs)
         return db.instance_create(ctxt, args)
+
+    def fake_metadata(self, content):
+        meta = {}
+        for i in range(0, 10):
+            meta["foo%i" % i] = "this is %s item %i" % (content, i)
+        return meta
+
+    def create_metadata_for_instance(self, instance_uuid):
+        meta = self.fake_metadata('metadata')
+        db.instance_metadata_update(self.context, instance_uuid, meta, False)
+        sys_meta = self.fake_metadata('system_metadata')
+        db.instance_system_metadata_update(self.context, instance_uuid,
+                                           sys_meta, False)
+        return meta, sys_meta
 
 
 class DbApiTestCase(DbTestCase):
@@ -132,6 +152,37 @@ class DbApiTestCase(DbTestCase):
         check_exc_format(db.get_ec2_instance_id_by_uuid)
         check_exc_format(db.get_instance_uuid_by_ec2_id)
 
+    def test_instance_get_all_with_meta(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_all(self.context)
+        for inst in result:
+            meta = utils.metadata_to_dict(inst['metadata'])
+            self.assertEqual(meta, fake_meta)
+            sys_meta = utils.metadata_to_dict(inst['system_metadata'])
+            self.assertEqual(sys_meta, fake_sys)
+
+    def test_instance_get_all_by_filters_with_meta(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_all_by_filters(self.context, {})
+        for inst in result:
+            meta = utils.metadata_to_dict(inst['metadata'])
+            self.assertEqual(meta, fake_meta)
+            sys_meta = utils.metadata_to_dict(inst['system_metadata'])
+            self.assertEqual(sys_meta, fake_sys)
+
+    def test_instance_get_all_by_filters_without_meta(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_all_by_filters(self.context, {},
+                                                columns_to_join=[])
+        for inst in result:
+            meta = utils.metadata_to_dict(inst['metadata'])
+            self.assertEqual(meta, {})
+            sys_meta = utils.metadata_to_dict(inst['system_metadata'])
+            self.assertEqual(sys_meta, {})
+
     def test_instance_get_all_by_filters(self):
         self.create_instances_with_args()
         self.create_instances_with_args()
@@ -159,6 +210,45 @@ class DbApiTestCase(DbTestCase):
                                                 {'display_name': u'test'})
         self.assertEqual(1, len(result))
 
+    def test_instance_get_by_uuid(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_by_uuid(self.context, inst['uuid'])
+        meta = utils.metadata_to_dict(result['metadata'])
+        self.assertEqual(meta, fake_meta)
+        sys_meta = utils.metadata_to_dict(result['system_metadata'])
+        self.assertEqual(sys_meta, fake_sys)
+
+    def test_instance_get_by_uuid_join_empty(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_by_uuid(self.context, inst['uuid'],
+                columns_to_join=[])
+        meta = utils.metadata_to_dict(result['metadata'])
+        self.assertEqual(meta, {})
+        sys_meta = utils.metadata_to_dict(result['system_metadata'])
+        self.assertEqual(sys_meta, {})
+
+    def test_instance_get_by_uuid_join_meta(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_by_uuid(self.context, inst['uuid'],
+                columns_to_join=['metadata'])
+        meta = utils.metadata_to_dict(result['metadata'])
+        self.assertEqual(meta, fake_meta)
+        sys_meta = utils.metadata_to_dict(result['system_metadata'])
+        self.assertEqual(sys_meta, {})
+
+    def test_instance_get_by_uuid_join_sys_meta(self):
+        inst = self.create_instances_with_args()
+        fake_meta, fake_sys = self.create_metadata_for_instance(inst['uuid'])
+        result = db.instance_get_by_uuid(self.context, inst['uuid'],
+                columns_to_join=['system_metadata'])
+        meta = utils.metadata_to_dict(result['metadata'])
+        self.assertEqual(meta, {})
+        sys_meta = utils.metadata_to_dict(result['system_metadata'])
+        self.assertEqual(sys_meta, fake_sys)
+
     def test_instance_get_all_by_filters_deleted(self):
         inst1 = self.create_instances_with_args()
         inst2 = self.create_instances_with_args(reservation_id='b')
@@ -183,7 +273,8 @@ class DbApiTestCase(DbTestCase):
         self.assertEqual(1, len(instances))
         instance = instances[0]
         self.assertEqual(expected['uuid'], instance['uuid'])
-        self.assertFalse('system_metadata' in dict(instance))
+        sysmeta = dict(instance)['system_metadata']
+        self.assertEqual(len(sysmeta), 0)
 
     def test_migration_get_unconfirmed_by_dest_compute(self):
         ctxt = context.get_admin_context()
@@ -248,46 +339,51 @@ class DbApiTestCase(DbTestCase):
         self.assertEqual(0, len(results))
         db.instance_update(ctxt, instance['uuid'], {"task_state": None})
 
-    def test_multi_associate_disassociate(self):
+    def test_instance_update_with_expected_vm_state(self):
         ctxt = context.get_admin_context()
-        values = {'address': 'floating'}
-        floating = db.floating_ip_create(ctxt, values)
-        values = {'address': 'fixed'}
-        fixed = db.fixed_ip_create(ctxt, values)
-        res = db.floating_ip_fixed_ip_associate(ctxt, floating, fixed, 'foo')
-        self.assertEqual(res['address'], fixed)
-        res = db.floating_ip_fixed_ip_associate(ctxt, floating, fixed, 'foo')
-        self.assertEqual(res, None)
-        res = db.floating_ip_disassociate(ctxt, floating)
-        self.assertEqual(res['address'], fixed)
-        res = db.floating_ip_disassociate(ctxt, floating)
-        self.assertEqual(res, None)
+        uuid = uuidutils.generate_uuid()
+        updates = {'expected_vm_state': 'meow',
+                   'moo': 'cow'}
 
-    def test_fixed_ip_get_by_floating_address(self):
-        ctxt = context.get_admin_context()
-        values = {'address': 'fixed'}
-        fixed = db.fixed_ip_create(ctxt, values)
-        fixed_ip_ref = db.fixed_ip_get_by_address(ctxt, fixed)
-        values = {'address': 'floating',
-                  'fixed_ip_id': fixed_ip_ref['id']}
-        floating = db.floating_ip_create(ctxt, values)
-        fixed_ip_ref = db.fixed_ip_get_by_floating_address(ctxt, floating)
-        self.assertEqual(fixed, fixed_ip_ref['address'])
+        class FakeInstance(dict):
+            def save(self, session=None):
+                pass
 
-    def test_floating_ip_get_by_fixed_address(self):
+        fake_instance_values = {'vm_state': 'meow',
+                                'hostname': '',
+                                'metadata': None,
+                                'system_metadata': None}
+        fake_instance = FakeInstance(fake_instance_values)
+
+        self.mox.StubOutWithMock(sqlalchemy_api, '_instance_get_by_uuid')
+        self.mox.StubOutWithMock(fake_instance, 'save')
+
+        sqlalchemy_api._instance_get_by_uuid(ctxt, uuid,
+                session=mox.IgnoreArg()).AndReturn(fake_instance)
+        fake_instance.save(session=mox.IgnoreArg())
+
+        self.mox.ReplayAll()
+
+        result = db.instance_update(ctxt, uuid, updates)
+        expected_instance = dict(fake_instance_values)
+        expected_instance['moo'] = 'cow'
+        self.assertEqual(expected_instance, result)
+
+    def test_instance_update_with_unexpected_vm_state(self):
         ctxt = context.get_admin_context()
-        values = {'address': 'fixed'}
-        fixed = db.fixed_ip_create(ctxt, values)
-        fixed_ip_ref = db.fixed_ip_get_by_address(ctxt, fixed)
-        values = {'address': 'floating1',
-                  'fixed_ip_id': fixed_ip_ref['id']}
-        floating1 = db.floating_ip_create(ctxt, values)
-        values = {'address': 'floating2',
-                  'fixed_ip_id': fixed_ip_ref['id']}
-        floating2 = db.floating_ip_create(ctxt, values)
-        floating_ip_refs = db.floating_ip_get_by_fixed_address(ctxt, fixed)
-        self.assertEqual(floating1, floating_ip_refs[0]['address'])
-        self.assertEqual(floating2, floating_ip_refs[1]['address'])
+        uuid = uuidutils.generate_uuid()
+        updates = {'expected_vm_state': 'meow'}
+        fake_instance = {'vm_state': 'nomatch'}
+
+        self.mox.StubOutWithMock(sqlalchemy_api, '_instance_get_by_uuid')
+
+        sqlalchemy_api._instance_get_by_uuid(ctxt, uuid,
+                session=mox.IgnoreArg()).AndReturn(fake_instance)
+
+        self.mox.ReplayAll()
+
+        self.assertRaises(exception.UnexpectedVMStateError,
+                          db.instance_update, ctxt, uuid, updates)
 
     def test_network_create_safe(self):
         ctxt = context.get_admin_context()
@@ -304,11 +400,11 @@ class DbApiTestCase(DbTestCase):
         network = db.network_create_safe(ctxt, values)
         db_network = db.network_get(ctxt, network['id'])
         values = {'network_id': network['id'], 'address': 'fake1'}
-        address1 = db.fixed_ip_create(ctxt, values)
+        address1 = db.fixed_ip_create(ctxt, values)['address']
         values = {'network_id': network['id'],
                   'address': 'fake2',
                   'allocated': True}
-        address2 = db.fixed_ip_create(ctxt, values)
+        address2 = db.fixed_ip_create(ctxt, values)['address']
         self.assertRaises(exception.NetworkInUse,
                           db.network_delete_safe, ctxt, network['id'])
         db.fixed_ip_update(ctxt, address2, {'allocated': False})
@@ -362,7 +458,7 @@ class DbApiTestCase(DbTestCase):
         system_meta = db.instance_system_metadata_get(ctxt, instance['uuid'])
         self.assertEqual('baz', system_meta['original_image_ref'])
 
-    def test_delete_instance_metadata_on_instance_destroy(self):
+    def test_delete_instance_and_system_metadata_on_instance_destroy(self):
         ctxt = context.get_admin_context()
 
         # Create an instance with some metadata
@@ -374,8 +470,11 @@ class DbApiTestCase(DbTestCase):
         self.assertEqual('meow', instance_meta['key1'])
         db.instance_destroy(ctxt, instance['uuid'])
         instance_meta = db.instance_metadata_get(ctxt, instance['uuid'])
-        # Make sure instance metadata is deleted as well
+        instance_system_meta = db.instance_system_metadata_get(ctxt,
+                instance['uuid'])
+        # Make sure instance and system metadata is deleted as well
         self.assertEqual({}, instance_meta)
+        self.assertEqual({}, instance_system_meta)
 
     def test_instance_update_unique_name(self):
         otherprojectcontext = context.RequestContext(self.user_id,
@@ -915,7 +1014,7 @@ class DbApiTestCase(DbTestCase):
                   'allocated': True,
                   'instance_uuid': instance['uuid'],
                   'virtual_interface_id': vif['id']}
-        fixed_address = db.fixed_ip_create(ctxt, values)
+        fixed_address = db.fixed_ip_create(ctxt, values)['address']
         data = db.network_get_associated_fixed_ips(ctxt, 1)
         self.assertEqual(len(data), 1)
         record = data[0]
@@ -943,7 +1042,7 @@ class DbApiTestCase(DbTestCase):
         # network with fixed ip with host set
         net = db.network_create_safe(ctxt, {})
         values = {'host': 'foo', 'network_id': net['id']}
-        fixed_address = db.fixed_ip_create(ctxt, values)
+        db.fixed_ip_create(ctxt, values)
         data = db.network_get_all_by_host(ctxt, 'foo')
         self.assertEqual(len(data), 2)
         # network with instance with host set
@@ -953,7 +1052,7 @@ class DbApiTestCase(DbTestCase):
         vif = db.virtual_interface_create(ctxt, values)
         values = {'network_id': net['id'],
                   'virtual_interface_id': vif['id']}
-        fixed_address = db.fixed_ip_create(ctxt, values)
+        db.fixed_ip_create(ctxt, values)
         data = db.network_get_all_by_host(ctxt, 'foo')
         self.assertEqual(len(data), 3)
 
@@ -974,55 +1073,33 @@ class DbApiTestCase(DbTestCase):
         self.assertEqual(db.network_in_use_on_host(ctxt, 1, 'foo'), True)
         self.assertEqual(db.network_in_use_on_host(ctxt, 1, 'bar'), False)
 
-    def _timeout_test(self, ctxt, timeout, multi_host):
-        values = {'host': 'foo'}
-        instance = db.instance_create(ctxt, values)
-        values = {'multi_host': multi_host, 'host': 'bar'}
-        net = db.network_create_safe(ctxt, values)
-        old = time = timeout - datetime.timedelta(seconds=5)
-        new = time = timeout + datetime.timedelta(seconds=5)
-        # should deallocate
-        values = {'allocated': False,
-                  'instance_uuid': instance['uuid'],
-                  'network_id': net['id'],
-                  'updated_at': old}
-        db.fixed_ip_create(ctxt, values)
-        # still allocated
-        values = {'allocated': True,
-                  'instance_uuid': instance['uuid'],
-                  'network_id': net['id'],
-                  'updated_at': old}
-        db.fixed_ip_create(ctxt, values)
-        # wrong network
-        values = {'allocated': False,
-                  'instance_uuid': instance['uuid'],
-                  'network_id': None,
-                  'updated_at': old}
-        db.fixed_ip_create(ctxt, values)
-        # too new
-        values = {'allocated': False,
-                  'instance_uuid': instance['uuid'],
-                  'network_id': None,
-                  'updated_at': new}
-        db.fixed_ip_create(ctxt, values)
-
-    def test_fixed_ip_disassociate_all_by_timeout_single_host(self):
-        now = timeutils.utcnow()
+    def test_instance_floating_address_get_all(self):
         ctxt = context.get_admin_context()
-        self._timeout_test(ctxt, now, False)
-        result = db.fixed_ip_disassociate_all_by_timeout(ctxt, 'foo', now)
-        self.assertEqual(result, 0)
-        result = db.fixed_ip_disassociate_all_by_timeout(ctxt, 'bar', now)
-        self.assertEqual(result, 1)
 
-    def test_fixed_ip_disassociate_all_by_timeout_multi_host(self):
-        now = timeutils.utcnow()
-        ctxt = context.get_admin_context()
-        self._timeout_test(ctxt, now, True)
-        result = db.fixed_ip_disassociate_all_by_timeout(ctxt, 'foo', now)
-        self.assertEqual(result, 1)
-        result = db.fixed_ip_disassociate_all_by_timeout(ctxt, 'bar', now)
-        self.assertEqual(result, 0)
+        instance1 = db.instance_create(ctxt, {'host': 'h1', 'hostname': 'n1'})
+        instance2 = db.instance_create(ctxt, {'host': 'h2', 'hostname': 'n2'})
+
+        fixed_addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        float_addresses = ['2.1.1.1', '2.1.1.2', '2.1.1.3']
+        instance_uuids = [instance1['uuid'], instance1['uuid'],
+                          instance2['uuid']]
+
+        for fixed_addr, float_addr, instance_uuid in zip(fixed_addresses,
+                                                         float_addresses,
+                                                         instance_uuids):
+            db.fixed_ip_create(ctxt, {'address': fixed_addr,
+                                      'instance_uuid': instance_uuid})
+            fixed_id = db.fixed_ip_get_by_address(ctxt, fixed_addr)['id']
+            db.floating_ip_create(ctxt,
+                                  {'address': float_addr,
+                                   'fixed_ip_id': fixed_id})
+
+        real_float_addresses = \
+                db.instance_floating_address_get_all(ctxt, instance_uuids[0])
+        self.assertEqual(set(float_addresses[:2]), set(real_float_addresses))
+        real_float_addresses = \
+                db.instance_floating_address_get_all(ctxt, instance_uuids[2])
+        self.assertEqual(set([float_addresses[2]]), set(real_float_addresses))
 
     def test_get_vol_mapping_non_admin(self):
         ref = db.ec2_volume_create(self.context, 'fake-uuid')
@@ -1100,66 +1177,21 @@ class DbApiTestCase(DbTestCase):
         _compare(bw_usages[2], expected_bw_usages[2])
         timeutils.clear_time_override()
 
-    def test_key_pair_create(self):
-        ctxt = context.get_admin_context()
-        values = {'name': 'test_keypair', 'public_key': 'test-public-key',
-                'user_id': 'test_user_id', 'fingerprint': 'test_fingerprint'}
-        keypair = db.key_pair_create(ctxt, values)
-        self.assertNotEqual(None, keypair)
-        for name, value in values.iteritems():
-            self.assertEqual(keypair.get(name), value)
+    def _test_decorator_wraps_helper(self, decorator):
+        def test_func():
+            """Test docstring."""
 
-    def test_key_pair_create_with_duplicate_name(self):
-        ctxt = context.get_admin_context()
-        values = {'name': 'test_keypair', 'public_key': 'test-public-key',
-                'user_id': 'test_user_id', 'fingerprint': 'test_fingerprint'}
-        keypair = db.key_pair_create(ctxt, values)
-        self.assertRaises(exception.KeyPairExists,
-                          db.key_pair_create, ctxt, values)
+        decorated_func = decorator(test_func)
 
-    def test_admin_get_deleted_keypair(self):
-        # Test deleted keypair can be read by admin user.
-        ctxt = context.get_admin_context()
-        values = {'name': 'test_keypair', 'public_key': 'test-public-key',
-                 'user_id': 'test_user_id', 'fingerprint': 'test_fingerprint'}
-        keypair = db.key_pair_create(ctxt, values)
-        db.key_pair_destroy(ctxt, keypair['user_id'], keypair['name'])
+        self.assertEquals(test_func.func_name, decorated_func.func_name)
+        self.assertEquals(test_func.__doc__, decorated_func.__doc__)
+        self.assertEquals(test_func.__module__, decorated_func.__module__)
 
-        # Raise exception when read_deleted is 'no'.
-        self.assertRaises(exception.KeypairNotFound, db.key_pair_get, ctxt,
-                          keypair['user_id'], keypair['name'])
-        ctxt = ctxt.elevated(read_deleted='yes')
-        db_keypair = db.key_pair_get(ctxt, keypair['user_id'],
-                                     keypair['name'])
-        self.assertEqual(db_keypair['name'], keypair['name'])
-        self.assertEqual(db_keypair['deleted'], keypair['id'])
+    def test_require_context_decorator_wraps_functions_properly(self):
+        self._test_decorator_wraps_helper(sqlalchemy_api.require_context)
 
-    def test_admin_get_all_keypairs_including_deleted(self):
-        # Test all deleted/non-deleted keypairs can be read by admin user.
-        ctxt = context.get_admin_context()
-        keypair1_values = {'name': 'test_keypair1',
-                           'public_key': 'test-public-key1',
-                           'user_id': 'test_user_id',
-                           'fingerprint': 'test_fingerprint1'}
-        keypair2_values = {'name': 'test_keypair2',
-                           'public_key': 'test-public-key2',
-                           'user_id': 'test_user_id',
-                           'fingerprint': 'test_fingerprint2'}
-        keypair1 = db.key_pair_create(ctxt, keypair1_values)
-        keypair2 = db.key_pair_create(ctxt, keypair2_values)
-        db.key_pair_destroy(ctxt, keypair1['user_id'], keypair1['name'])
-        db.key_pair_destroy(ctxt, keypair2['user_id'], keypair2['name'])
-        # Returns non-deleted keypairs.
-        result = db.key_pair_get_all_by_user(ctxt, keypair1['user_id'])
-        self.assertEqual(result, [])
-        ctxt = ctxt.elevated(read_deleted='yes')
-        # Returns deleted and non-deleted keypairs.
-        db_keypairs = db.key_pair_get_all_by_user(ctxt, keypair1['user_id'])
-        expected_deleted_ids = [keypair1['id'], keypair2['id']]
-        expected_keypair_names = [keypair1['name'], keypair2['name']]
-        for keypair in db_keypairs:
-            self.assertTrue(keypair['name'] in expected_keypair_names)
-            self.assertTrue(keypair['deleted'] in expected_deleted_ids)
+    def test_require_admin_context_decorator_wraps_functions_properly(self):
+        self._test_decorator_wraps_helper(sqlalchemy_api.require_admin_context)
 
 
 def _get_fake_aggr_values():
@@ -1570,6 +1602,26 @@ class AggregateDBApiTestCase(test.TestCase):
                           ctxt, result['id'], _get_fake_aggr_hosts()[0])
 
 
+class SqlAlchemyDbApiTestCase(DbTestCase):
+    def test_instance_get_all_by_host(self):
+        ctxt = context.get_admin_context()
+
+        self.create_instances_with_args()
+        self.create_instances_with_args()
+        self.create_instances_with_args(host='host2')
+        result = sqlalchemy_api._instance_get_all_uuids_by_host(ctxt, 'host1')
+        self.assertEqual(2, len(result))
+
+    def test_instance_get_all_uuids_by_host(self):
+        ctxt = context.get_admin_context()
+        self.create_instances_with_args()
+        self.create_instances_with_args()
+        self.create_instances_with_args(host='host2')
+        result = sqlalchemy_api._instance_get_all_uuids_by_host(ctxt, 'host1')
+        self.assertEqual(2, len(result))
+        self.assertEqual(types.UnicodeType, type(result[0]))
+
+
 class CapacityTestCase(test.TestCase):
     def setUp(self):
         super(CapacityTestCase, self).setUp()
@@ -1770,6 +1822,14 @@ class ModelsObjectComparatorMixin(object):
         objs2 = dict([(o['id'], o) for o in objs2])
         for o1 in objs1:
             self._assertEqualObjects(o1, objs2[o1['id']], ignored_keys)
+
+    def _assertEqualListsOfPrimitivesAsSets(self, primitives1, primitives2):
+        self.assertEqual(len(primitives1), len(primitives2))
+        for primitive in primitives1:
+            self.assertIn(primitive, primitives2)
+
+        for primitive in primitives2:
+            self.assertIn(primitive, primitives1)
 
 
 class ServiceTestCase(test.TestCase, ModelsObjectComparatorMixin):
@@ -1998,6 +2058,10 @@ class InstanceTypeTestCase(BaseInstanceTypeTestCase):
         r_inst_type2 = db.instance_type_get(self.ctxt, inst_type2['id'])
         self._assertEqualObjects(inst_type2, r_inst_type2, 'extra_specs')
 
+    def test_instance_type_destroy_not_found(self):
+        self.assertRaises(exception.InstanceTypeNotFound,
+                          db.instance_type_destroy, self.ctxt, 'nonexists')
+
     def test_instance_type_create_duplicate_name(self):
         self._create_inst_type({})
         self.assertRaises(exception.InstanceTypeExists,
@@ -2151,6 +2215,16 @@ class InstanceTypeExtraSpecsTestCase(BaseInstanceTypeTestCase):
                                                           it['flavorid'])
             self._assertEqualObjects(it['extra_specs'], real_specs)
 
+    def test_instance_type_extra_specs_get_item(self):
+        expected = dict(f1=dict(a='a', b='b', c='c'),
+                        f2=dict(d='d', e='e', f='f'))
+
+        for flavor, specs in expected.iteritems():
+            for key, val in specs.iteritems():
+                spec = db.instance_type_extra_specs_get_item(self.ctxt, flavor,
+                                                             key)
+                self.assertEqual(spec[key], val)
+
     def test_instance_type_extra_specs_delete(self):
         for it in self.inst_types:
             specs = it['extra_specs']
@@ -2260,64 +2334,907 @@ class InstanceTypeAccessTestCase(BaseInstanceTypeTestCase):
                           db.instance_type_access_remove,
                           self.ctxt, inst_type['flavorid'], 'p2')
 
+    def test_instance_type_access_removed_after_instance_type_destroy(self):
+        inst_type1 = self._create_inst_type({'flavorid': 'f1', 'name': 'n1'})
+        inst_type2 = self._create_inst_type({'flavorid': 'f2', 'name': 'n2'})
+        values = [
+            (inst_type1['flavorid'], 'p1'),
+            (inst_type1['flavorid'], 'p2'),
+            (inst_type2['flavorid'], 'p3')
+        ]
+        for v in values:
+            self._create_inst_type_access(*v)
 
-class TestFixedIPGetByNetworkHost(test.TestCase):
-    def test_not_found_exception(self):
-        ctxt = context.get_admin_context()
+        db.instance_type_destroy(self.ctxt, inst_type1['name'])
 
+        p = (self.ctxt, inst_type1['flavorid'])
+        self.assertEqual(0, len(db.instance_type_access_get_by_flavor_id(*p)))
+        p = (self.ctxt, inst_type2['flavorid'])
+        self.assertEqual(1, len(db.instance_type_access_get_by_flavor_id(*p)))
+        db.instance_type_destroy(self.ctxt, inst_type2['name'])
+        self.assertEqual(0, len(db.instance_type_access_get_by_flavor_id(*p)))
+
+
+class FixedIPTestCase(BaseInstanceTypeTestCase):
+    def _timeout_test(self, ctxt, timeout, multi_host):
+        instance = db.instance_create(ctxt, dict(host='foo'))
+        net = db.network_create_safe(ctxt, dict(multi_host=multi_host,
+                                                host='bar'))
+        old = timeout - datetime.timedelta(seconds=5)
+        new = timeout + datetime.timedelta(seconds=5)
+        # should deallocate
+        db.fixed_ip_create(ctxt, dict(allocated=False,
+                                      instance_uuid=instance['uuid'],
+                                      network_id=net['id'],
+                                      updated_at=old))
+        # still allocated
+        db.fixed_ip_create(ctxt, dict(allocated=True,
+                                      instance_uuid=instance['uuid'],
+                                      network_id=net['id'],
+                                      updated_at=old))
+        # wrong network
+        db.fixed_ip_create(ctxt, dict(allocated=False,
+                                      instance_uuid=instance['uuid'],
+                                      network_id=None,
+                                      updated_at=old))
+        # too new
+        db.fixed_ip_create(ctxt, dict(allocated=False,
+                                      instance_uuid=instance['uuid'],
+                                      network_id=None,
+                                      updated_at=new))
+
+    def test_fixed_ip_disassociate_all_by_timeout_single_host(self):
+        now = timeutils.utcnow()
+        self._timeout_test(self.ctxt, now, False)
+        result = db.fixed_ip_disassociate_all_by_timeout(self.ctxt, 'foo', now)
+        self.assertEqual(result, 0)
+        result = db.fixed_ip_disassociate_all_by_timeout(self.ctxt, 'bar', now)
+        self.assertEqual(result, 1)
+
+    def test_fixed_ip_disassociate_all_by_timeout_multi_host(self):
+        now = timeutils.utcnow()
+        self._timeout_test(self.ctxt, now, True)
+        result = db.fixed_ip_disassociate_all_by_timeout(self.ctxt, 'foo', now)
+        self.assertEqual(result, 1)
+        result = db.fixed_ip_disassociate_all_by_timeout(self.ctxt, 'bar', now)
+        self.assertEqual(result, 0)
+
+    def test_fixed_ip_get_by_floating_address(self):
+        fixed_ip = db.fixed_ip_create(self.ctxt, {'address': 'fixed'})
+        values = {'address': 'floating',
+                  'fixed_ip_id': fixed_ip['id']}
+        floating = db.floating_ip_create(self.ctxt, values)['address']
+        fixed_ip_ref = db.fixed_ip_get_by_floating_address(self.ctxt, floating)
+        self._assertEqualObjects(fixed_ip, fixed_ip_ref)
+
+    def test_fixed_ip_get_by_host(self):
+        host_ips = {
+            'host1': ['1.1.1.1', '1.1.1.2', '1.1.1.3'],
+            'host2': ['1.1.1.4', '1.1.1.5'],
+            'host3': ['1.1.1.6']
+        }
+
+        for host, ips in host_ips.iteritems():
+            for ip in ips:
+                instance_uuid = self._create_instance(host=host)
+                db.fixed_ip_create(self.ctxt, {'address': ip})
+                db.fixed_ip_associate(self.ctxt, ip, instance_uuid)
+
+        for host, ips in host_ips.iteritems():
+            ips_on_host = map(lambda x: x['address'],
+                                db.fixed_ip_get_by_host(self.ctxt, host))
+            self._assertEqualListsOfPrimitivesAsSets(ips_on_host, ips)
+
+    def test_fixed_ip_get_by_network_host_not_found_exception(self):
         self.assertRaises(
             exception.FixedIpNotFoundForNetworkHost,
             db.fixed_ip_get_by_network_host,
-            ctxt, 1, 'ignore')
+            self.ctxt, 1, 'ignore')
 
-    def test_fixed_ip_found(self):
-        ctxt = context.get_admin_context()
-        db.fixed_ip_create(ctxt, dict(network_id=1, host='host'))
+    def test_fixed_ip_get_by_network_host_fixed_ip_found(self):
+        db.fixed_ip_create(self.ctxt, dict(network_id=1, host='host'))
 
-        fip = db.fixed_ip_get_by_network_host(ctxt, 1, 'host')
+        fip = db.fixed_ip_get_by_network_host(self.ctxt, 1, 'host')
 
         self.assertEquals(1, fip['network_id'])
         self.assertEquals('host', fip['host'])
 
+    def _create_instance(self, **kwargs):
+        instance = db.instance_create(self.ctxt, kwargs)
+        return instance['uuid']
 
-class TestIpAllocation(test.TestCase):
+    def test_fixed_ip_get_by_instance_fixed_ip_found(self):
+        instance_uuid = self._create_instance()
 
-    def setUp(self):
-        super(TestIpAllocation, self).setUp()
-        self.ctxt = context.get_admin_context()
-        self.instance = db.instance_create(self.ctxt, {})
-        self.network = db.network_create_safe(self.ctxt, {})
+        FIXED_IP_ADDRESS = 'address'
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS))
+
+        ips_list = db.fixed_ip_get_by_instance(self.ctxt, instance_uuid)
+        self._assertEqualListsOfPrimitivesAsSets([FIXED_IP_ADDRESS],
+                                                 [ips_list[0].address])
+
+    def test_fixed_ip_get_by_instance_multiple_fixed_ips_found(self):
+        instance_uuid = self._create_instance()
+
+        FIXED_IP_ADDRESS_1 = 'address_1'
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_1))
+        FIXED_IP_ADDRESS_2 = 'address_2'
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_2))
+
+        ips_list = db.fixed_ip_get_by_instance(self.ctxt, instance_uuid)
+        self._assertEqualListsOfPrimitivesAsSets(
+            [FIXED_IP_ADDRESS_1, FIXED_IP_ADDRESS_2],
+            [ips_list[0].address, ips_list[1].address])
+
+    def test_fixed_ip_get_by_instance_inappropriate_ignored(self):
+        instance_uuid = self._create_instance()
+
+        FIXED_IP_ADDRESS_1 = 'address_1'
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_1))
+        FIXED_IP_ADDRESS_2 = 'address_2'
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address=FIXED_IP_ADDRESS_2))
+
+        another_instance = db.instance_create(self.ctxt, {})
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=another_instance['uuid'], address="another_addr"))
+
+        ips_list = db.fixed_ip_get_by_instance(self.ctxt, instance_uuid)
+        self._assertEqualListsOfPrimitivesAsSets(
+            [FIXED_IP_ADDRESS_1, FIXED_IP_ADDRESS_2],
+            [ips_list[0].address, ips_list[1].address])
+
+    def test_fixed_ip_get_by_instance_not_found_exception(self):
+        instance_uuid = self._create_instance()
+
+        self.assertRaises(exception.FixedIpNotFoundForInstance,
+                          db.fixed_ip_get_by_instance,
+                          self.ctxt, instance_uuid)
+
+    def test_fixed_ips_by_virtual_interface_fixed_ip_found(self):
+        instance_uuid = self._create_instance()
+
+        vif = db.virtual_interface_create(
+            self.ctxt, dict(instance_uuid=instance_uuid))
+
+        FIXED_IP_ADDRESS = 'address'
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS))
+
+        ips_list = db.fixed_ips_by_virtual_interface(self.ctxt, vif.id)
+        self._assertEqualListsOfPrimitivesAsSets([FIXED_IP_ADDRESS],
+                                                 [ips_list[0].address])
+
+    def test_fixed_ips_by_virtual_interface_multiple_fixed_ips_found(self):
+        instance_uuid = self._create_instance()
+
+        vif = db.virtual_interface_create(
+            self.ctxt, dict(instance_uuid=instance_uuid))
+
+        FIXED_IP_ADDRESS_1 = 'address_1'
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_1))
+        FIXED_IP_ADDRESS_2 = 'address_2'
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_2))
+
+        ips_list = db.fixed_ips_by_virtual_interface(self.ctxt, vif.id)
+        self._assertEqualListsOfPrimitivesAsSets(
+            [FIXED_IP_ADDRESS_1, FIXED_IP_ADDRESS_2],
+            [ips_list[0].address, ips_list[1].address])
+
+    def test_fixed_ips_by_virtual_interface_inappropriate_ignored(self):
+        instance_uuid = self._create_instance()
+
+        vif = db.virtual_interface_create(
+            self.ctxt, dict(instance_uuid=instance_uuid))
+
+        FIXED_IP_ADDRESS_1 = 'address_1'
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_1))
+        FIXED_IP_ADDRESS_2 = 'address_2'
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=vif.id, address=FIXED_IP_ADDRESS_2))
+
+        another_vif = db.virtual_interface_create(
+            self.ctxt, dict(instance_uuid=instance_uuid))
+        db.fixed_ip_create(self.ctxt, dict(
+            virtual_interface_id=another_vif.id, address="another_addr"))
+
+        ips_list = db.fixed_ips_by_virtual_interface(self.ctxt, vif.id)
+        self._assertEqualListsOfPrimitivesAsSets(
+            [FIXED_IP_ADDRESS_1, FIXED_IP_ADDRESS_2],
+            [ips_list[0].address, ips_list[1].address])
+
+    def test_fixed_ips_by_virtual_interface_no_ip_found(self):
+        instance_uuid = self._create_instance()
+
+        vif = db.virtual_interface_create(
+            self.ctxt, dict(instance_uuid=instance_uuid))
+
+        ips_list = db.fixed_ips_by_virtual_interface(self.ctxt, vif.id)
+        self.assertEquals(0, len(ips_list))
+
+    def test_fixed_ip_count_by_project_one_ip(self):
+        PROJECT_ID = "project_id"
+        instance_uuid = self._create_instance(project_id=PROJECT_ID)
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address='address'))
+
+        ips_count = db.fixed_ip_count_by_project(self.ctxt, PROJECT_ID)
+        self.assertEquals(1, ips_count)
+
+    def test_fixed_ip_count_by_project_two_ips_for_different_instances(self):
+        PROJECT_ID = "project_id"
+        instance_uuid = self._create_instance(project_id=PROJECT_ID)
+
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=instance_uuid, address='address_1'))
+
+        another_instance_for_this_project =\
+            db.instance_create(self.ctxt, dict(project_id=PROJECT_ID))
+
+        db.fixed_ip_create(self.ctxt, dict(
+            instance_uuid=another_instance_for_this_project['uuid'],
+            address='address_2'))
+
+        ips_count = db.fixed_ip_count_by_project(self.ctxt, PROJECT_ID)
+        self.assertEquals(2, ips_count)
 
     def create_fixed_ip(self, **params):
         default_params = {'address': '192.168.0.1'}
         default_params.update(params)
-        return db.fixed_ip_create(self.ctxt, default_params)
+        return db.fixed_ip_create(self.ctxt, default_params)['address']
 
     def test_fixed_ip_associate_fails_if_ip_not_in_network(self):
+        instance_uuid = self._create_instance()
         self.assertRaises(exception.FixedIpNotFoundForNetwork,
                           db.fixed_ip_associate,
-                          self.ctxt, None, self.instance['uuid'])
+                          self.ctxt, None, instance_uuid)
 
     def test_fixed_ip_associate_fails_if_ip_in_use(self):
-        address = self.create_fixed_ip(instance_uuid=self.instance['uuid'])
+        instance_uuid = self._create_instance()
+
+        address = self.create_fixed_ip(instance_uuid=instance_uuid)
         self.assertRaises(exception.FixedIpAlreadyInUse,
                           db.fixed_ip_associate,
-                          self.ctxt, address, self.instance['uuid'])
+                          self.ctxt, address, instance_uuid)
 
     def test_fixed_ip_associate_succeeds(self):
-        address = self.create_fixed_ip(network_id=self.network['id'])
-        db.fixed_ip_associate(self.ctxt, address, self.instance['uuid'],
-                              network_id=self.network['id'])
+        instance_uuid = self._create_instance()
+        network = db.network_create_safe(self.ctxt, {})
+
+        address = self.create_fixed_ip(network_id=network['id'])
+        db.fixed_ip_associate(self.ctxt, address, instance_uuid,
+                              network_id=network['id'])
         fixed_ip = db.fixed_ip_get_by_address(self.ctxt, address)
-        self.assertEqual(fixed_ip['instance_uuid'], self.instance['uuid'])
+        self.assertEqual(fixed_ip['instance_uuid'], instance_uuid)
 
     def test_fixed_ip_associate_succeeds_and_sets_network(self):
+        instance_uuid = self._create_instance()
+        network = db.network_create_safe(self.ctxt, {})
+
         address = self.create_fixed_ip()
-        db.fixed_ip_associate(self.ctxt, address, self.instance['uuid'],
-                              network_id=self.network['id'])
+        db.fixed_ip_associate(self.ctxt, address, instance_uuid,
+                              network_id=network['id'])
         fixed_ip = db.fixed_ip_get_by_address(self.ctxt, address)
-        self.assertEqual(fixed_ip['instance_uuid'], self.instance['uuid'])
-        self.assertEqual(fixed_ip['network_id'], self.network['id'])
+        self.assertEqual(fixed_ip['instance_uuid'], instance_uuid)
+        self.assertEqual(fixed_ip['network_id'], network['id'])
+
+    def test_fixed_ip_associate_pool_invalid_uuid(self):
+        instance_uuid = '123'
+        self.assertRaises(exception.InvalidUUID, db.fixed_ip_associate_pool,
+                          self.ctxt, None, instance_uuid)
+
+    def test_fixed_ip_associate_pool_no_more_fixed_ips(self):
+        instance_uuid = self._create_instance()
+        self.assertRaises(exception.NoMoreFixedIps, db.fixed_ip_associate_pool,
+                          self.ctxt, None, instance_uuid)
+
+    def test_fixed_ip_associate_pool_succeeds(self):
+        instance_uuid = self._create_instance()
+        network = db.network_create_safe(self.ctxt, {})
+
+        address = self.create_fixed_ip(network_id=network['id'])
+        db.fixed_ip_associate_pool(self.ctxt, network['id'], instance_uuid)
+        fixed_ip = db.fixed_ip_get_by_address(self.ctxt, address)
+        self.assertEqual(fixed_ip['instance_uuid'], instance_uuid)
+
+    def test_fixed_ip_create(self):
+        instance_uuid = self._create_instance()
+        network_id = db.network_create_safe(self.ctxt, {})['id']
+        param = {
+            'reserved': False,
+            'deleted': 0,
+            'leased': False,
+            'host': '127.0.0.1',
+            'address': 'localhost',
+            'allocated': False,
+            'instance_uuid': instance_uuid,
+            'network_id': network_id,
+            'virtual_interface_id': None
+        }
+
+        ignored_keys = ['created_at', 'id', 'deleted_at', 'updated_at']
+        fixed_ip_data = db.fixed_ip_create(self.ctxt, param)
+        self._assertEqualObjects(param, fixed_ip_data, ignored_keys)
+
+    def test_fixed_ip_bulk_create(self):
+        adress = 'fixed_ip_adress'
+        instance_uuid = self._create_instance()
+        network_id_1 = db.network_create_safe(self.ctxt, {})['id']
+        network_id_2 = db.network_create_safe(self.ctxt, {})['id']
+        params = [
+            {'reserved': False, 'deleted': 0, 'leased': False,
+             'host': '127.0.0.1', 'address': adress, 'allocated': False,
+             'instance_uuid': instance_uuid, 'network_id': network_id_1,
+             'virtual_interface_id': None},
+            {'reserved': False, 'deleted': 0, 'leased': False,
+             'host': 'localhost', 'address': adress, 'allocated': True,
+             'instance_uuid': instance_uuid, 'network_id': network_id_2,
+             'virtual_interface_id': None}
+        ]
+
+        db.fixed_ip_bulk_create(self.ctxt, params)
+        ignored_keys = ['created_at', 'id', 'deleted_at', 'updated_at']
+        fixed_ip_data = db.fixed_ip_get_by_instance(self.ctxt, instance_uuid)
+
+        # we have no `id` in incoming data so we can not use
+        # _assertEqualListsOfObjects to compare incoming data and received
+        # objects
+        fixed_ip_data = sorted(fixed_ip_data, key=lambda i: i['network_id'])
+        params = sorted(params, key=lambda i: i['network_id'])
+        for param, ip in zip(params, fixed_ip_data):
+            self._assertEqualObjects(param, ip, ignored_keys)
+
+    def test_fixed_ip_disassociate(self):
+        adress = 'fixed_ip_adress'
+        instance_uuid = self._create_instance()
+        network_id = db.network_create_safe(self.ctxt, {})['id']
+        param = {
+            'reserved': False,
+            'deleted': 0,
+            'leased': False,
+            'host': '127.0.0.1',
+            'address': adress,
+            'allocated': False,
+            'instance_uuid': instance_uuid,
+            'network_id': network_id,
+            'virtual_interface_id': None
+        }
+        db.fixed_ip_create(self.ctxt, param)
+
+        db.fixed_ip_disassociate(self.ctxt, adress)
+        fixed_ip_data = db.fixed_ip_get_by_address(self.ctxt, adress)
+        ignored_keys = ['created_at', 'id', 'deleted_at',
+                        'updated_at', 'instance_uuid']
+        self._assertEqualObjects(param, fixed_ip_data, ignored_keys)
+        self.assertIsNone(fixed_ip_data['instance_uuid'])
+
+    def test_fixed_ip_get_not_found_exception(self):
+        self.assertRaises(exception.FixedIpNotFound,
+                          db.fixed_ip_get, self.ctxt, 0)
+
+    def test_fixed_ip_get_sucsess2(self):
+        adress = 'fixed_ip_adress'
+        instance_uuid = self._create_instance()
+        network_id = db.network_create_safe(self.ctxt, {})['id']
+        param = {
+            'reserved': False,
+            'deleted': 0,
+            'leased': False,
+            'host': '127.0.0.1',
+            'address': adress,
+            'allocated': False,
+            'instance_uuid': instance_uuid,
+            'network_id': network_id,
+            'virtual_interface_id': None
+        }
+        fixed_ip_id = db.fixed_ip_create(self.ctxt, param)
+
+        self.ctxt.is_admin = False
+        self.assertRaises(exception.NotAuthorized, db.fixed_ip_get,
+                          self.ctxt, fixed_ip_id)
+
+    def test_fixed_ip_get_sucsess(self):
+        adress = 'fixed_ip_adress'
+        instance_uuid = self._create_instance()
+        network_id = db.network_create_safe(self.ctxt, {})['id']
+        param = {
+            'reserved': False,
+            'deleted': 0,
+            'leased': False,
+            'host': '127.0.0.1',
+            'address': adress,
+            'allocated': False,
+            'instance_uuid': instance_uuid,
+            'network_id': network_id,
+            'virtual_interface_id': None
+        }
+        db.fixed_ip_create(self.ctxt, param)
+
+        fixed_ip_id = db.fixed_ip_get_by_address(self.ctxt, adress)['id']
+        fixed_ip_data = db.fixed_ip_get(self.ctxt, fixed_ip_id)
+        ignored_keys = ['created_at', 'id', 'deleted_at', 'updated_at']
+        self._assertEqualObjects(param, fixed_ip_data, ignored_keys)
+
+    def test_fixed_ip_get_by_address_detailed_not_found_exception(self):
+        self.assertRaises(exception.FixedIpNotFoundForAddress,
+                          db.fixed_ip_get_by_address_detailed, self.ctxt, 'x')
+
+    def test_fixed_ip_get_by_address_detailed_sucsess(self):
+        adress = 'fixed_ip_adress_123'
+        instance_uuid = self._create_instance()
+        network_id = db.network_create_safe(self.ctxt, {})['id']
+        param = {
+            'reserved': False,
+            'deleted': 0,
+            'leased': False,
+            'host': '127.0.0.1',
+            'address': adress,
+            'allocated': False,
+            'instance_uuid': instance_uuid,
+            'network_id': network_id,
+            'virtual_interface_id': None
+        }
+        db.fixed_ip_create(self.ctxt, param)
+
+        fixed_ip_data = db.fixed_ip_get_by_address_detailed(self.ctxt,
+                                                               adress)
+        # fixed ip check here
+        ignored_keys = ['created_at', 'id', 'deleted_at', 'updated_at']
+        self._assertEqualObjects(param, fixed_ip_data[0], ignored_keys)
+
+        # network model check here
+        network_data = db.network_get(self.ctxt, network_id)
+        self._assertEqualObjects(network_data, fixed_ip_data[1])
+
+        # Instance check here
+        instance_data = db.instance_get_by_uuid(self.ctxt, instance_uuid)
+        ignored_keys = ['info_cache', 'system_metadata',
+                        'security_groups', 'metadata']  # HOW ????
+        self._assertEqualObjects(instance_data, fixed_ip_data[2], ignored_keys)
+
+    def test_fixed_ip_update_not_found_for_adress(self):
+        self.assertRaises(exception.FixedIpNotFoundForAddress,
+                          db.fixed_ip_update, self.ctxt, 'fixed_ip_adress', {})
+
+    def test_fixed_ip_update(self):
+        instance_uuid_1 = self._create_instance()
+        instance_uuid_2 = self._create_instance()
+        network_id_1 = db.network_create_safe(self.ctxt, {})['id']
+        network_id_2 = db.network_create_safe(self.ctxt, {})['id']
+        param_1 = {
+            'reserved': True, 'deleted': 0, 'leased': True,
+            'host': '192.168.133.1', 'address': 'localhost',
+            'allocated': True, 'instance_uuid': instance_uuid_1,
+            'network_id': network_id_1, 'virtual_interface_id': '123',
+        }
+
+        param_2 = {
+            'reserved': False, 'deleted': 0, 'leased': False,
+            'host': '127.0.0.1', 'address': 'localhost', 'allocated': False,
+            'instance_uuid': instance_uuid_2, 'network_id': network_id_2,
+            'virtual_interface_id': None
+        }
+
+        ignored_keys = ['created_at', 'id', 'deleted_at', 'updated_at']
+        fixed_ip_addr = db.fixed_ip_create(self.ctxt, param_1)['address']
+        db.fixed_ip_update(self.ctxt, fixed_ip_addr, param_2)
+        fixed_ip_after_update = db.fixed_ip_get_by_address(self.ctxt,
+                                                           param_2['address'])
+        self._assertEqualObjects(param_2, fixed_ip_after_update, ignored_keys)
+
+
+class FloatingIpTestCase(test.TestCase, ModelsObjectComparatorMixin):
+
+    def setUp(self):
+        super(FloatingIpTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
+    def _get_base_values(self):
+        return {
+            'address': '1.1.1.1',
+            'fixed_ip_id': None,
+            'project_id': 'fake_project',
+            'host': 'fake_host',
+            'auto_assigned': False,
+            'pool': 'fake_pool',
+            'interface': 'fake_interface',
+        }
+
+    def _create_floating_ip(self, values):
+        if not values:
+            values = {}
+        vals = self._get_base_values()
+        vals.update(values)
+        return db.floating_ip_create(self.ctxt, vals)
+
+    def test_floating_ip_get(self):
+        values = [{'address': '0.0.0.0'}, {'address': '1.1.1.1'}]
+        floating_ips = [self._create_floating_ip(val) for val in values]
+
+        for floating_ip in floating_ips:
+            real_floating_ip = db.floating_ip_get(self.ctxt, floating_ip['id'])
+            self._assertEqualObjects(floating_ip, real_floating_ip,
+                                     ignored_keys=['fixed_ip'])
+
+    def test_floating_ip_get_not_found(self):
+        self.assertRaises(exception.FloatingIpNotFound,
+                          db.floating_ip_get, self.ctxt, 100500)
+
+    def test_floating_ip_get_pools(self):
+        values = [
+            {'address': '0.0.0.0', 'pool': 'abc'},
+            {'address': '1.1.1.1', 'pool': 'abc'},
+            {'address': '2.2.2.2', 'pool': 'def'},
+            {'address': '3.3.3.3', 'pool': 'ghi'},
+        ]
+        for val in values:
+            self._create_floating_ip(val)
+        expected_pools = [{'name': x}
+                          for x in set(map(lambda x: x['pool'], values))]
+        real_pools = db.floating_ip_get_pools(self.ctxt)
+        self._assertEqualListsOfPrimitivesAsSets(real_pools, expected_pools)
+
+    def test_floating_ip_allocate_address(self):
+        pools = {
+            'pool1': ['0.0.0.0', '1.1.1.1'],
+            'pool2': ['2.2.2.2'],
+            'pool3': ['3.3.3.3', '4.4.4.4', '5.5.5.5']
+        }
+        for pool, addresses in pools.iteritems():
+            for address in addresses:
+                vals = {'pool': pool, 'address': address, 'project_id': None}
+                self._create_floating_ip(vals)
+
+        project_id = self._get_base_values()['project_id']
+        for pool, addresses in pools.iteritems():
+            alloc_addrs = []
+            for i in addresses:
+                float_addr = db.floating_ip_allocate_address(self.ctxt,
+                                                             project_id, pool)
+                alloc_addrs.append(float_addr)
+            self._assertEqualListsOfPrimitivesAsSets(alloc_addrs, addresses)
+
+    def test_floating_ip_allocate_address_no_more_floating_ips(self):
+        self.assertRaises(exception.NoMoreFloatingIps,
+                          db.floating_ip_allocate_address,
+                          self.ctxt, 'any_project_id', 'no_such_pool')
+
+    def test_floating_ip_allocate_not_authorized(self):
+        ctxt = context.RequestContext(user_id='a', project_id='abc',
+                                      is_admin=False)
+        self.assertRaises(exception.NotAuthorized,
+                          db.floating_ip_allocate_address,
+                          ctxt, 'other_project_id', 'any_pool')
+
+    def _get_existing_ips(self):
+        return [ip['address'] for ip in db.floating_ip_get_all(self.ctxt)]
+
+    def test_floating_ip_bulk_create(self):
+        expected_ips = ['1.1.1.1', '1.1.1.2', '1.1.1.3', '1.1.1.4']
+        db.floating_ip_bulk_create(self.ctxt,
+                                   map(lambda x: {'address': x}, expected_ips))
+        self._assertEqualListsOfPrimitivesAsSets(self._get_existing_ips(),
+                                                 expected_ips)
+
+    def test_floating_ip_bulk_create_duplicate(self):
+        ips = ['1.1.1.1', '1.1.1.2', '1.1.1.3', '1.1.1.4']
+        prepare_ips = lambda x: {'address': x}
+
+        db.floating_ip_bulk_create(self.ctxt, map(prepare_ips, ips))
+        self.assertRaises(exception.FloatingIpExists,
+                          db.floating_ip_bulk_create,
+                          self.ctxt, map(prepare_ips, ['1.1.1.5', '1.1.1.4']))
+        self.assertRaises(exception.FloatingIpNotFoundForAddress,
+                          db.floating_ip_get_by_address,
+                          self.ctxt, '1.1.1.5')
+
+    def test_floating_ip_bulk_destroy(self):
+        ips_for_delete = []
+        ips_for_non_delete = []
+
+        def create_ips(i):
+            return [{'address': '1.1.%s.%s' % (i, k)} for k in xrange(1, 256)]
+
+        # NOTE(boris-42): Create more then 256 ip to check that
+        #                 _ip_range_splitter works properly.
+        for i in xrange(1, 3):
+            ips_for_delete.extend(create_ips(i))
+        ips_for_non_delete.extend(create_ips(3))
+
+        db.floating_ip_bulk_create(self.ctxt,
+                                   ips_for_delete + ips_for_non_delete)
+        db.floating_ip_bulk_destroy(self.ctxt, ips_for_delete)
+
+        expected_addresses = map(lambda x: x['address'], ips_for_non_delete)
+        self._assertEqualListsOfPrimitivesAsSets(self._get_existing_ips(),
+                                                 expected_addresses)
+
+    def test_floating_ip_create(self):
+        floating_ip = self._create_floating_ip({})
+        ignored_keys = ['id', 'deleted', 'deleted_at', 'updated_at',
+                        'created_at']
+
+        self.assertFalse(floating_ip['id'] is None)
+        self._assertEqualObjects(floating_ip, self._get_base_values(),
+                                 ignored_keys)
+
+    def test_floating_ip_create_duplicate(self):
+        self._create_floating_ip({})
+        self.assertRaises(exception.FloatingIpExists,
+                          self._create_floating_ip, {})
+
+    def test_floating_ip_count_by_project(self):
+        projects = {
+            'project1': ['1.1.1.1', '2.2.2.2', '3.3.3.3'],
+            'project2': ['4.4.4.4', '5.5.5.5'],
+            'project3': ['6.6.6.6']
+        }
+        for project_id, addresses in projects.iteritems():
+            for address in addresses:
+                self._create_floating_ip({'project_id': project_id,
+                                          'address': address})
+        for project_id, addresses in projects.iteritems():
+            real_count = db.floating_ip_count_by_project(self.ctxt, project_id)
+            self.assertEqual(len(addresses), real_count)
+
+    def test_floating_ip_count_by_project_not_authorized(self):
+        ctxt = context.RequestContext(user_id='a', project_id='abc',
+                                      is_admin=False)
+        self.assertRaises(exception.NotAuthorized,
+                          db.floating_ip_count_by_project, ctxt, 'def')
+
+    def _create_fixed_ip(self, params):
+        default_params = {'address': '192.168.0.1'}
+        default_params.update(params)
+        return db.fixed_ip_create(self.ctxt, default_params)['address']
+
+    def test_floating_ip_fixed_ip_associate(self):
+        float_addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        fixed_addresses = ['2.2.2.1', '2.2.2.2', '2.2.2.3']
+
+        float_ips = [self._create_floating_ip({'address': address})
+                        for address in float_addresses]
+        fixed_addrs = [self._create_fixed_ip({'address': address})
+                        for address in fixed_addresses]
+
+        for float_ip, fixed_addr in zip(float_ips, fixed_addrs):
+            fixed_ip = db.floating_ip_fixed_ip_associate(self.ctxt,
+                                                         float_ip.address,
+                                                         fixed_addr, 'host')
+            self.assertEqual(fixed_ip.address, fixed_addr)
+
+            updated_float_ip = db.floating_ip_get(self.ctxt, float_ip.id)
+            self.assertEqual(fixed_ip.id, updated_float_ip.fixed_ip_id)
+            self.assertEqual('host', updated_float_ip.host)
+
+        # Test that already allocated float_ip returns None
+        result = db.floating_ip_fixed_ip_associate(self.ctxt,
+                                                   float_addresses[0],
+                                                   fixed_addresses[0], 'host')
+        self.assertTrue(result is None)
+
+    def test_floating_ip_fixed_ip_associate_float_ip_not_found(self):
+        self.assertRaises(exception.FloatingIpNotFoundForAddress,
+                          db.floating_ip_fixed_ip_associate,
+                          self.ctxt, 'non exist', 'some', 'some')
+
+    def test_floating_ip_deallocate(self):
+        values = {'address': '1.1.1.1', 'project_id': 'fake', 'host': 'fake'}
+        float_ip = self._create_floating_ip(values)
+        db.floating_ip_deallocate(self.ctxt, float_ip.address)
+
+        updated_float_ip = db.floating_ip_get(self.ctxt, float_ip.id)
+        self.assertTrue(updated_float_ip.project_id is None)
+        self.assertTrue(updated_float_ip.host is None)
+        self.assertFalse(updated_float_ip.auto_assigned)
+
+    def test_floating_ip_destroy(self):
+        addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        float_ips = [self._create_floating_ip({'address': addr})
+                        for addr in addresses]
+
+        expected_len = len(addresses)
+        for float_ip in float_ips:
+            db.floating_ip_destroy(self.ctxt, float_ip.address)
+            self.assertRaises(exception.FloatingIpNotFound,
+                              db.floating_ip_get, self.ctxt, float_ip.id)
+            expected_len -= 1
+            if expected_len > 0:
+                self.assertEqual(expected_len,
+                                 len(db.floating_ip_get_all(self.ctxt)))
+            else:
+                self.assertRaises(exception.NoFloatingIpsDefined,
+                                  db.floating_ip_get_all, self.ctxt)
+
+    def test_floating_ip_disassociate(self):
+        float_addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        fixed_addresses = ['2.2.2.1', '2.2.2.2', '2.2.2.3']
+
+        float_ips = [self._create_floating_ip({'address': address})
+                        for address in float_addresses]
+        fixed_addrs = [self._create_fixed_ip({'address': address})
+                        for address in fixed_addresses]
+
+        for float_ip, fixed_addr in zip(float_ips, fixed_addrs):
+            db.floating_ip_fixed_ip_associate(self.ctxt,
+                                              float_ip.address,
+                                              fixed_addr, 'host')
+
+        for float_ip, fixed_addr in zip(float_ips, fixed_addrs):
+            fixed = db.floating_ip_disassociate(self.ctxt, float_ip.address)
+            self.assertEqual(fixed.address, fixed_addr)
+            updated_float_ip = db.floating_ip_get(self.ctxt, float_ip.id)
+            self.assertTrue(updated_float_ip.fixed_ip_id is None)
+            self.assertTrue(updated_float_ip.host is None)
+
+    def test_floating_ip_disassociate_not_found(self):
+        self.assertRaises(exception.FloatingIpNotFoundForAddress,
+                          db.floating_ip_disassociate, self.ctxt, 'non exist')
+
+    def test_floating_ip_set_auto_assigned(self):
+        addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        float_ips = [self._create_floating_ip({'address': addr,
+                                               'auto_assigned': False})
+                        for addr in addresses]
+
+        for i in xrange(2):
+            db.floating_ip_set_auto_assigned(self.ctxt, float_ips[i].address)
+        for i in xrange(2):
+            float_ip = db.floating_ip_get(self.ctxt, float_ips[i].id)
+            self.assertTrue(float_ip.auto_assigned)
+
+        float_ip = db.floating_ip_get(self.ctxt, float_ips[2].id)
+        self.assertFalse(float_ip.auto_assigned)
+
+    def test_floating_ip_get_all(self):
+        addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        float_ips = [self._create_floating_ip({'address': addr})
+                        for addr in addresses]
+        self._assertEqualListsOfObjects(float_ips,
+                                        db.floating_ip_get_all(self.ctxt))
+
+    def test_floating_ip_get_all_not_found(self):
+        self.assertRaises(exception.NoFloatingIpsDefined,
+                          db.floating_ip_get_all, self.ctxt)
+
+    def test_floating_ip_get_all_by_host(self):
+        hosts = {
+            'host1': ['1.1.1.1', '1.1.1.2'],
+            'host2': ['2.1.1.1', '2.1.1.2'],
+            'host3': ['3.1.1.1', '3.1.1.2', '3.1.1.3']
+        }
+
+        hosts_with_float_ips = {}
+        for host, addresses in hosts.iteritems():
+            hosts_with_float_ips[host] = []
+            for address in addresses:
+                float_ip = self._create_floating_ip({'host': host,
+                                                     'address': address})
+                hosts_with_float_ips[host].append(float_ip)
+
+        for host, float_ips in hosts_with_float_ips.iteritems():
+            real_float_ips = db.floating_ip_get_all_by_host(self.ctxt, host)
+            self._assertEqualListsOfObjects(float_ips, real_float_ips)
+
+    def test_floating_ip_get_all_by_host_not_found(self):
+        self.assertRaises(exception.FloatingIpNotFoundForHost,
+                          db.floating_ip_get_all_by_host,
+                          self.ctxt, 'non_exists_host')
+
+    def test_floating_ip_get_all_by_project(self):
+        projects = {
+            'pr1': ['1.1.1.1', '1.1.1.2'],
+            'pr2': ['2.1.1.1', '2.1.1.2'],
+            'pr3': ['3.1.1.1', '3.1.1.2', '3.1.1.3']
+        }
+
+        projects_with_float_ips = {}
+        for project_id, addresses in projects.iteritems():
+            projects_with_float_ips[project_id] = []
+            for address in addresses:
+                float_ip = self._create_floating_ip({'project_id': project_id,
+                                                     'address': address})
+                projects_with_float_ips[project_id].append(float_ip)
+
+        for project_id, float_ips in projects_with_float_ips.iteritems():
+            real_float_ips = db.floating_ip_get_all_by_project(self.ctxt,
+                                                               project_id)
+            self._assertEqualListsOfObjects(float_ips, real_float_ips,
+                                            ignored_keys='fixed_ip')
+
+    def test_floating_ip_get_all_by_project_not_authorized(self):
+        ctxt = context.RequestContext(user_id='a', project_id='abc',
+                                      is_admin=False)
+        self.assertRaises(exception.NotAuthorized,
+                          db.floating_ip_get_all_by_project,
+                          ctxt, 'other_project')
+
+    def test_floating_ip_get_by_address(self):
+        addresses = ['1.1.1.1', '1.1.1.2', '1.1.1.3']
+        float_ips = [self._create_floating_ip({'address': addr})
+                        for addr in addresses]
+
+        for float_ip in float_ips:
+            real_float_ip = db.floating_ip_get_by_address(self.ctxt,
+                                                          float_ip.address)
+            self._assertEqualObjects(float_ip, real_float_ip,
+                                     ignored_keys='fixed_ip')
+
+    def test_floating_ip_get_by_address_not_found(self):
+        self.assertRaises(exception.FloatingIpNotFoundForAddress,
+                          db.floating_ip_get_by_address,
+                          self.ctxt, 'non_exists_host')
+
+    def test_floating_ip_get_by_fixed_address(self):
+        fixed_float = [
+            ('1.1.1.1', '2.2.2.1'),
+            ('1.1.1.2', '2.2.2.2'),
+            ('1.1.1.3', '2.2.2.3')
+        ]
+
+        for fixed_addr, float_addr in fixed_float:
+            self._create_floating_ip({'address': float_addr})
+            self._create_fixed_ip({'address': fixed_addr})
+            db.floating_ip_fixed_ip_associate(self.ctxt, float_addr,
+                                              fixed_addr, 'some_host')
+
+        for fixed_addr, float_addr in fixed_float:
+            float_ip = db.floating_ip_get_by_fixed_address(self.ctxt,
+                                                           fixed_addr)
+            self.assertEqual(float_addr, float_ip[0]['address'])
+
+    def test_floating_ip_get_by_fixed_ip_id(self):
+        fixed_float = [
+            ('1.1.1.1', '2.2.2.1'),
+            ('1.1.1.2', '2.2.2.2'),
+            ('1.1.1.3', '2.2.2.3')
+        ]
+
+        for fixed_addr, float_addr in fixed_float:
+            self._create_floating_ip({'address': float_addr})
+            self._create_fixed_ip({'address': fixed_addr})
+            db.floating_ip_fixed_ip_associate(self.ctxt, float_addr,
+                                              fixed_addr, 'some_host')
+
+        for fixed_addr, float_addr in fixed_float:
+            fixed_ip = db.fixed_ip_get_by_address(self.ctxt, fixed_addr)
+            float_ip = db.floating_ip_get_by_fixed_ip_id(self.ctxt,
+                                                         fixed_ip['id'])
+            self.assertEqual(float_addr, float_ip[0]['address'])
+
+    def test_floating_ip_update(self):
+        float_ip = self._create_floating_ip({})
+
+        values = {
+            'project_id': 'some_pr',
+            'host': 'some_host',
+            'auto_assigned': True,
+            'interface': 'some_interface',
+            'pool': 'some_pool'
+        }
+        db.floating_ip_update(self.ctxt, float_ip['address'], values)
+        updated_float_ip = db.floating_ip_get(self.ctxt, float_ip['id'])
+        self._assertEqualObjects(updated_float_ip, values,
+                                 ignored_keys=['id', 'address', 'updated_at',
+                                               'deleted_at', 'created_at',
+                                               'deleted', 'fixed_ip_id',
+                                               'fixed_ip'])
+
+    def test_floating_ip_update_to_duplicate(self):
+        float_ip1 = self._create_floating_ip({'address': '1.1.1.1'})
+        float_ip2 = self._create_floating_ip({'address': '1.1.1.2'})
+
+        self.assertRaises(exception.FloatingIpExists,
+                          db.floating_ip_update,
+                          self.ctxt, float_ip2['address'],
+                          {'address': float_ip1['address']})
 
 
 class InstanceDestroyConstraints(test.TestCase):
@@ -2358,29 +3275,45 @@ class InstanceDestroyConstraints(test.TestCase):
 
 
 class VolumeUsageDBApiTestCase(test.TestCase):
+
     def setUp(self):
         super(VolumeUsageDBApiTestCase, self).setUp()
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
 
+        self.useFixture(test.TimeOverride())
+
     def test_vol_usage_update_no_totals_update(self):
         ctxt = context.get_admin_context()
         now = timeutils.utcnow()
-        timeutils.set_time_override(now)
         start_time = now - datetime.timedelta(seconds=10)
         refreshed_time = now - datetime.timedelta(seconds=5)
 
         expected_vol_usages = [{'volume_id': u'1',
+                                'instance_uuid': 'fake-instance-uuid1',
+                                'project_id': 'fake-project-uuid1',
+                                'user_id': 'fake-user-uuid1',
                                 'curr_reads': 1000,
                                 'curr_read_bytes': 2000,
                                 'curr_writes': 3000,
-                                'curr_write_bytes': 4000},
+                                'curr_write_bytes': 4000,
+                                'tot_reads': 0,
+                                'tot_read_bytes': 0,
+                                'tot_writes': 0,
+                                'tot_write_bytes': 0},
                                {'volume_id': u'2',
+                                'instance_uuid': 'fake-instance-uuid2',
+                                'project_id': 'fake-project-uuid2',
+                                'user_id': 'fake-user-uuid2',
                                 'curr_reads': 100,
                                 'curr_read_bytes': 200,
                                 'curr_writes': 300,
-                                'curr_write_bytes': 400}]
+                                'curr_write_bytes': 400,
+                                'tot_reads': 0,
+                                'tot_read_bytes': 0,
+                                'tot_writes': 0,
+                                'tot_write_bytes': 0}]
 
         def _compare(vol_usage, expected):
             for key, value in expected.items():
@@ -2390,27 +3323,81 @@ class VolumeUsageDBApiTestCase(test.TestCase):
         self.assertEqual(len(vol_usages), 0)
 
         vol_usage = db.vol_usage_update(ctxt, 1, rd_req=10, rd_bytes=20,
-                                        wr_req=30, wr_bytes=40, instance_id=1)
+                                        wr_req=30, wr_bytes=40,
+                                        instance_id='fake-instance-uuid1',
+                                        project_id='fake-project-uuid1',
+                                        user_id='fake-user-uuid1',
+                                        availability_zone='fake-az')
         vol_usage = db.vol_usage_update(ctxt, 2, rd_req=100, rd_bytes=200,
                                         wr_req=300, wr_bytes=400,
-                                        instance_id=1)
+                                        instance_id='fake-instance-uuid2',
+                                        project_id='fake-project-uuid2',
+                                        user_id='fake-user-uuid2',
+                                        availability_zone='fake-az')
         vol_usage = db.vol_usage_update(ctxt, 1, rd_req=1000, rd_bytes=2000,
                                         wr_req=3000, wr_bytes=4000,
-                                        instance_id=1,
+                                        instance_id='fake-instance-uuid1',
+                                        project_id='fake-project-uuid1',
+                                        user_id='fake-user-uuid1',
+                                        availability_zone='fake-az',
                                         last_refreshed=refreshed_time)
 
         vol_usages = db.vol_get_usage_by_time(ctxt, start_time)
         self.assertEqual(len(vol_usages), 2)
         _compare(vol_usages[0], expected_vol_usages[0])
         _compare(vol_usages[1], expected_vol_usages[1])
-        timeutils.clear_time_override()
 
     def test_vol_usage_update_totals_update(self):
         ctxt = context.get_admin_context()
         now = timeutils.utcnow()
-        timeutils.set_time_override(now)
         start_time = now - datetime.timedelta(seconds=10)
+
+        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=100, rd_bytes=200,
+                                        wr_req=300, wr_bytes=400,
+                                        instance_id='fake-instance-uuid',
+                                        project_id='fake-project-uuid',
+                                        user_id='fake-user-uuid',
+                                        availability_zone='fake-az')
+        current_usage = db.vol_get_usage_by_time(ctxt, start_time)[0]
+        self.assertEqual(current_usage['tot_reads'], 0)
+        self.assertEqual(current_usage['curr_reads'], 100)
+
+        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=200, rd_bytes=300,
+                                        wr_req=400, wr_bytes=500,
+                                        instance_id='fake-instance-uuid',
+                                        project_id='fake-project-uuid',
+                                        user_id='fake-user-uuid',
+                                        availability_zone='fake-az',
+                                        update_totals=True)
+        current_usage = db.vol_get_usage_by_time(ctxt, start_time)[0]
+        self.assertEqual(current_usage['tot_reads'], 200)
+        self.assertEqual(current_usage['curr_reads'], 0)
+
+        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=300, rd_bytes=400,
+                                        wr_req=500, wr_bytes=600,
+                                        instance_id='fake-instance-uuid',
+                                        project_id='fake-project-uuid',
+                                        availability_zone='fake-az',
+                                        user_id='fake-user-uuid')
+        current_usage = db.vol_get_usage_by_time(ctxt, start_time)[0]
+        self.assertEqual(current_usage['tot_reads'], 200)
+        self.assertEqual(current_usage['curr_reads'], 300)
+
+        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=400, rd_bytes=500,
+                                        wr_req=600, wr_bytes=700,
+                                        instance_id='fake-instance-uuid',
+                                        project_id='fake-project-uuid',
+                                        user_id='fake-user-uuid',
+                                        availability_zone='fake-az',
+                                        update_totals=True)
+
+        vol_usages = db.vol_get_usage_by_time(ctxt, start_time)
+
         expected_vol_usages = {'volume_id': u'1',
+                               'project_id': 'fake-project-uuid',
+                               'user_id': 'fake-user-uuid',
+                               'instance_uuid': 'fake-instance-uuid',
+                               'availability_zone': 'fake-az',
                                'tot_reads': 600,
                                'tot_read_bytes': 800,
                                'tot_writes': 1000,
@@ -2420,27 +3407,107 @@ class VolumeUsageDBApiTestCase(test.TestCase):
                                'curr_writes': 0,
                                'curr_write_bytes': 0}
 
-        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=100, rd_bytes=200,
-                                        wr_req=300, wr_bytes=400,
-                                        instance_id=1)
-        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=200, rd_bytes=300,
-                                        wr_req=400, wr_bytes=500,
-                                        instance_id=1,
-                                        update_totals=True)
-        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=300, rd_bytes=400,
-                                        wr_req=500, wr_bytes=600,
-                                        instance_id=1)
-        vol_usage = db.vol_usage_update(ctxt, 1, rd_req=400, rd_bytes=500,
-                                        wr_req=600, wr_bytes=700,
-                                        instance_id=1,
-                                        update_totals=True)
-
-        vol_usages = db.vol_get_usage_by_time(ctxt, start_time)
-
         self.assertEquals(1, len(vol_usages))
         for key, value in expected_vol_usages.items():
             self.assertEqual(vol_usages[0][key], value)
-        timeutils.clear_time_override()
+
+    def test_vol_usage_update_when_blockdevicestats_reset(self):
+        ctxt = context.get_admin_context()
+        now = timeutils.utcnow()
+        start_time = now - datetime.timedelta(seconds=10)
+
+        vol_usages = db.vol_get_usage_by_time(ctxt, start_time)
+        self.assertEqual(len(vol_usages), 0)
+
+        db.vol_usage_update(ctxt, 1,
+                            rd_req=10000, rd_bytes=20000,
+                            wr_req=30000, wr_bytes=40000,
+                            instance_id='fake-instance-uuid1',
+                            project_id='fake-project-uuid1',
+                            availability_zone='fake-az',
+                            user_id='fake-user-uuid1')
+
+        # Instance rebooted or crashed. block device stats were reset and are
+        # less then the previous values
+        db.vol_usage_update(ctxt, 1,
+                            rd_req=100, rd_bytes=200,
+                            wr_req=300, wr_bytes=400,
+                            instance_id='fake-instance-uuid1',
+                            project_id='fake-project-uuid1',
+                            availability_zone='fake-az',
+                            user_id='fake-user-uuid1')
+
+        db.vol_usage_update(ctxt, 1,
+                            rd_req=200, rd_bytes=300,
+                            wr_req=400, wr_bytes=500,
+                            instance_id='fake-instance-uuid1',
+                            project_id='fake-project-uuid1',
+                            availability_zone='fake-az',
+                            user_id='fake-user-uuid1')
+
+        vol_usage = db.vol_get_usage_by_time(ctxt, start_time)[0]
+        expected_vol_usage = {'volume_id': u'1',
+                              'instance_uuid': 'fake-instance-uuid1',
+                              'project_id': 'fake-project-uuid1',
+                              'availability_zone': 'fake-az',
+                              'user_id': 'fake-user-uuid1',
+                              'curr_reads': 200,
+                              'curr_read_bytes': 300,
+                              'curr_writes': 400,
+                              'curr_write_bytes': 500,
+                              'tot_reads': 10000,
+                              'tot_read_bytes': 20000,
+                              'tot_writes': 30000,
+                              'tot_write_bytes': 40000}
+        for key, value in expected_vol_usage.items():
+            self.assertEqual(vol_usage[key], value, key)
+
+    def test_vol_usage_update_totals_update_when_blockdevicestats_reset(self):
+        # This is unlikely to happen, but could when a volume is detached
+        # right after a instance has rebooted / recovered and before
+        # the system polled and updated the volume usage cache table.
+        ctxt = context.get_admin_context()
+        now = timeutils.utcnow()
+        start_time = now - datetime.timedelta(seconds=10)
+
+        vol_usages = db.vol_get_usage_by_time(ctxt, start_time)
+        self.assertEqual(len(vol_usages), 0)
+
+        db.vol_usage_update(ctxt, 1,
+                            rd_req=10000, rd_bytes=20000,
+                            wr_req=30000, wr_bytes=40000,
+                            instance_id='fake-instance-uuid1',
+                            project_id='fake-project-uuid1',
+                            availability_zone='fake-az',
+                            user_id='fake-user-uuid1')
+
+        # Instance rebooted or crashed. block device stats were reset and are
+        # less then the previous values
+        db.vol_usage_update(ctxt, 1,
+                            rd_req=100, rd_bytes=200,
+                            wr_req=300, wr_bytes=400,
+                            instance_id='fake-instance-uuid1',
+                            project_id='fake-project-uuid1',
+                            availability_zone='fake-az',
+                            user_id='fake-user-uuid1',
+                            update_totals=True)
+
+        vol_usage = db.vol_get_usage_by_time(ctxt, start_time)[0]
+        expected_vol_usage = {'volume_id': u'1',
+                              'instance_uuid': 'fake-instance-uuid1',
+                              'project_id': 'fake-project-uuid1',
+                              'availability_zone': 'fake-az',
+                              'user_id': 'fake-user-uuid1',
+                              'curr_reads': 0,
+                              'curr_read_bytes': 0,
+                              'curr_writes': 0,
+                              'curr_write_bytes': 0,
+                              'tot_reads': 10100,
+                              'tot_read_bytes': 20200,
+                              'tot_writes': 30300,
+                              'tot_write_bytes': 40400}
+        for key, value in expected_vol_usage.items():
+            self.assertEqual(vol_usage[key], value, key)
 
 
 class TaskLogTestCase(test.TestCase):
@@ -2511,6 +3578,22 @@ class BlockDeviceMappingTestCase(test.TestCase):
         for bdm in bdms:
             if bdm['device_name'] == values['device_name']:
                 return bdm
+
+    def test_scrub_empty_str_values_no_effect(self):
+        values = {'volume_size': 5}
+        expected = copy.copy(values)
+        sqlalchemy_api._scrub_empty_str_values(values, ['volume_size'])
+        self.assertEqual(values, expected)
+
+    def test_scrub_empty_str_values_empty_string(self):
+        values = {'volume_size': ''}
+        sqlalchemy_api._scrub_empty_str_values(values, ['volume_size'])
+        self.assertEqual(values, {})
+
+    def test_scrub_empty_str_values_empty_unicode(self):
+        values = {'volume_size': u''}
+        sqlalchemy_api._scrub_empty_str_values(values, ['volume_size'])
+        self.assertEqual(values, {})
 
     def test_block_device_mapping_create(self):
         bdm = self._create_bdm({})
@@ -2675,11 +3758,11 @@ class VirtualInterfaceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         # NOTE(boris-42): Due to the bug 1156227 this won't work. In havana-1
         #                 it will be fixed.
         self.assertRaises(exception.VirtualInterfaceCreateException,
-                          self._create_virt_interface, {uuid: vif['uuid']})
+                          self._create_virt_interface, {"uuid": vif['uuid']})
 
     def test_virtual_interface_get(self):
-        vifs = [self._create_virt_interface({'address':'a'}),
-                self._create_virt_interface({'address':'b'})]
+        vifs = [self._create_virt_interface({'address': 'a'}),
+                self._create_virt_interface({'address': 'b'})]
 
         for vif in vifs:
             real_vif = db.virtual_interface_get(self.ctxt, vif['id'])
@@ -2756,6 +3839,136 @@ class VirtualInterfaceTestCase(test.TestCase, ModelsObjectComparatorMixin):
         self._assertEqualListsOfObjects(vifs, real_vifs)
 
 
+class KeyPairTestCase(test.TestCase, ModelsObjectComparatorMixin):
+    def setUp(self):
+        super(KeyPairTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
+    def _create_key_pair(self, values):
+        return db.key_pair_create(self.ctxt, values)
+
+    def test_key_pair_create(self):
+        param = {
+            'name': 'test_1',
+            'user_id': 'test_user_id_1',
+            'public_key': 'test_public_key_1',
+            'fingerprint': 'test_fingerprint_1'
+        }
+        key_pair = self._create_key_pair(param)
+
+        self.assertTrue(key_pair['id'] is not None)
+        ignored_keys = ['deleted', 'created_at', 'updated_at',
+                        'deleted_at', 'id']
+        self._assertEqualObjects(key_pair, param, ignored_keys)
+
+    def test_key_pair_create_with_duplicate_name(self):
+        params = {'name': 'test_name', 'user_id': 'test_user_id'}
+        self._create_key_pair(params)
+        self.assertRaises(exception.KeyPairExists, self._create_key_pair,
+                          params)
+
+    def test_key_pair_get(self):
+        params = [
+            {'name': 'test_1', 'user_id': 'test_user_id_1'},
+            {'name': 'test_2', 'user_id': 'test_user_id_2'},
+            {'name': 'test_3', 'user_id': 'test_user_id_3'}
+        ]
+        key_pairs = [self._create_key_pair(p) for p in params]
+
+        for key in key_pairs:
+            real_key = db.key_pair_get(self.ctxt, key['user_id'], key['name'])
+            self._assertEqualObjects(key, real_key)
+
+    def test_key_pair_get_no_results(self):
+        param = {'name': 'test_1', 'user_id': 'test_user_id_1'}
+        self.assertRaises(exception.KeypairNotFound, db.key_pair_get,
+                          self.ctxt, param['user_id'], param['name'])
+
+    def test_key_pair_get_deleted(self):
+        param = {'name': 'test_1', 'user_id': 'test_user_id_1'}
+        key_pair_created = self._create_key_pair(param)
+
+        db.key_pair_destroy(self.ctxt, param['user_id'], param['name'])
+        self.assertRaises(exception.KeypairNotFound, db.key_pair_get,
+                          self.ctxt, param['user_id'], param['name'])
+
+        ctxt = self.ctxt.elevated(read_deleted='yes')
+        key_pair_deleted = db.key_pair_get(ctxt, param['user_id'],
+                                           param['name'])
+        ignored_keys = ['deleted', 'created_at', 'updated_at', 'deleted_at']
+        self._assertEqualObjects(key_pair_deleted, key_pair_created,
+                                 ignored_keys)
+        self.assertEqual(key_pair_deleted['deleted'], key_pair_deleted['id'])
+
+    def test_key_pair_get_all_by_user(self):
+        params = [
+            {'name': 'test_1', 'user_id': 'test_user_id_1'},
+            {'name': 'test_2', 'user_id': 'test_user_id_1'},
+            {'name': 'test_3', 'user_id': 'test_user_id_2'}
+        ]
+        key_pairs_user_1 = [self._create_key_pair(p) for p in params
+                            if p['user_id'] == 'test_user_id_1']
+        key_pairs_user_2 = [self._create_key_pair(p) for p in params
+                            if p['user_id'] == 'test_user_id_2']
+
+        real_keys_1 = db.key_pair_get_all_by_user(self.ctxt, 'test_user_id_1')
+        real_keys_2 = db.key_pair_get_all_by_user(self.ctxt, 'test_user_id_2')
+
+        self._assertEqualListsOfObjects(key_pairs_user_1, real_keys_1)
+        self._assertEqualListsOfObjects(key_pairs_user_2, real_keys_2)
+
+    def test_key_pair_count_by_user(self):
+        params = [
+            {'name': 'test_1', 'user_id': 'test_user_id_1'},
+            {'name': 'test_2', 'user_id': 'test_user_id_1'},
+            {'name': 'test_3', 'user_id': 'test_user_id_2'}
+        ]
+        for p in params:
+            self._create_key_pair(p)
+
+        count_1 = db.key_pair_count_by_user(self.ctxt, 'test_user_id_1')
+        self.assertEqual(count_1, 2)
+
+        count_2 = db.key_pair_count_by_user(self.ctxt, 'test_user_id_2')
+        self.assertEqual(count_2, 1)
+
+    def test_key_pair_destroy(self):
+        param = {'name': 'test_1', 'user_id': 'test_user_id_1'}
+        self._create_key_pair(param)
+
+        db.key_pair_destroy(self.ctxt, param['user_id'], param['name'])
+        self.assertRaises(exception.KeypairNotFound, db.key_pair_get,
+                          self.ctxt, param['user_id'], param['name'])
+
+    def test_key_pair_destroy_no_such_key(self):
+        param = {'name': 'test_1', 'user_id': 'test_user_id_1'}
+        self.assertRaises(exception.KeypairNotFound,
+                          db.key_pair_destroy, self.ctxt,
+                          param['user_id'], param['name'])
+
+
+class QuotaClassTestCase(test.TestCase, ModelsObjectComparatorMixin):
+
+    def setUp(self):
+        super(QuotaClassTestCase, self).setUp()
+        self.ctxt = context.get_admin_context()
+
+    def test_quota_class_get_default(self):
+        params = {
+            'test_resource1': '10',
+            'test_resource2': '20',
+            'test_resource3': '30',
+        }
+        for res, limit in params.items():
+            db.quota_class_create(self.ctxt, 'default', res, limit)
+
+        defaults = db.quota_class_get_default(self.ctxt)
+        self.assertEqual(defaults, dict(class_name='default',
+                                        test_resource1=10,
+                                        test_resource2=20,
+                                        test_resource3=30))
+
+
 class ArchiveTestCase(test.TestCase):
 
     def setUp(self):
@@ -2763,167 +3976,186 @@ class ArchiveTestCase(test.TestCase):
         self.context = context.get_admin_context()
         self.engine = get_engine()
         self.conn = self.engine.connect()
-        self.metadata = MetaData()
-        self.metadata.bind = self.engine
-        self.table1 = Table("instance_id_mappings",
-                           self.metadata,
-                           autoload=True)
-        self.shadow_table1 = Table("shadow_instance_id_mappings",
-                                  self.metadata,
-                                  autoload=True)
-        self.table2 = Table("dns_domains",
-                           self.metadata,
-                           autoload=True)
-        self.shadow_table2 = Table("shadow_dns_domains",
-                                  self.metadata,
-                                  autoload=True)
-        self.consoles = Table("consoles",
-                              self.metadata,
-                              autoload=True)
-        self.console_pools = Table("console_pools",
-                                   self.metadata,
-                                   autoload=True)
-        self.shadow_consoles = Table("shadow_consoles",
-                                     self.metadata,
-                                     autoload=True)
-        self.shadow_console_pools = Table("shadow_console_pools",
-                                          self.metadata,
-                                          autoload=True)
+        self.instance_id_mappings = db_utils.get_table(self.engine,
+                                                       "instance_id_mappings")
+        self.shadow_instance_id_mappings = db_utils.get_table(self.engine,
+                                                "shadow_instance_id_mappings")
+        self.dns_domains = db_utils.get_table(self.engine, "dns_domains")
+        self.shadow_dns_domains = db_utils.get_table(self.engine,
+                                                     "shadow_dns_domains")
+        self.consoles = db_utils.get_table(self.engine, "consoles")
+        self.console_pools = db_utils.get_table(self.engine, "console_pools")
+        self.shadow_consoles = db_utils.get_table(self.engine,
+                                                  "shadow_consoles")
+        self.shadow_console_pools = db_utils.get_table(self.engine,
+                                                       "shadow_console_pools")
+        self.instances = db_utils.get_table(self.engine, "instances")
+        self.shadow_instances = db_utils.get_table(self.engine,
+                                                   "shadow_instances")
         self.uuidstrs = []
         for unused in xrange(6):
             self.uuidstrs.append(stdlib_uuid.uuid4().hex)
         self.ids = []
+        self.id_tablenames_to_cleanup = set(["console_pools", "consoles"])
+        self.uuid_tablenames_to_cleanup = set(["instance_id_mappings",
+                                               "instances"])
+        self.domain_tablenames_to_cleanup = set(["dns_domains"])
 
     def tearDown(self):
         super(ArchiveTestCase, self).tearDown()
-        delete_statement1 = self.table1.delete(
-                                self.table1.c.uuid.in_(self.uuidstrs))
-        self.conn.execute(delete_statement1)
-        delete_statement2 = self.shadow_table1.delete(
-                                self.shadow_table1.c.uuid.in_(self.uuidstrs))
-        self.conn.execute(delete_statement2)
-        delete_statement3 = self.table2.delete(self.table2.c.domain.in_(
-                                               self.uuidstrs))
-        self.conn.execute(delete_statement3)
-        delete_statement4 = self.shadow_table2.delete(
-                                self.shadow_table2.c.domain.in_(self.uuidstrs))
-        self.conn.execute(delete_statement4)
-        for table in [self.console_pools, self.consoles, self.shadow_consoles,
-                      self.shadow_console_pools]:
-            delete_statement5 = table.delete(table.c.id.in_(self.ids))
-            self.conn.execute(delete_statement5)
+        for tablename in self.id_tablenames_to_cleanup:
+            for name in [tablename, "shadow_" + tablename]:
+                table = db_utils.get_table(self.engine, name)
+                del_statement = table.delete(table.c.id.in_(self.ids))
+                self.conn.execute(del_statement)
+        for tablename in self.uuid_tablenames_to_cleanup:
+            for name in [tablename, "shadow_" + tablename]:
+                table = db_utils.get_table(self.engine, name)
+                del_statement = table.delete(table.c.uuid.in_(self.uuidstrs))
+                self.conn.execute(del_statement)
+        for tablename in self.domain_tablenames_to_cleanup:
+            for name in [tablename, "shadow_" + tablename]:
+                table = db_utils.get_table(self.engine, name)
+                del_statement = table.delete(table.c.domain.in_(self.uuidstrs))
+                self.conn.execute(del_statement)
 
     def test_archive_deleted_rows(self):
         # Add 6 rows to table
         for uuidstr in self.uuidstrs:
-            insert_statement = self.table1.insert().values(uuid=uuidstr)
-            self.conn.execute(insert_statement)
+            ins_stmt = self.instance_id_mappings.insert().values(uuid=uuidstr)
+            self.conn.execute(ins_stmt)
         # Set 4 to deleted
-        update_statement = self.table1.update().\
-                where(self.table1.c.uuid.in_(self.uuidstrs[:4]))\
+        update_statement = self.instance_id_mappings.update().\
+                where(self.instance_id_mappings.c.uuid.in_(self.uuidstrs[:4]))\
                 .values(deleted=1)
         self.conn.execute(update_statement)
-        query1 = select([self.table1]).where(self.table1.c.uuid.in_(
-                                             self.uuidstrs))
-        rows1 = self.conn.execute(query1).fetchall()
+        qiim = select([self.instance_id_mappings]).where(self.
+                                instance_id_mappings.c.uuid.in_(self.uuidstrs))
+        rows = self.conn.execute(qiim).fetchall()
         # Verify we have 6 in main
-        self.assertEqual(len(rows1), 6)
-        query2 = select([self.shadow_table1]).\
-                where(self.shadow_table1.c.uuid.in_(self.uuidstrs))
-        rows2 = self.conn.execute(query2).fetchall()
+        self.assertEqual(len(rows), 6)
+        qsiim = select([self.shadow_instance_id_mappings]).\
+                where(self.shadow_instance_id_mappings.c.uuid.in_(
+                                                                self.uuidstrs))
+        rows = self.conn.execute(qsiim).fetchall()
         # Verify we have 0 in shadow
-        self.assertEqual(len(rows2), 0)
+        self.assertEqual(len(rows), 0)
         # Archive 2 rows
         db.archive_deleted_rows(self.context, max_rows=2)
-        rows3 = self.conn.execute(query1).fetchall()
+        rows = self.conn.execute(qiim).fetchall()
         # Verify we have 4 left in main
-        self.assertEqual(len(rows3), 4)
-        rows4 = self.conn.execute(query2).fetchall()
+        self.assertEqual(len(rows), 4)
+        rows = self.conn.execute(qsiim).fetchall()
         # Verify we have 2 in shadow
-        self.assertEqual(len(rows4), 2)
+        self.assertEqual(len(rows), 2)
         # Archive 2 more rows
         db.archive_deleted_rows(self.context, max_rows=2)
-        rows5 = self.conn.execute(query1).fetchall()
+        rows = self.conn.execute(qiim).fetchall()
         # Verify we have 2 left in main
-        self.assertEqual(len(rows5), 2)
-        rows6 = self.conn.execute(query2).fetchall()
+        self.assertEqual(len(rows), 2)
+        rows = self.conn.execute(qsiim).fetchall()
         # Verify we have 4 in shadow
-        self.assertEqual(len(rows6), 4)
+        self.assertEqual(len(rows), 4)
         # Try to archive more, but there are no deleted rows left.
         db.archive_deleted_rows(self.context, max_rows=2)
-        rows7 = self.conn.execute(query1).fetchall()
+        rows = self.conn.execute(qiim).fetchall()
         # Verify we still have 2 left in main
-        self.assertEqual(len(rows7), 2)
-        rows8 = self.conn.execute(query2).fetchall()
+        self.assertEqual(len(rows), 2)
+        rows = self.conn.execute(qsiim).fetchall()
         # Verify we still have 4 in shadow
-        self.assertEqual(len(rows8), 4)
+        self.assertEqual(len(rows), 4)
 
-    def test_archive_deleted_rows_for_table(self):
-        tablename = "instance_id_mappings"
+    def test_archive_deleted_rows_for_every_uuid_table(self):
+        tablenames = []
+        for model_class in models.__dict__.itervalues():
+            if hasattr(model_class, "__tablename__"):
+                tablenames.append(model_class.__tablename__)
+        tablenames.sort()
+        for tablename in tablenames:
+            ret = self._test_archive_deleted_rows_for_one_uuid_table(tablename)
+            if ret == 0:
+                self.uuid_tablenames_to_cleanup.add(tablename)
+
+    def _test_archive_deleted_rows_for_one_uuid_table(self, tablename):
+        """
+        :returns: 0 on success, 1 if no uuid column, 2 if insert failed
+        """
+        main_table = db_utils.get_table(self.engine, tablename)
+        if not hasattr(main_table.c, "uuid"):
+            # Not a uuid table, so skip it.
+            return 1
+        shadow_table = db_utils.get_table(self.engine, "shadow_" + tablename)
         # Add 6 rows to table
         for uuidstr in self.uuidstrs:
-            insert_statement = self.table1.insert().values(uuid=uuidstr)
-            self.conn.execute(insert_statement)
+            ins_stmt = main_table.insert().values(uuid=uuidstr)
+            try:
+                self.conn.execute(ins_stmt)
+            except IntegrityError:
+                # This table has constraints that require a table-specific
+                # insert, so skip it.
+                return 2
         # Set 4 to deleted
-        update_statement = self.table1.update().\
-                where(self.table1.c.uuid.in_(self.uuidstrs[:4]))\
+        update_statement = main_table.update().\
+                where(main_table.c.uuid.in_(self.uuidstrs[:4]))\
                 .values(deleted=1)
         self.conn.execute(update_statement)
-        query1 = select([self.table1]).where(self.table1.c.uuid.in_(
+        qmt = select([main_table]).where(main_table.c.uuid.in_(
                                              self.uuidstrs))
-        rows1 = self.conn.execute(query1).fetchall()
+        rows = self.conn.execute(qmt).fetchall()
         # Verify we have 6 in main
-        self.assertEqual(len(rows1), 6)
-        query2 = select([self.shadow_table1]).\
-                where(self.shadow_table1.c.uuid.in_(self.uuidstrs))
-        rows2 = self.conn.execute(query2).fetchall()
+        self.assertEqual(len(rows), 6)
+        qst = select([shadow_table]).\
+                where(shadow_table.c.uuid.in_(self.uuidstrs))
+        rows = self.conn.execute(qst).fetchall()
         # Verify we have 0 in shadow
-        self.assertEqual(len(rows2), 0)
+        self.assertEqual(len(rows), 0)
         # Archive 2 rows
         db.archive_deleted_rows_for_table(self.context, tablename, max_rows=2)
-        rows3 = self.conn.execute(query1).fetchall()
         # Verify we have 4 left in main
-        self.assertEqual(len(rows3), 4)
-        rows4 = self.conn.execute(query2).fetchall()
+        rows = self.conn.execute(qmt).fetchall()
+        self.assertEqual(len(rows), 4)
         # Verify we have 2 in shadow
-        self.assertEqual(len(rows4), 2)
+        rows = self.conn.execute(qst).fetchall()
+        self.assertEqual(len(rows), 2)
         # Archive 2 more rows
         db.archive_deleted_rows_for_table(self.context, tablename, max_rows=2)
-        rows5 = self.conn.execute(query1).fetchall()
         # Verify we have 2 left in main
-        self.assertEqual(len(rows5), 2)
-        rows6 = self.conn.execute(query2).fetchall()
+        rows = self.conn.execute(qmt).fetchall()
+        self.assertEqual(len(rows), 2)
         # Verify we have 4 in shadow
-        self.assertEqual(len(rows6), 4)
+        rows = self.conn.execute(qst).fetchall()
+        self.assertEqual(len(rows), 4)
         # Try to archive more, but there are no deleted rows left.
         db.archive_deleted_rows_for_table(self.context, tablename, max_rows=2)
-        rows7 = self.conn.execute(query1).fetchall()
         # Verify we still have 2 left in main
-        self.assertEqual(len(rows7), 2)
-        rows8 = self.conn.execute(query2).fetchall()
+        rows = self.conn.execute(qmt).fetchall()
+        self.assertEqual(len(rows), 2)
         # Verify we still have 4 in shadow
-        self.assertEqual(len(rows8), 4)
+        rows = self.conn.execute(qst).fetchall()
+        self.assertEqual(len(rows), 4)
+        return 0
 
     def test_archive_deleted_rows_no_id_column(self):
         uuidstr0 = self.uuidstrs[0]
-        insert_statement = self.table2.insert().values(domain=uuidstr0)
-        self.conn.execute(insert_statement)
-        update_statement = self.table2.update().\
-                           where(self.table2.c.domain == uuidstr0).\
+        ins_stmt = self.dns_domains.insert().values(domain=uuidstr0)
+        self.conn.execute(ins_stmt)
+        update_statement = self.dns_domains.update().\
+                           where(self.dns_domains.c.domain == uuidstr0).\
                            values(deleted=1)
         self.conn.execute(update_statement)
-        query1 = select([self.table2], self.table2.c.domain == uuidstr0)
-        rows1 = self.conn.execute(query1).fetchall()
-        self.assertEqual(len(rows1), 1)
-        query2 = select([self.shadow_table2],
-                        self.shadow_table2.c.domain == uuidstr0)
-        rows2 = self.conn.execute(query2).fetchall()
-        self.assertEqual(len(rows2), 0)
+        qdd = select([self.dns_domains], self.dns_domains.c.domain ==
+                                            uuidstr0)
+        rows = self.conn.execute(qdd).fetchall()
+        self.assertEqual(len(rows), 1)
+        qsdd = select([self.shadow_dns_domains],
+                        self.shadow_dns_domains.c.domain == uuidstr0)
+        rows = self.conn.execute(qsdd).fetchall()
+        self.assertEqual(len(rows), 0)
         db.archive_deleted_rows(self.context, max_rows=1)
-        rows3 = self.conn.execute(query1).fetchall()
-        self.assertEqual(len(rows3), 0)
-        rows4 = self.conn.execute(query2).fetchall()
-        self.assertEqual(len(rows4), 1)
+        rows = self.conn.execute(qdd).fetchall()
+        self.assertEqual(len(rows), 0)
+        rows = self.conn.execute(qsdd).fetchall()
+        self.assertEqual(len(rows), 1)
 
     def test_archive_deleted_rows_fk_constraint(self):
         # consoles.pool_id depends on console_pools.id
@@ -2940,13 +4172,13 @@ class ArchiveTestCase(test.TestCase):
                 self.skipTest(
                     'sqlite version too old for reliable SQLA foreign_keys')
             self.conn.execute("PRAGMA foreign_keys = ON")
-        insert_statement = self.console_pools.insert().values(deleted=1)
-        result = self.conn.execute(insert_statement)
+        ins_stmt = self.console_pools.insert().values(deleted=1)
+        result = self.conn.execute(ins_stmt)
         id1 = result.inserted_primary_key[0]
         self.ids.append(id1)
-        insert_statement = self.consoles.insert().values(deleted=1,
+        ins_stmt = self.consoles.insert().values(deleted=1,
                                                          pool_id=id1)
-        result = self.conn.execute(insert_statement)
+        result = self.conn.execute(ins_stmt)
         id2 = result.inserted_primary_key[0]
         self.ids.append(id2)
         # The first try to archive console_pools should fail, due to FK.
@@ -2958,3 +4190,69 @@ class ArchiveTestCase(test.TestCase):
         # Then archiving console_pools should work.
         num = db.archive_deleted_rows_for_table(self.context, "console_pools")
         self.assertEqual(num, 1)
+
+    def test_archive_deleted_rows_2_tables(self):
+        # Add 6 rows to each table
+        for uuidstr in self.uuidstrs:
+            ins_stmt = self.instance_id_mappings.insert().values(uuid=uuidstr)
+            self.conn.execute(ins_stmt)
+            ins_stmt2 = self.instances.insert().values(uuid=uuidstr)
+            self.conn.execute(ins_stmt2)
+        # Set 4 of each to deleted
+        update_statement = self.instance_id_mappings.update().\
+                where(self.instance_id_mappings.c.uuid.in_(self.uuidstrs[:4]))\
+                .values(deleted=1)
+        self.conn.execute(update_statement)
+        update_statement2 = self.instances.update().\
+                where(self.instances.c.uuid.in_(self.uuidstrs[:4]))\
+                .values(deleted=1)
+        self.conn.execute(update_statement2)
+        # Verify we have 6 in each main table
+        qiim = select([self.instance_id_mappings]).where(
+                         self.instance_id_mappings.c.uuid.in_(self.uuidstrs))
+        rows = self.conn.execute(qiim).fetchall()
+        self.assertEqual(len(rows), 6)
+        qi = select([self.instances]).where(self.instances.c.uuid.in_(
+                                             self.uuidstrs))
+        rows = self.conn.execute(qi).fetchall()
+        self.assertEqual(len(rows), 6)
+        # Verify we have 0 in each shadow table
+        qsiim = select([self.shadow_instance_id_mappings]).\
+                where(self.shadow_instance_id_mappings.c.uuid.in_(
+                                                            self.uuidstrs))
+        rows = self.conn.execute(qsiim).fetchall()
+        self.assertEqual(len(rows), 0)
+        qsi = select([self.shadow_instances]).\
+                where(self.shadow_instances.c.uuid.in_(self.uuidstrs))
+        rows = self.conn.execute(qsi).fetchall()
+        self.assertEqual(len(rows), 0)
+        # Archive 7 rows, which should be 4 in one table and 3 in the other.
+        db.archive_deleted_rows(self.context, max_rows=7)
+        # Verify we have 5 left in the two main tables combined
+        iim_rows = self.conn.execute(qiim).fetchall()
+        i_rows = self.conn.execute(qi).fetchall()
+        self.assertEqual(len(iim_rows) + len(i_rows), 5)
+        # Verify we have 7 in the two shadow tables combined.
+        siim_rows = self.conn.execute(qsiim).fetchall()
+        si_rows = self.conn.execute(qsi).fetchall()
+        self.assertEqual(len(siim_rows) + len(si_rows), 7)
+        # Archive the remaining deleted rows.
+        db.archive_deleted_rows(self.context, max_rows=1)
+        # Verify we have 4 total left in both main tables.
+        iim_rows = self.conn.execute(qiim).fetchall()
+        i_rows = self.conn.execute(qi).fetchall()
+        self.assertEqual(len(iim_rows) + len(i_rows), 4)
+        # Verify we have 8 in shadow
+        siim_rows = self.conn.execute(qsiim).fetchall()
+        si_rows = self.conn.execute(qsi).fetchall()
+        self.assertEqual(len(siim_rows) + len(si_rows), 8)
+        # Try to archive more, but there are no deleted rows left.
+        db.archive_deleted_rows(self.context, max_rows=500)
+        # Verify we have 4 total left in both main tables.
+        iim_rows = self.conn.execute(qiim).fetchall()
+        i_rows = self.conn.execute(qi).fetchall()
+        self.assertEqual(len(iim_rows) + len(i_rows), 4)
+        # Verify we have 8 in shadow
+        siim_rows = self.conn.execute(qsiim).fetchall()
+        si_rows = self.conn.execute(qsi).fetchall()
+        self.assertEqual(len(siim_rows) + len(si_rows), 8)

@@ -84,6 +84,10 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
     1.44 - Added compute_node_delete
     1.45 - Added project_id to quota_commit and quota_rollback
     1.46 - Added compute_confirm_resize
+    1.47 - Added columns_to_join to instance_get_all_by_host and
+                 instance_get_all_by_filters
+    1.48 - Added compute_unrescue
+    1.49 - Added columns_to_join to instance_get_by_uuid
     """
 
     BASE_RPC_API_VERSION = '1.0'
@@ -92,11 +96,6 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         super(ConductorAPI, self).__init__(
             topic=CONF.conductor.topic,
             default_version=self.BASE_RPC_API_VERSION)
-
-    def ping(self, context, arg, timeout=None):
-        arg_p = jsonutils.to_primitive(arg)
-        msg = self.make_msg('ping', arg=arg_p)
-        return self.call(context, msg, version='1.22', timeout=timeout)
 
     def instance_update(self, context, instance_uuid, updates,
                         service=None):
@@ -113,10 +112,12 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                             instance_id=instance_id)
         return self.call(context, msg, version='1.24')
 
-    def instance_get_by_uuid(self, context, instance_uuid):
+    def instance_get_by_uuid(self, context, instance_uuid,
+                             columns_to_join=None):
         msg = self.make_msg('instance_get_by_uuid',
-                            instance_uuid=instance_uuid)
-        return self.call(context, msg, version='1.2')
+                            instance_uuid=instance_uuid,
+                            columns_to_join=columns_to_join)
+        return self.call(context, msg, version='1.49')
 
     def migration_get(self, context, migration_id):
         msg = self.make_msg('migration_get', migration_id=migration_id)
@@ -198,10 +199,6 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                             last_refreshed=last_refreshed)
         return self.call(context, msg, version='1.5')
 
-    def get_backdoor_port(self, context):
-        msg = self.make_msg('get_backdoor_port')
-        return self.call(context, msg, version='1.6')
-
     def security_group_get_by_instance(self, context, instance):
         instance_p = jsonutils.to_primitive(instance)
         msg = self.make_msg('security_group_get_by_instance',
@@ -248,16 +245,11 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         return self.call(context, msg, version='1.14')
 
     def instance_get_all_by_filters(self, context, filters, sort_key,
-                                    sort_dir):
+                                    sort_dir, columns_to_join=None):
         msg = self.make_msg('instance_get_all_by_filters',
                             filters=filters, sort_key=sort_key,
-                            sort_dir=sort_dir)
-        return self.call(context, msg, version='1.15')
-
-    def instance_get_all_hung_in_rebooting(self, context, timeout):
-        msg = self.make_msg('instance_get_all_hung_in_rebooting',
-                            timeout=timeout)
-        return self.call(context, msg, version='1.15')
+                            sort_dir=sort_dir, columns_to_join=columns_to_join)
+        return self.call(context, msg, version='1.47')
 
     def instance_get_active_by_window_joined(self, context, begin, end=None,
                                              project_id=None, host=None):
@@ -302,13 +294,11 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
                             binary=binary)
         return self.call(context, msg, version='1.28')
 
-    def instance_get_all(self, context):
-        msg = self.make_msg('instance_get_all')
-        return self.call(context, msg, version='1.23')
-
-    def instance_get_all_by_host(self, context, host, node=None):
-        msg = self.make_msg('instance_get_all_by_host', host=host, node=node)
-        return self.call(context, msg, version='1.32')
+    def instance_get_all_by_host(self, context, host, node=None,
+                                 columns_to_join=None):
+        msg = self.make_msg('instance_get_all_by_host', host=host, node=node,
+                            columns_to_join=columns_to_join)
+        return self.call(context, msg, version='1.47')
 
     def instance_fault_create(self, context, values):
         msg = self.make_msg('instance_fault_create', values=values)
@@ -445,3 +435,8 @@ class ConductorAPI(nova.openstack.common.rpc.proxy.RpcProxy):
         msg = self.make_msg('compute_confirm_resize', instance=instance_p,
                             migration_ref=migration_p)
         return self.call(context, msg, version='1.46')
+
+    def compute_unrescue(self, context, instance):
+        instance_p = jsonutils.to_primitive(instance)
+        msg = self.make_msg('compute_unrescue', instance=instance_p)
+        return self.call(context, msg, version='1.48')

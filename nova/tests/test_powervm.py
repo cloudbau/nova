@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM Corp.
+# Copyright 2013 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -19,16 +19,17 @@ Test suite for PowerVMDriver.
 """
 
 import contextlib
+import paramiko
 
 from nova import context
 from nova import db
 from nova import test
 
-from nova.compute import instance_types
+from nova.compute import flavors
 from nova.compute import power_state
 from nova.compute import task_states
 from nova.network import model as network_model
-from nova.openstack.common import log as logging
+from nova.openstack.common import processutils
 from nova.tests import fake_network_cache_model
 from nova.tests.image import fake
 from nova.virt import images
@@ -37,9 +38,7 @@ from nova.virt.powervm import common
 from nova.virt.powervm import driver as powervm_driver
 from nova.virt.powervm import exception
 from nova.virt.powervm import lpar
-from nova.virt.powervm import operator
-
-LOG = logging.getLogger(__name__)
+from nova.virt.powervm import operator as powervm_operator
 
 
 def fake_lpar(instance_name):
@@ -49,7 +48,26 @@ def fake_lpar(instance_name):
                      uptime=939395, state='Running')
 
 
-class FakeIVMOperator(object):
+def fake_ssh_connect(connection):
+    """Returns a new paramiko.SSHClient object."""
+    return paramiko.SSHClient()
+
+
+def raise_(ex):
+    """Raises the given Exception."""
+    raise ex
+
+
+class FakePowerVMOperator(powervm_operator.PowerVMOperator):
+
+    def get_lpar(self, instance_name, resource_type='lpar'):
+        return fake_lpar(instance_name)
+
+    def run_vios_command(self, cmd):
+        pass
+
+
+class FakeIVMOperator(powervm_operator.IVMOperator):
 
     def get_lpar(self, instance_name, resource_type='lpar'):
         return fake_lpar(instance_name)
@@ -104,6 +122,9 @@ class FakeIVMOperator(object):
     def rename_lpar(self, old, new):
         pass
 
+    def _remove_file(self, file_path):
+        pass
+
     def set_lpar_mac_base_value(self, instance_name, mac):
         pass
 
@@ -151,7 +172,7 @@ class FakeBlockAdapter(powervm_blockdev.PowerVMLocalVolumeAdapter):
 
 
 def fake_get_powervm_operator():
-    return FakeIVMOperator()
+    return FakeIVMOperator(None)
 
 
 class PowerVMDriverTestCase(test.TestCase):
@@ -159,9 +180,9 @@ class PowerVMDriverTestCase(test.TestCase):
 
     def setUp(self):
         super(PowerVMDriverTestCase, self).setUp()
-        self.stubs.Set(operator, 'get_powervm_operator',
+        self.stubs.Set(powervm_operator, 'get_powervm_operator',
                        fake_get_powervm_operator)
-        self.stubs.Set(operator, 'get_powervm_disk_adapter',
+        self.stubs.Set(powervm_operator, 'get_powervm_disk_adapter',
                        lambda: FakeBlockAdapter())
         self.powervm_connection = powervm_driver.PowerVMDriver(None)
         self.instance = self._create_instance()
@@ -170,7 +191,7 @@ class PowerVMDriverTestCase(test.TestCase):
         fake.stub_out_image_service(self.stubs)
         ctxt = context.get_admin_context()
         instance_type = db.instance_type_get(ctxt, 1)
-        sys_meta = instance_types.save_instance_type_info({}, instance_type)
+        sys_meta = flavors.save_instance_type_info({}, instance_type)
         return db.instance_create(ctxt,
                         {'user_id': 'fake',
                         'project_id': 'fake',
@@ -205,12 +226,23 @@ class PowerVMDriverTestCase(test.TestCase):
         state = self.powervm_connection.get_info(self.instance)['state']
         self.assertEqual(state, power_state.RUNNING)
 
-    def test_spawn_cleanup_on_fail(self):
-        # Verify on a failed spawn, we get the original exception raised.
-        # helper function
-        def raise_(ex):
-            raise ex
+    def test_spawn_create_lpar_fail(self):
+        self.flags(powervm_img_local_path='/images/')
+        self.stubs.Set(images, 'fetch', lambda *x, **y: None)
+        self.stubs.Set(
+            self.powervm_connection._powervm,
+            'get_host_stats',
+            lambda *x, **y: raise_(
+                (processutils.ProcessExecutionError('instance_name'))))
+        fake_net_info = network_model.NetworkInfo([
+                                     fake_network_cache_model.new_vif()])
+        self.assertRaises(exception.PowerVMLPARCreationFailed,
+                          self.powervm_connection.spawn,
+                          context.get_admin_context(),
+                          self.instance,
+                          {'id': 'ANY_ID'}, [], 's3cr3t', fake_net_info)
 
+    def test_spawn_cleanup_on_fail(self):
         self.flags(powervm_img_local_path='/images/')
         self.stubs.Set(images, 'fetch', lambda *x, **y: None)
         self.stubs.Set(
@@ -248,6 +280,61 @@ class PowerVMDriverTestCase(test.TestCase):
 
         self.assertTrue(self._loc_task_state == task_states.IMAGE_UPLOADING and
             self._loc_expected_task_state == task_states.IMAGE_PENDING_UPLOAD)
+
+    def _set_get_info_stub(self, state):
+        def fake_get_instance(instance_name):
+            return {'state': state,
+                    'max_mem': 512,
+                    'desired_mem': 256,
+                    'max_procs': 2,
+                    'uptime': 2000}
+        self.stubs.Set(self.powervm_connection._powervm, '_get_instance',
+                       fake_get_instance)
+
+    def test_get_info_state_nostate(self):
+        self._set_get_info_stub('')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.NOSTATE)
+
+    def test_get_info_state_running(self):
+        self._set_get_info_stub('Running')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.RUNNING)
+
+    def test_get_info_state_starting(self):
+        self._set_get_info_stub('Starting')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.RUNNING)
+
+    def test_get_info_state_shutdown(self):
+        self._set_get_info_stub('Not Activated')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.SHUTDOWN)
+
+    def test_get_info_state_shutting_down(self):
+        self._set_get_info_stub('Shutting Down')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.SHUTDOWN)
+
+    def test_get_info_state_error(self):
+        self._set_get_info_stub('Error')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.CRASHED)
+
+    def test_get_info_state_not_available(self):
+        self._set_get_info_stub('Not Available')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.CRASHED)
+
+    def test_get_info_state_open_firmware(self):
+        self._set_get_info_stub('Open Firmware')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.CRASHED)
+
+    def test_get_info_state_unmapped(self):
+        self._set_get_info_stub('The Universe')
+        info_dict = self.powervm_connection.get_info(self.instance)
+        self.assertEqual(info_dict['state'], power_state.NOSTATE)
 
     def test_destroy(self):
         self.powervm_connection.destroy(self.instance, None)
@@ -368,6 +455,37 @@ class PowerVMDriverTestCase(test.TestCase):
         expected_path = 'some/image/path/logical-vol-name_rsz.gz'
         self.assertEqual(file_path, expected_path)
 
+    def test_deploy_from_migrated_file(self):
+        instance = self.instance
+        context = 'fake_context'
+        network_info = []
+        network_info.append({'address': 'fa:89:f0:8b:9b:39'})
+        dest = '10.8.46.20'
+        disk_info = {}
+        disk_info['root_disk_file'] = 'some/file/path.gz'
+        disk_info['old_lv_size'] = 30
+        self.flags(powervm_mgr=dest)
+        fake_op = self.powervm_connection._powervm
+        self.deploy_from_vios_file_called = False
+
+        def fake_deploy_from_vios_file(lpar, file_path, size,
+                                       decompress):
+            exp_file_path = 'some/file/path.gz'
+            exp_size = 40 * 1024 ** 3
+            exp_decompress = True
+            self.deploy_from_vios_file_called = True
+            self.assertEqual(exp_file_path, file_path)
+            self.assertEqual(exp_size, size)
+            self.assertEqual(exp_decompress, decompress)
+
+        self.stubs.Set(fake_op, '_deploy_from_vios_file',
+                       fake_deploy_from_vios_file)
+        self.powervm_connection.finish_migration(context, None,
+                         instance, disk_info, network_info,
+                         None, resize_instance=True,
+                         block_device_info=None)
+        self.assertEqual(self.deploy_from_vios_file_called, True)
+
     def test_set_lpar_mac_base_value(self):
         instance = self.instance
         context = 'fake_context'
@@ -395,7 +513,7 @@ class PowerVMDriverTestCase(test.TestCase):
 
         def fake_set_lpar_mac_base_value(inst_name, mac, *args, **kwargs):
             # get expected mac address from FakeIVM set
-            fake_ivm = FakeIVMOperator()
+            fake_ivm = FakeIVMOperator(None)
             exp_mac = fake_ivm.macs_for_instance(inst_name).pop()
             self.assertEqual(exp_mac, mac)
 
@@ -406,23 +524,6 @@ class PowerVMDriverTestCase(test.TestCase):
         disk_info = self.powervm_connection.migrate_disk_and_power_off(
                         context, instance,
                         dest, instance_type, network_info, block_device_info)
-
-    def test_set_lpar_mac_base_value_command(self):
-        inst_name = 'some_instance'
-        mac = 'FA:98:64:2B:29:39'
-        exp_mac_str = mac[:-2].replace(':', '').lower()
-
-        def fake_run_vios_command(cmd, *args, **kwargs):
-            exp_cmd = ('chsyscfg -r lpar -i "name=%(inst_name)s, ',
-                       'virtual_eth_mac_base_value=%(exp_mac_str)s"' %
-                       locals())
-            assertEqual(exp_cmd, cmd)
-
-        self.stubs.Set(self.powervm_connection._powervm._operator,
-                       'run_vios_command', fake_run_vios_command)
-
-        fake_op = self.powervm_connection._powervm
-        fake_op._operator.set_lpar_mac_base_value(inst_name, mac)
 
     def test_migrate_build_scp_command(self):
         lv_name = 'logical-vol-name'
@@ -491,3 +592,76 @@ class PowerVMDriverTestCase(test.TestCase):
         self.assertEquals(host_stats['supported_instances'][0][0], "ppc64")
         self.assertEquals(host_stats['supported_instances'][0][1], "powervm")
         self.assertEquals(host_stats['supported_instances'][0][2], "hvm")
+
+
+class PowerVMDriverLparTestCase(test.TestCase):
+    """Unit tests for PowerVM connection calls."""
+
+    def setUp(self):
+        super(PowerVMDriverLparTestCase, self).setUp()
+        self.stubs.Set(powervm_operator.PowerVMOperator, '_update_host_stats',
+                       lambda self: None)
+        self.powervm_connection = powervm_driver.PowerVMDriver(None)
+
+    def test_set_lpar_mac_base_value_command(self):
+        inst_name = 'some_instance'
+        mac = 'FA:98:64:2B:29:39'
+        exp_mac_str = mac[:-2].replace(':', '')
+
+        exp_cmd = ('chsyscfg -r lpar -i "name=%(inst_name)s, '
+                   'virtual_eth_mac_base_value=%(exp_mac_str)s"') % locals()
+
+        fake_op = self.powervm_connection._powervm
+        self.mox.StubOutWithMock(fake_op._operator, 'run_vios_command')
+        fake_op._operator.run_vios_command(exp_cmd)
+
+        self.mox.ReplayAll()
+
+        fake_op._operator.set_lpar_mac_base_value(inst_name, mac)
+
+
+class PowerVMDriverCommonTestCase(test.TestCase):
+    """Unit tests for the nova.virt.powervm.common module."""
+
+    def setUp(self):
+        super(PowerVMDriverCommonTestCase, self).setUp()
+        # our fake connection information never changes since we can't
+        # actually connect to anything for these tests
+        self.connection = common.Connection('fake_host', 'user', 'password')
+
+    def test_check_connection_ssh_is_none(self):
+        """
+        Passes a null ssh object to the check_connection method.
+        The method should create a new ssh connection using the
+        Connection object and return it.
+        """
+        self.stubs.Set(common, 'ssh_connect', fake_ssh_connect)
+        ssh = common.check_connection(None, self.connection)
+        self.assertIsNotNone(ssh)
+
+    def test_check_connection_transport_is_dead(self):
+        """
+        Passes an ssh object to the check_connection method which
+        does not have a transport set.
+        The method should create a new ssh connection using the
+        Connection object and return it.
+        """
+        self.stubs.Set(common, 'ssh_connect', fake_ssh_connect)
+        ssh1 = fake_ssh_connect(self.connection)
+        ssh2 = common.check_connection(ssh1, self.connection)
+        self.assertIsNotNone(ssh2)
+        self.assertNotEqual(ssh1, ssh2)
+
+    def test_check_connection_raise_ssh_exception(self):
+        """
+        Passes an ssh object to the check_connection method which
+        does not have a transport set.
+        The method should raise an SSHException.
+        """
+        self.stubs.Set(common, 'ssh_connect',
+            lambda *x, **y: raise_(paramiko.SSHException(
+                                        'Error connecting to host.')))
+        ssh = fake_ssh_connect(self.connection)
+        self.assertRaises(paramiko.SSHException,
+                          common.check_connection,
+                          ssh, self.connection)

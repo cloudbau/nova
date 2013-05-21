@@ -64,7 +64,6 @@ CONF.import_opt('sqlite_db', 'nova.openstack.common.db.sqlalchemy.session')
 CONF.set_override('use_stderr', False)
 
 logging.setup('nova')
-LOG = logging.getLogger(__name__)
 
 _DB_CACHE = None
 
@@ -174,9 +173,9 @@ class MoxStubout(fixtures.Fixture):
         # because it screws with our generators
         self.mox = mox.Mox()
         self.stubs = stubout.StubOutForTesting()
-        self.addCleanup(self.mox.UnsetStubs)
         self.addCleanup(self.stubs.UnsetAll)
         self.addCleanup(self.stubs.SmartUnsetAll)
+        self.addCleanup(self.mox.UnsetStubs)
         self.addCleanup(self.mox.VerifyAll)
 
 

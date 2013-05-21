@@ -24,7 +24,7 @@ import os
 
 from oslo.config import cfg
 
-from nova.compute import instance_types
+from nova.compute import flavors
 from nova import exception
 from nova.openstack.common.db import exception as db_exc
 from nova.openstack.common import fileutils
@@ -117,7 +117,7 @@ def get_tilera_nfs_path(node_id):
 
 
 def get_partition_sizes(instance):
-    instance_type = instance_types.extract_instance_type(instance)
+    instance_type = flavors.extract_instance_type(instance)
     root_mb = instance_type['root_gb'] * 1024
     swap_mb = instance_type['swap']
 
@@ -166,7 +166,6 @@ class Tilera(base.NodeDriver):
 
     def _collect_mac_addresses(self, context, node):
         macs = set()
-        macs.add(db.bm_node_get(context, node['id'])['prov_mac_address'])
         for nic in db.bm_interface_get_all_by_bm_node_id(context, node['id']):
             if nic['address']:
                 macs.add(nic['address'])

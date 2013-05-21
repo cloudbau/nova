@@ -496,6 +496,11 @@ def fixed_ip_get_by_instance(context, instance_uuid):
     return IMPL.fixed_ip_get_by_instance(context, instance_uuid)
 
 
+def fixed_ip_get_by_host(context, host):
+    """Get fixed ips by compute host."""
+    return IMPL.fixed_ip_get_by_host(context, host)
+
+
 def fixed_ip_get_by_network_host(context, network_uuid, host):
     """Get fixed ip for a host in a network."""
     return IMPL.fixed_ip_get_by_network_host(context, network_uuid, host)
@@ -588,9 +593,9 @@ def instance_destroy(context, instance_uuid, constraint=None,
     return rv
 
 
-def instance_get_by_uuid(context, uuid):
+def instance_get_by_uuid(context, uuid, columns_to_join=None):
     """Get an instance or raise if it does not exist."""
-    return IMPL.instance_get_by_uuid(context, uuid)
+    return IMPL.instance_get_by_uuid(context, uuid, columns_to_join)
 
 
 def instance_get(context, instance_id):
@@ -604,11 +609,13 @@ def instance_get_all(context, columns_to_join=None):
 
 
 def instance_get_all_by_filters(context, filters, sort_key='created_at',
-                                sort_dir='desc', limit=None, marker=None):
+                                sort_dir='desc', limit=None, marker=None,
+                                columns_to_join=None):
     """Get all instances that match all filters."""
     return IMPL.instance_get_all_by_filters(context, filters, sort_key,
                                             sort_dir, limit=limit,
-                                            marker=marker)
+                                            marker=marker,
+                                            columns_to_join=columns_to_join)
 
 
 def instance_get_active_by_window_joined(context, begin, end=None,
@@ -622,9 +629,9 @@ def instance_get_active_by_window_joined(context, begin, end=None,
                                               project_id, host)
 
 
-def instance_get_all_by_host(context, host):
+def instance_get_all_by_host(context, host, columns_to_join=None):
     """Get all instances belonging to a host."""
-    return IMPL.instance_get_all_by_host(context, host)
+    return IMPL.instance_get_all_by_host(context, host, columns_to_join)
 
 
 def instance_get_all_by_host_and_node(context, host, node):
@@ -647,18 +654,10 @@ def instance_floating_address_get_all(context, instance_uuid):
     return IMPL.instance_floating_address_get_all(context, instance_uuid)
 
 
+# NOTE(hanlind): This method can be removed as conductor RPC API moves to v2.0.
 def instance_get_all_hung_in_rebooting(context, reboot_window):
     """Get all instances stuck in a rebooting state."""
     return IMPL.instance_get_all_hung_in_rebooting(context, reboot_window)
-
-
-def instance_test_and_set(context, instance_uuid, attr, ok_states,
-                          new_state):
-    """Atomically check if an instance is in a valid state, and if it is, set
-    the instance into a new state.
-    """
-    return IMPL.instance_test_and_set(context, instance_uuid, attr,
-                                      ok_states, new_state)
 
 
 def instance_update(context, instance_uuid, values, update_cells=True):
@@ -911,6 +910,11 @@ def quota_class_create(context, class_name, resource, limit):
 def quota_class_get(context, class_name, resource):
     """Retrieve a quota class or raise if it does not exist."""
     return IMPL.quota_class_get(context, class_name, resource)
+
+
+def quota_class_get_default(context):
+    """Retrieve all default quotas."""
+    return IMPL.quota_class_get_default(context)
 
 
 def quota_class_get_all_by_name(context, class_name):
@@ -1310,6 +1314,29 @@ def instance_type_access_remove(context, flavor_id, project_id):
     return IMPL.instance_type_access_remove(context, flavor_id, project_id)
 
 
+def instance_type_extra_specs_get(context, flavor_id):
+    """Get all extra specs for an instance type."""
+    return IMPL.instance_type_extra_specs_get(context, flavor_id)
+
+
+def instance_type_extra_specs_get_item(context, flavor_id, key):
+    """Get extra specs by key and flavor_id."""
+    return IMPL.instance_type_extra_specs_get_item(context, flavor_id, key)
+
+
+def instance_type_extra_specs_delete(context, flavor_id, key):
+    """Delete the given extra specs item."""
+    IMPL.instance_type_extra_specs_delete(context, flavor_id, key)
+
+
+def instance_type_extra_specs_update_or_create(context, flavor_id,
+                                               extra_specs):
+    """Create or update instance type extra specs. This adds or modifies the
+    key/value pairs specified in the extra specs dict argument"""
+    IMPL.instance_type_extra_specs_update_or_create(context, flavor_id,
+                                                    extra_specs)
+
+
 ####################
 
 
@@ -1436,27 +1463,6 @@ def bw_usage_update(context, uuid, mac, start_period, bw_in, bw_out,
     return rv
 
 
-####################
-
-
-def instance_type_extra_specs_get(context, flavor_id):
-    """Get all extra specs for an instance type."""
-    return IMPL.instance_type_extra_specs_get(context, flavor_id)
-
-
-def instance_type_extra_specs_delete(context, flavor_id, key):
-    """Delete the given extra specs item."""
-    IMPL.instance_type_extra_specs_delete(context, flavor_id, key)
-
-
-def instance_type_extra_specs_update_or_create(context, flavor_id,
-                                               extra_specs):
-    """Create or update instance type extra specs. This adds or modifies the
-    key/value pairs specified in the extra specs dict argument"""
-    IMPL.instance_type_extra_specs_update_or_create(context, flavor_id,
-                                                    extra_specs)
-
-
 ###################
 
 
@@ -1466,11 +1472,13 @@ def vol_get_usage_by_time(context, begin):
 
 
 def vol_usage_update(context, id, rd_req, rd_bytes, wr_req, wr_bytes,
-                     instance_id, last_refreshed=None, update_totals=False):
+                     instance_id, project_id, user_id, availability_zone,
+                     last_refreshed=None, update_totals=False):
     """Update cached volume usage for a volume
        Creates new record if needed."""
     return IMPL.vol_usage_update(context, id, rd_req, rd_bytes, wr_req,
-                                 wr_bytes, instance_id,
+                                 wr_bytes, instance_id, project_id, user_id,
+                                 availability_zone,
                                  last_refreshed=last_refreshed,
                                  update_totals=update_totals)
 

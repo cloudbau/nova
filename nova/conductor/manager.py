@@ -49,10 +49,11 @@ datetime_fields = ['launched_at', 'terminated_at', 'updated_at']
 class ConductorManager(manager.Manager):
     """Mission: TBD."""
 
-    RPC_API_VERSION = '1.46'
+    RPC_API_VERSION = '1.49'
 
     def __init__(self, *args, **kwargs):
-        super(ConductorManager, self).__init__(*args, **kwargs)
+        super(ConductorManager, self).__init__(service_name='conductor',
+                                               *args, **kwargs)
         self.security_group_api = (
             openstack_driver.get_openstack_security_group_driver())
         self._network_api = None
@@ -75,6 +76,8 @@ class ConductorManager(manager.Manager):
         return self._compute_api
 
     def ping(self, context, arg):
+        # NOTE(russellb) This method can be removed in 2.0 of this API.  It is
+        # now a part of the base rpc API.
         return jsonutils.to_primitive({'service': 'conductor', 'arg': arg})
 
     @rpc_common.client_exceptions(KeyError, ValueError,
@@ -102,19 +105,24 @@ class ConductorManager(manager.Manager):
             self.db.instance_get(context, instance_id))
 
     @rpc_common.client_exceptions(exception.InstanceNotFound)
-    def instance_get_by_uuid(self, context, instance_uuid):
+    def instance_get_by_uuid(self, context, instance_uuid,
+                             columns_to_join=None):
         return jsonutils.to_primitive(
-            self.db.instance_get_by_uuid(context, instance_uuid))
+            self.db.instance_get_by_uuid(context, instance_uuid,
+                columns_to_join))
 
+    # NOTE(hanlind): This method can be removed in v2.0 of the RPC API.
     def instance_get_all(self, context):
         return jsonutils.to_primitive(self.db.instance_get_all(context))
 
-    def instance_get_all_by_host(self, context, host, node=None):
+    def instance_get_all_by_host(self, context, host, node=None,
+                                 columns_to_join=None):
         if node is not None:
             result = self.db.instance_get_all_by_host_and_node(
                 context.elevated(), host, node)
         else:
-            result = self.db.instance_get_all_by_host(context.elevated(), host)
+            result = self.db.instance_get_all_by_host(context.elevated(), host,
+                                                      columns_to_join)
         return jsonutils.to_primitive(result)
 
     @rpc_common.client_exceptions(exception.MigrationNotFound)
@@ -200,6 +208,8 @@ class ConductorManager(manager.Manager):
         usage = self.db.bw_usage_get(context, uuid, start_period, mac)
         return jsonutils.to_primitive(usage)
 
+    # NOTE(russellb) This method can be removed in 2.0 of this API.  It is
+    # deprecated in favor of the method in the base API.
     def get_backdoor_port(self, context):
         return self.backdoor_port
 
@@ -254,11 +264,13 @@ class ConductorManager(manager.Manager):
                                       " invocation"))
 
     def instance_get_all_by_filters(self, context, filters, sort_key,
-                                    sort_dir):
-        result = self.db.instance_get_all_by_filters(context, filters,
-                                                     sort_key, sort_dir)
+                                    sort_dir, columns_to_join=None):
+        result = self.db.instance_get_all_by_filters(
+            context, filters, sort_key, sort_dir,
+            columns_to_join=columns_to_join)
         return jsonutils.to_primitive(result)
 
+    # NOTE(hanlind): This method can be removed in v2.0 of the RPC API.
     def instance_get_all_hung_in_rebooting(self, context, timeout):
         result = self.db.instance_get_all_hung_in_rebooting(context, timeout)
         return jsonutils.to_primitive(result)
@@ -302,8 +314,10 @@ class ConductorManager(manager.Manager):
                          wr_bytes, instance, last_refreshed=None,
                          update_totals=False):
         self.db.vol_usage_update(context, vol_id, rd_req, rd_bytes, wr_req,
-                                 wr_bytes, instance['uuid'], last_refreshed,
-                                 update_totals)
+                                 wr_bytes, instance['uuid'],
+                                 instance['project_id'], instance['user_id'],
+                                 instance['availability_zone'],
+                                 last_refreshed, update_totals)
 
     @rpc_common.client_exceptions(exception.ComputeHostNotFound,
                                   exception.HostBinaryNotFound)
@@ -425,3 +439,6 @@ class ConductorManager(manager.Manager):
 
     def compute_confirm_resize(self, context, instance, migration_ref):
         self.compute_api.confirm_resize(context, instance, migration_ref)
+
+    def compute_unrescue(self, context, instance):
+        self.compute_api.unrescue(context, instance)

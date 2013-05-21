@@ -20,10 +20,11 @@ import os
 import fixtures
 from oslo.config import cfg
 
+from nova import exception
 from nova.openstack.common import uuidutils
 from nova import test
 from nova.tests import fake_libvirt_utils
-from nova.tests import fake_utils
+from nova.tests import fake_processutils
 from nova.virt.libvirt import imagebackend
 
 CONF = cfg.CONF
@@ -130,8 +131,8 @@ class _ImageTestCase(object):
     def test_prealloc_image(self):
         CONF.set_override('preallocate_images', 'space')
 
-        fake_utils.fake_execute_clear_log()
-        fake_utils.stub_out_utils_execute(self.stubs)
+        fake_processutils.fake_execute_clear_log()
+        fake_processutils.stub_out_processutils_execute(self.stubs)
         image = self.image_class(self.INSTANCE, self.NAME)
 
         def fake_fetch(target, *args, **kwargs):
@@ -143,7 +144,7 @@ class _ImageTestCase(object):
         image.cache(fake_fetch, self.TEMPLATE_PATH, self.SIZE)
         image.cache(fake_fetch, self.TEMPLATE_PATH, self.SIZE)
 
-        self.assertEqual(fake_utils.fake_execute_get_log(),
+        self.assertEqual(fake_processutils.fake_execute_get_log(),
             ['fallocate -n -l 1 %s.fallocate_test' % self.PATH,
              'fallocate -n -l %s %s' % (self.SIZE, self.PATH),
              'fallocate -n -l %s %s' % (self.SIZE, self.PATH)])
@@ -156,10 +157,11 @@ class RawTestCase(_ImageTestCase, test.TestCase):
     def setUp(self):
         self.image_class = imagebackend.Raw
         super(RawTestCase, self).setUp()
+        self.stubs.Set(imagebackend.Raw, 'correct_format', lambda _: None)
 
     def prepare_mocks(self):
         fn = self.mox.CreateMockAnything()
-        self.mox.StubOutWithMock(imagebackend.lockutils.synchronized,
+        self.mox.StubOutWithMock(imagebackend.utils.synchronized,
                                  '__call__')
         self.mox.StubOutWithMock(imagebackend.libvirt_utils, 'copy_image')
         self.mox.StubOutWithMock(imagebackend.disk, 'extend')
@@ -198,6 +200,24 @@ class RawTestCase(_ImageTestCase, test.TestCase):
 
         self.mox.VerifyAll()
 
+    def test_correct_format(self):
+        info = self.mox.CreateMockAnything()
+        self.stubs.UnsetAll()
+
+        self.mox.StubOutWithMock(os.path, 'exists')
+        self.mox.StubOutWithMock(imagebackend.images, 'qemu_img_info')
+
+        os.path.exists(self.PATH).AndReturn(True)
+        info = self.mox.CreateMockAnything()
+        info.file_format = 'foo'
+        imagebackend.images.qemu_img_info(self.PATH).AndReturn(info)
+        self.mox.ReplayAll()
+
+        image = self.image_class(self.INSTANCE, self.NAME, path=self.PATH)
+        self.assertEqual(image.driver_format, 'foo')
+
+        self.mox.VerifyAll()
+
 
 class Qcow2TestCase(_ImageTestCase, test.TestCase):
     SIZE = 1024 * 1024 * 1024
@@ -210,7 +230,7 @@ class Qcow2TestCase(_ImageTestCase, test.TestCase):
 
     def prepare_mocks(self):
         fn = self.mox.CreateMockAnything()
-        self.mox.StubOutWithMock(imagebackend.lockutils.synchronized,
+        self.mox.StubOutWithMock(imagebackend.utils.synchronized,
                                  '__call__')
         self.mox.StubOutWithMock(imagebackend.libvirt_utils,
                                  'create_cow_image')
@@ -234,9 +254,12 @@ class Qcow2TestCase(_ImageTestCase, test.TestCase):
         fn = self.prepare_mocks()
         fn(target=self.TEMPLATE_PATH)
         self.mox.StubOutWithMock(os.path, 'exists')
+        self.mox.StubOutWithMock(imagebackend.disk, 'get_disk_size')
         if self.OLD_STYLE_INSTANCE_PATH:
             os.path.exists(self.OLD_STYLE_INSTANCE_PATH).AndReturn(False)
         os.path.exists(self.TEMPLATE_PATH).AndReturn(False)
+        imagebackend.disk.get_disk_size(self.TEMPLATE_PATH
+                                       ).AndReturn(self.SIZE)
         os.path.exists(self.PATH).AndReturn(False)
         imagebackend.libvirt_utils.create_cow_image(self.TEMPLATE_PATH,
                                                     self.PATH)
@@ -246,6 +269,23 @@ class Qcow2TestCase(_ImageTestCase, test.TestCase):
         image = self.image_class(self.INSTANCE, self.NAME)
         image.create_image(fn, self.TEMPLATE_PATH, self.SIZE)
 
+        self.mox.VerifyAll()
+
+    def test_create_image_too_small(self):
+        fn = self.prepare_mocks()
+        fn(target=self.TEMPLATE_PATH)
+        self.mox.StubOutWithMock(os.path, 'exists')
+        self.mox.StubOutWithMock(imagebackend.disk, 'get_disk_size')
+        if self.OLD_STYLE_INSTANCE_PATH:
+            os.path.exists(self.OLD_STYLE_INSTANCE_PATH).AndReturn(False)
+        os.path.exists(self.TEMPLATE_PATH).AndReturn(False)
+        imagebackend.disk.get_disk_size(self.TEMPLATE_PATH
+                                       ).AndReturn(self.SIZE)
+        self.mox.ReplayAll()
+
+        image = self.image_class(self.INSTANCE, self.NAME)
+        self.assertRaises(exception.ImageTooLarge, image.create_image, fn,
+                          self.TEMPLATE_PATH, 1)
         self.mox.VerifyAll()
 
 
@@ -387,8 +427,8 @@ class LvmTestCase(_ImageTestCase, test.TestCase):
     def test_prealloc_image(self):
         CONF.set_override('preallocate_images', 'space')
 
-        fake_utils.fake_execute_clear_log()
-        fake_utils.stub_out_utils_execute(self.stubs)
+        fake_processutils.fake_execute_clear_log()
+        fake_processutils.stub_out_processutils_execute(self.stubs)
         image = self.image_class(self.INSTANCE, self.NAME)
 
         def fake_fetch(target, *args, **kwargs):
@@ -398,7 +438,7 @@ class LvmTestCase(_ImageTestCase, test.TestCase):
 
         image.cache(fake_fetch, self.TEMPLATE_PATH, self.SIZE)
 
-        self.assertEqual(fake_utils.fake_execute_get_log(), [])
+        self.assertEqual(fake_processutils.fake_execute_get_log(), [])
 
 
 class BackendTestCase(test.TestCase):
