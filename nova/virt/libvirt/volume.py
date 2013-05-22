@@ -893,7 +893,7 @@ class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
                           xtreemfs_share,
                           mount_path,
                           run_as_root=True)
-        except exception.ProcessExecutionError as exc:
+        except processutils.ProcessExecutionError as exc:
             if ensure and 'already mounted' in exc.message:
                 LOG.warn(_("%s is already mounted"), xtreemfs_share)
             else:
@@ -909,5 +909,5 @@ class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
         """Check path."""
         try:
             return utils.execute('stat', path, run_as_root=True)
-        except exception.ProcessExecutionError:
+        except processutils.ProcessExecutionError:
             return False
