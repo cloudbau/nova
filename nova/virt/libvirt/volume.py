@@ -856,58 +856,36 @@ class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
     """Class implements libvirt part of volume driver for XtreemFS."""
 
     def __init__(self, connection):
-        """Create back-end to xtreemfs."""
         super(LibvirtXtreemfsVolumeDriver,
               self).__init__(connection, is_block_dev=False)
 
     def connect_volume(self, connection_info, mount_device):
-        """Connect the volume. Returns xml for libvirt."""
-        conf = vconfig.LibvirtConfigGuestDisk()
-        conf.driver_name = virtutils.pick_disk_driver_name(self.is_block_dev)
-        conf.driver_format = "raw"
-        conf.target_dev = mount_device['dev']
-        conf.target_bus = mount_device['bus']
-        conf.serial = connection_info.get('serial')
-        path = self._ensure_mounted(connection_info['data']['export'])
+        """Mount volume and return xml configuration for libvirt to attach
+        this volume.
+        """
+        conf = super(LibvirtXtreemfsVolumeDriver,
+                     self).connect_volume(connection_info, mount_device)
+        # The default driver cache policy is 'none', and this causes
+        # qemu/kvm to open the volume file with O_DIRECT, which is
+        # rejected by FUSE (on kernels older than 3.3). XtreemFS
+        # is FUSE based, so we must provide a more sensible default.
+        conf.driver_cache = 'writethrough'
+        path = self._mount_xtreemfs(connection_info['data']['export'])
         path = os.path.join(path, connection_info['data']['name'])
         conf.source_type = 'file'
         conf.source_path = path
         return conf
 
-    def _ensure_mounted(self, xtreemfs_export):
-        """
-        @type xtreemfs_export: string
-        """
+    def _mount_xtreemfs(self, xtreemfs_share):
+        """Mount Xtreemfs share to local path."""
         mount_path = os.path.join(CONF.nfs_mount_point_base,
-                                  self.get_hash_str(xtreemfs_export))
-        self._mount_xtreemfs(mount_path, xtreemfs_export, ensure=True)
+                                  self.get_hash_str(xtreemfs_share))
+        utils.execute('mkdir', '-p', mount_path)
+        utils.execute('mount.xtreemfs', '-o', 'allow_other', xtreemfs_share,
+                      mount_path, run_as_root=True)
         return mount_path
-
-    def _mount_xtreemfs(self, mount_path, xtreemfs_share, ensure=False):
-        """Mount xtreemfs export to mount path."""
-        if not self._path_exists(mount_path):
-            utils.execute('mkdir', '-p', mount_path, run_as_root=True)
-
-        try:
-            utils.execute('mount.xtreemfs', '-o', 'allow_other',
-                          xtreemfs_share,
-                          mount_path,
-                          run_as_root=True)
-        except processutils.ProcessExecutionError as exc:
-            if ensure and 'already mounted' in exc.message:
-                LOG.warn(_("%s is already mounted"), xtreemfs_share)
-            else:
-                raise
 
     @staticmethod
     def get_hash_str(base_str):
         """returns string that represents hash of base_str (in hex format)."""
         return hashlib.md5(base_str).hexdigest()
-
-    @staticmethod
-    def _path_exists(path):
-        """Check path."""
-        try:
-            return utils.execute('stat', path, run_as_root=True)
-        except processutils.ProcessExecutionError:
-            return False
