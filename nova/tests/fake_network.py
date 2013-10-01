@@ -54,7 +54,7 @@ class FakeVIFDriver(object):
     def setattr(self, key, val):
         self.__setattr__(key, val)
 
-    def get_config(self, instance, network, mapping, image_meta):
+    def get_config(self, instance, network, mapping, image_meta, inst_type):
         conf = libvirt_config.LibvirtConfigGuestInterface()
 
         for attr, val in conf.__dict__.iteritems():
@@ -331,7 +331,7 @@ def fake_get_instance_nw_info(stubs, num_networks=1, ips_per_vif=2,
 
         subnet_v6 = dict(
             cidr='2001:db8:0:%x::/64' % i,
-            gateway='fe80::def')
+            gateway='2001:db8:0:%x::1' % i)
         return [subnet_v4, subnet_v6]
 
     def get_network_by_uuid(context, uuid):

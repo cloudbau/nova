@@ -373,12 +373,28 @@ class NetworkManager(manager.Manager):
         # thus enabling `read_deleted`
         admin_context = context.get_admin_context(read_deleted='yes')
         if uuidutils.is_uuid_like(instance_id):
-            instance_ref = self.db.instance_get_by_uuid(admin_context,
-                                                        instance_id)
+            instance = self.db.instance_get_by_uuid(admin_context,
+                                                    instance_id)
         else:
-            instance_ref = self.db.instance_get(admin_context, instance_id)
+            instance = self.db.instance_get(admin_context,
+                                            instance_id)
 
-        groups = instance_ref['security_groups']
+        try:
+            # NOTE(vish): We need to make sure the instance info cache has been
+            #             updated with new ip info before we trigger the
+            #             security group refresh. This is somewhat ineffecient
+            #             but avoids doing some dangerous refactoring for a
+            #             bug fix.
+            nw_info = self.get_instance_nw_info(admin_context,
+                                                instance['uuid'],
+                                                None, None)
+            cache = {'network_info': nw_info.json()}
+            self.db.instance_info_cache_update(admin_context,
+                                               instance['uuid'],
+                                               cache)
+        except exception.InstanceInfoCacheNotFound:
+            pass
+        groups = instance['security_groups']
         group_ids = [group['id'] for group in groups]
 
         self.security_group_api.trigger_members_refresh(admin_context,
@@ -571,7 +587,6 @@ class NetworkManager(manager.Manager):
             instance_id = instance_uuid
         instance_uuid = instance_id
 
-        host = kwargs.get('host')
         vifs = self.db.virtual_interface_get_by_instance(context,
                                                          instance_uuid)
         networks = {}
@@ -847,15 +862,15 @@ class NetworkManager(manager.Manager):
                 else:
                     address = self.db.fixed_ip_associate_pool(
                         context.elevated(), network['id'], instance_id)
-                self._do_trigger_security_group_members_refresh_for_instance(
-                    instance_id)
-                self._do_trigger_security_group_handler(
-                    'instance_add_security_group', instance_id)
                 get_vif = self.db.virtual_interface_get_by_instance_and_network
                 vif = get_vif(context, instance_id, network['id'])
                 values = {'allocated': True,
                           'virtual_interface_id': vif['id']}
                 self.db.fixed_ip_update(context, address, values)
+                self._do_trigger_security_group_members_refresh_for_instance(
+                    instance_id)
+                self._do_trigger_security_group_handler(
+                    'instance_add_security_group', instance_id)
 
             # NOTE(vish) This db query could be removed if we pass az and name
             #            (or the whole instance object).
@@ -931,11 +946,27 @@ class NetworkManager(manager.Manager):
                     LOG.error(msg % address)
                     return
 
+                # NOTE(cfb): Call teardown before release_dhcp to ensure
+                #            that the IP can't be re-leased after a release
+                #            packet is sent.
+                self._teardown_network_on_host(context, network)
                 # NOTE(vish): This forces a packet so that the release_fixed_ip
                 #             callback will get called by nova-dhcpbridge.
                 self.driver.release_dhcp(dev, address, vif['address'])
 
-            self._teardown_network_on_host(context, network)
+                # NOTE(yufang521247): This is probably a failed dhcp fixed ip.
+                # DHCPRELEASE packet sent to dnsmasq would not trigger
+                # dhcp-bridge to run. Thus it is better to disassociate such
+                # fixed ip here.
+                fixed_ip_ref = self.db.fixed_ip_get_by_address(context,
+                                                               address)
+                if (instance_uuid == fixed_ip_ref['instance_uuid'] and
+                        not fixed_ip_ref.get('leased')):
+                    self.db.fixed_ip_disassociate(context, address)
+
+            else:
+                # We can't try to free the IP address so just call teardown
+                self._teardown_network_on_host(context, network)
 
         # Commit the reservations
         if reservations:
@@ -1113,13 +1144,13 @@ class NetworkManager(manager.Manager):
                         subnets_v4.append(next_subnet)
                         subnet = next_subnet
                     else:
-                        raise ValueError(_('cidr already in use'))
+                        raise exception.CidrConflict(_('cidr already in use'))
                 for used_subnet in used_subnets:
                     if subnet in used_subnet:
                         msg = _('requested cidr (%(cidr)s) conflicts with '
                                 'existing supernet (%(super)s)')
-                        raise ValueError(msg % {'cidr': subnet,
-                                                'super': used_subnet})
+                        raise exception.CidrConflict(
+                                  msg % {'cidr': subnet, 'super': used_subnet})
                     if used_subnet in subnet:
                         next_subnet = find_next(subnet)
                         if next_subnet:
@@ -1130,8 +1161,8 @@ class NetworkManager(manager.Manager):
                             msg = _('requested cidr (%(cidr)s) conflicts '
                                     'with existing smaller cidr '
                                     '(%(smaller)s)')
-                            raise ValueError(msg % {'cidr': subnet,
-                                                    'smaller': used_subnet})
+                            raise exception.CidrConflict(
+                                msg % {'cidr': subnet, 'smaller': used_subnet})
 
         networks = []
         subnets = itertools.izip_longest(subnets_v4, subnets_v6)
@@ -1702,14 +1733,16 @@ class VlanManager(RPCAllocateFixedIP, floating_ips.FloatingIP, NetworkManager):
                 address = self.db.fixed_ip_associate_pool(context,
                                                           network['id'],
                                                           instance_id)
-            self._do_trigger_security_group_members_refresh_for_instance(
-                                                                   instance_id)
 
         vif = self.db.virtual_interface_get_by_instance_and_network(
             context, instance_id, network['id'])
         values = {'allocated': True,
                   'virtual_interface_id': vif['id']}
         self.db.fixed_ip_update(context, address, values)
+
+        if not kwargs.get('vpn', None):
+            self._do_trigger_security_group_members_refresh_for_instance(
+                                                                   instance_id)
 
         # NOTE(vish) This db query could be removed if we pass az and name
         #            (or the whole instance object).

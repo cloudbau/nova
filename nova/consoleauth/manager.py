@@ -24,7 +24,7 @@ from oslo.config import cfg
 
 from nova.cells import rpcapi as cells_rpcapi
 from nova.compute import rpcapi as compute_rpcapi
-from nova.conductor import api as conductor_api
+from nova import conductor
 from nova import manager
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
@@ -55,7 +55,7 @@ class ConsoleAuthManager(manager.Manager):
     def __init__(self, scheduler_driver=None, *args, **kwargs):
         super(ConsoleAuthManager, self).__init__(*args, **kwargs)
         self.mc = memorycache.get_client()
-        self.conductor_api = conductor_api.API()
+        self.conductor_api = conductor.API()
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.cells_rpcapi = cells_rpcapi.CellsAPI()
 
@@ -81,6 +81,11 @@ class ConsoleAuthManager(manager.Manager):
         self.mc.set(token.encode('UTF-8'), data, CONF.console_token_ttl)
         if instance_uuid is not None:
             tokens = self._get_tokens_for_instance(instance_uuid)
+            # Remove the expired tokens from cache.
+            for tok in tokens:
+                token_str = self.mc.get(tok.encode('UTF-8'))
+                if not token_str:
+                    tokens.remove(tok)
             tokens.append(token)
             self.mc.set(instance_uuid.encode('UTF-8'),
                         jsonutils.dumps(tokens))

@@ -873,7 +873,8 @@ class Controller(wsgi.Controller):
 
         try:
             _get_inst_type = instance_types.get_instance_type_by_flavor_id
-            inst_type = _get_inst_type(flavor_id, read_deleted="no")
+            inst_type = _get_inst_type(flavor_id, ctxt=context,
+                                       read_deleted="no")
 
             (instances, resv_id) = self.compute_api.create(context,
                             inst_type,
@@ -1096,6 +1097,17 @@ class Controller(wsgi.Controller):
         except exception.InstanceInvalidState as state_error:
             common.raise_http_conflict_for_instance_invalid_state(state_error,
                     'resize')
+        except exception.ImageNotAuthorized as image_error:
+            msg = _("You are not authorized to access the image "
+                    "the instance was started with.")
+            raise exc.HTTPUnauthorized(explanation=msg)
+        except exception.ImageNotFound as image_error:
+            msg = _("Image that the instance was started "
+                    "with could not be found.")
+            raise exc.HTTPBadRequest(explanation=msg)
+        except exception.Invalid:
+            msg = _("Invalid instance image.")
+            raise exc.HTTPBadRequest(explanation=msg)
 
         return webob.Response(status_int=202)
 

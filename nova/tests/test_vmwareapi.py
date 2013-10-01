@@ -19,6 +19,10 @@
 """
 Test suite for VMwareAPI.
 """
+import urllib2
+
+import mox
+from oslo.config import cfg
 
 from nova.compute import power_state
 from nova.compute import task_states
@@ -33,6 +37,64 @@ from nova.tests.vmwareapi import db_fakes
 from nova.tests.vmwareapi import stubs
 from nova.virt.vmwareapi import driver
 from nova.virt.vmwareapi import fake as vmwareapi_fake
+from nova.virt.vmwareapi import vim
+from nova.virt.vmwareapi import vm_util
+from nova.virt.vmwareapi import volume_util
+
+
+class fake_vm_ref(object):
+    def __init__(self):
+        self.value = 4
+        self._type = 'VirtualMachine'
+
+
+class fake_http_resp(object):
+    def __init__(self):
+        self.code = 200
+
+    def read(self):
+        return "console log"
+
+
+class VMwareAPIConfTestCase(test.TestCase):
+    """Unit tests for VMWare API configurations."""
+    def setUp(self):
+        super(VMwareAPIConfTestCase, self).setUp()
+
+    def tearDown(self):
+        super(VMwareAPIConfTestCase, self).tearDown()
+
+    def test_configure_without_wsdl_loc_override(self):
+        # Test the default configuration behavior. By default,
+        # use the WSDL sitting on the host we are talking to in
+        # order to bind the SOAP client.
+        wsdl_loc = cfg.CONF.vmwareapi_wsdl_loc
+        self.assertIsNone(wsdl_loc)
+        wsdl_url = vim.Vim.get_wsdl_url("https", "www.example.com")
+        url = vim.Vim.get_soap_url("https", "www.example.com")
+        self.assertEqual("https://www.example.com/sdk/vimService.wsdl",
+                         wsdl_url)
+        self.assertEqual("https://www.example.com/sdk", url)
+
+    def test_configure_with_wsdl_loc_override(self):
+        # Use the setting vmwareapi_wsdl_loc to override the
+        # default path to the WSDL.
+        #
+        # This is useful as a work-around for XML parsing issues
+        # found when using some WSDL in combination with some XML
+        # parsers.
+        #
+        # The wsdl_url should point to a different host than the one we
+        # are actually going to send commands to.
+        fake_wsdl = "https://www.test.com/sdk/foo.wsdl"
+        self.flags(vmwareapi_wsdl_loc=fake_wsdl)
+        wsdl_loc = cfg.CONF.vmwareapi_wsdl_loc
+        self.assertIsNotNone(wsdl_loc)
+        self.assertEqual(fake_wsdl, wsdl_loc)
+        wsdl_url = vim.Vim.get_wsdl_url("https", "www.example.com")
+        url = vim.Vim.get_soap_url("https", "www.example.com")
+        self.assertEqual(fake_wsdl, wsdl_url)
+        self.assertEqual("https://www.example.com/sdk", url)
 
 
 class VMwareAPIVMTestCase(test.TestCase):
@@ -46,13 +108,14 @@ class VMwareAPIVMTestCase(test.TestCase):
                    vmwareapi_host_password='test_pass',
                    vnc_enabled=False,
                    use_linked_clone=False)
+        self.flags(datastore_regex='.*', group='vmware')
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
         vmwareapi_fake.reset()
         db_fakes.stub_out_db_instance_api(self.stubs)
         stubs.set_stubs(self.stubs)
-        self.conn = driver.VMwareESXDriver(None, False)
+        self.conn = driver.VMwareVCDriver(None, False)
         # NOTE(vish): none of the network plugging code is actually
         #             being tested
         self.network_info = utils.get_test_network_info(legacy_model=False)
@@ -72,6 +135,7 @@ class VMwareAPIVMTestCase(test.TestCase):
     def _create_instance_in_the_db(self):
         values = {'name': 1,
                   'id': 1,
+                  'uuid': "fake-uuid",
                   'project_id': self.project_id,
                   'user_id': self.user_id,
                   'image_ref': "1",
@@ -101,7 +165,8 @@ class VMwareAPIVMTestCase(test.TestCase):
         self.assertEquals(len(instances), 1)
 
         # Get Nova record for VM
-        vm_info = self.conn.get_info({'name': 1})
+        vm_info = self.conn.get_info({'uuid': 'fake-uuid',
+                                      'name': 1})
 
         # Get record for VM
         vms = vmwareapi_fake._get_objects("VirtualMachine")
@@ -116,11 +181,25 @@ class VMwareAPIVMTestCase(test.TestCase):
         self.assertEquals(vm.get("summary.config.memorySizeMB"),
                           self.type_data['memory_mb'])
 
+        self.assertEqual(
+            vm.get("config.hardware.device")[2].device.obj_name,
+            "ns0:VirtualE1000")
         # Check that the VM is running according to Nova
         self.assertEquals(vm_info['state'], power_state.RUNNING)
 
         # Check that the VM is running according to vSphere API.
         self.assertEquals(vm.get("runtime.powerState"), 'poweredOn')
+
+        found_vm_uuid = False
+        found_iface_id = False
+        for c in vm.get("config.extraConfig"):
+            if (c.key == "nvp.vm-uuid" and c.value == self.instance['uuid']):
+                found_vm_uuid = True
+            if (c.key == "nvp.iface-id.0" and c.value == "vif-xxx-yyy-zzz"):
+                found_iface_id = True
+
+        self.assertTrue(found_vm_uuid)
+        self.assertTrue(found_iface_id)
 
     def _check_vm_info(self, info, pwr_state=power_state.RUNNING):
         """
@@ -142,15 +221,9 @@ class VMwareAPIVMTestCase(test.TestCase):
         instances = self.conn.list_instances()
         self.assertEquals(len(instances), 1)
 
-    def test_list_interfaces(self):
-        self._create_vm()
-        interfaces = self.conn.list_interfaces(1)
-        self.assertEquals(len(interfaces), 1)
-        self.assertEquals(interfaces[0], 4000)
-
     def test_spawn(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_snapshot(self):
@@ -164,11 +237,11 @@ class VMwareAPIVMTestCase(test.TestCase):
                   'expected_state': task_states.IMAGE_PENDING_UPLOAD}}]
         func_call_matcher = matchers.FunctionCallMatcher(expected_calls)
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.snapshot(self.context, self.instance, "Test-Snapshot",
                            func_call_matcher.call)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.assertIsNone(func_call_matcher.match())
 
@@ -180,12 +253,23 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_reboot(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'name': 1, 'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         reboot_type = "SOFT"
         self.conn.reboot(self.context, self.instance, self.network_info,
                          reboot_type)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'name': 1, 'uuid': 'fake-uuid'})
+        self._check_vm_info(info, power_state.RUNNING)
+
+    def test_reboot_with_uuid(self):
+        """Test fall back to use name when can't find by uuid."""
+        self._create_vm()
+        info = self.conn.get_info({'name': 'fake-uuid', 'uuid': 'wrong-uuid'})
+        self._check_vm_info(info, power_state.RUNNING)
+        reboot_type = "SOFT"
+        self.conn.reboot(self.context, self.instance, self.network_info,
+                         reboot_type)
+        info = self.conn.get_info({'name': 'fake-uuid', 'uuid': 'wrong-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_reboot_non_existent(self):
@@ -196,10 +280,10 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_reboot_not_poweredon(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.suspend(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SUSPENDED)
         self.assertRaises(exception.InstanceRebootFailure, self.conn.reboot,
                           self.context, self.instance, self.network_info,
@@ -207,10 +291,10 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_suspend(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': "fake-uuid"})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.suspend(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SUSPENDED)
 
     def test_suspend_non_existent(self):
@@ -220,13 +304,13 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_resume(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.suspend(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SUSPENDED)
         self.conn.resume(self.instance, self.network_info)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_resume_non_existent(self):
@@ -236,33 +320,33 @@ class VMwareAPIVMTestCase(test.TestCase):
 
     def test_resume_not_suspended(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.assertRaises(exception.InstanceResumeFailure, self.conn.resume,
                           self.instance, self.network_info)
 
     def test_power_on(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.power_off(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SHUTDOWN)
-        self.conn.power_on(self.instance)
-        info = self.conn.get_info({'name': 1})
+        self.conn.power_on(self.context, self.instance, self.network_info)
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_power_on_non_existent(self):
         self._create_instance_in_the_db()
         self.assertRaises(exception.InstanceNotFound, self.conn.power_on,
-                          self.instance)
+                          self.context, self.instance, self.network_info)
 
     def test_power_off(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         self.conn.power_off(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SHUTDOWN)
 
     def test_power_off_non_existent(self):
@@ -273,19 +357,19 @@ class VMwareAPIVMTestCase(test.TestCase):
     def test_power_off_suspended(self):
         self._create_vm()
         self.conn.suspend(self.instance)
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.SUSPENDED)
         self.assertRaises(exception.InstancePowerOffFailure,
                           self.conn.power_off, self.instance)
 
     def test_get_info(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
 
     def test_destroy(self):
         self._create_vm()
-        info = self.conn.get_info({'name': 1})
+        info = self.conn.get_info({'uuid': 'fake-uuid'})
         self._check_vm_info(info, power_state.RUNNING)
         instances = self.conn.list_instances()
         self.assertEquals(len(instances), 1)
@@ -308,7 +392,57 @@ class VMwareAPIVMTestCase(test.TestCase):
         pass
 
     def test_get_console_output(self):
-        pass
+        vm_ref = fake_vm_ref()
+        result = fake_http_resp()
+        self._create_instance_in_the_db()
+        self.mox.StubOutWithMock(vm_util, 'get_vm_ref_from_name')
+        self.mox.StubOutWithMock(urllib2, 'urlopen')
+        vm_util.get_vm_ref_from_name(mox.IgnoreArg(), self.instance['name']).\
+        AndReturn(vm_ref)
+        urllib2.urlopen(mox.IgnoreArg()).AndReturn(result)
+
+        self.mox.ReplayAll()
+        self.conn.get_console_output(self.instance)
+
+    def test_diagnostics_non_existent_vm(self):
+        self._create_instance_in_the_db()
+        self.assertRaises(exception.InstanceNotFound,
+                          self.conn.get_diagnostics,
+                          self.instance)
+
+    def test_get_console_pool_info(self):
+        info = self.conn.get_console_pool_info("console_type")
+        self.assertEquals(info['address'], 'test_url')
+        self.assertEquals(info['username'], 'test_username')
+        self.assertEquals(info['password'], 'test_pass')
+
+    def test_get_vnc_console_non_existent(self):
+        self._create_instance_in_the_db()
+        self.assertRaises(exception.InstanceNotFound,
+                          self.conn.get_vnc_console,
+                          self.instance)
+
+    def test_get_vnc_console(self):
+        self._create_instance_in_the_db()
+        self._create_vm()
+        vnc_dict = self.conn.get_vnc_console(self.instance)
+        self.assertEquals(vnc_dict['host'], "ha-host")
+        self.assertEquals(vnc_dict['port'], 5910)
+
+    def test_host_ip_addr(self):
+        self.assertEquals(self.conn.get_host_ip_addr(), "test_url")
+
+    def test_get_volume_connector(self):
+
+        def fake_iqn(session, instance):
+            return "iscsi-name"
+
+        self._create_instance_in_the_db()
+        self.stubs.Set(volume_util, "get_host_iqn", fake_iqn)
+        connector_dict = self.conn.get_volume_connector(self.instance)
+        self.assertEquals(connector_dict['ip'], "test_url")
+        self.assertEquals(connector_dict['initiator'], "iscsi-name")
+        self.assertEquals(connector_dict['host'], "test_url")
 
 
 class VMwareAPIHostTestCase(test.TestCase):
@@ -335,6 +469,9 @@ class VMwareAPIHostTestCase(test.TestCase):
         self.assertEquals(stats['disk_used'], 1024 - 500)
         self.assertEquals(stats['host_memory_total'], 1024)
         self.assertEquals(stats['host_memory_free'], 1024 - 500)
+        supported_instances = [('i686', 'vmware', 'hvm'),
+                               ('x86_64', 'vmware', 'hvm')]
+        self.assertEquals(stats['supported_instances'], supported_instances)
 
     def _test_host_action(self, method, action, expected=None):
         result = method('host', action)
@@ -354,3 +491,14 @@ class VMwareAPIHostTestCase(test.TestCase):
 
     def test_host_maintenance_off(self):
         self._test_host_action(self.conn.host_maintenance_mode, False)
+
+    def test_invalid_datastore_regex(self):
+        # Tests if we raise an exception for Invalid Regular Expression in
+        # vmware_datastore_regex
+        self.flags(vmwareapi_host_ip='test_url',
+                   vmwareapi_host_username='test_username',
+                   vmwareapi_host_password='test_pass',
+                   vnc_enabled=False,
+                   use_linked_clone=False)
+        self.flags(datastore_regex='fake-ds(01', group='vmware')
+        self.assertRaises(exception.InvalidInput, driver.VMwareVCDriver, None)

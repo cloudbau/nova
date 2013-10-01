@@ -59,7 +59,6 @@ from eventlet import tpool
 from eventlet import util as eventlet_util
 from lxml import etree
 from oslo.config import cfg
-from xml.dom import minidom
 
 from nova.api.metadata import base as instance_metadata
 from nova import block_device
@@ -76,6 +75,7 @@ from nova.openstack.common import importutils
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova.openstack.common.notifier import api as notifier
+from nova.openstack.common import xmlutils
 from nova import utils
 from nova import version
 from nova.virt import configdrive
@@ -716,6 +716,11 @@ class LibvirtDriver(driver.ComputeDriver):
                     state = LIBVIRT_POWER_STATE[state]
                     if state == power_state.SHUTDOWN:
                         is_okay = True
+                elif errcode == libvirt.VIR_ERR_OPERATION_TIMEOUT:
+                    LOG.warn(_("Cannot destroy instance, operation time out"),
+                            instance=instance)
+                    reason = _("operation time out")
+                    raise exception.InstancePowerOffFailure(reason=reason)
 
                 if not is_okay:
                     with excutils.save_and_reraise_exception():
@@ -910,14 +915,11 @@ class LibvirtDriver(driver.ComputeDriver):
                                'world wide port names'),
                           instance=instance)
 
-        if not self._initiator and not self._fc_wwnns and not self._fc_wwpns:
-            msg = _("No Volume Connector found.")
-            LOG.error(msg)
-            raise exception.NovaException(msg)
-
         connector = {'ip': CONF.my_ip,
-                     'initiator': self._initiator,
                      'host': CONF.host}
+
+        if self._initiator:
+            connector['initiator'] = self._initiator
 
         if self._fc_wwnns and self._fc_wwpns:
             connector["wwnns"] = self._fc_wwnns
@@ -1044,12 +1046,15 @@ class LibvirtDriver(driver.ComputeDriver):
     @exception.wrap_exception()
     def attach_interface(self, instance, image_meta, network_info):
         virt_dom = self._lookup_by_name(instance['name'])
+        inst_type = self.virtapi.instance_type_get(
+            nova_context.get_admin_context(read_deleted='yes'),
+            instance['instance_type_id'])
         for (network, mapping) in network_info:
             self.vif_driver.plug(instance, (network, mapping))
             self.firewall_driver.setup_basic_filtering(instance,
                                                        [(network, mapping)])
             cfg = self.vif_driver.get_config(instance, network, mapping,
-                                             image_meta)
+                                             image_meta, inst_type)
             try:
                 flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
                 state = LIBVIRT_POWER_STATE[virt_dom.info()[0]]
@@ -1065,8 +1070,12 @@ class LibvirtDriver(driver.ComputeDriver):
     @exception.wrap_exception()
     def detach_interface(self, instance, network_info):
         virt_dom = self._lookup_by_name(instance['name'])
+        inst_type = self.virtapi.instance_type_get(
+            nova_context.get_admin_context(read_deleted='yes'),
+            instance['instance_type_id'])
         for (network, mapping) in network_info:
-            cfg = self.vif_driver.get_config(instance, network, mapping, None)
+            cfg = self.vif_driver.get_config(instance, network, mapping, None,
+                                             inst_type)
             try:
                 self.vif_driver.unplug(instance, (network, mapping))
                 flags = libvirt.VIR_DOMAIN_AFFECT_CONFIG
@@ -1369,7 +1378,8 @@ class LibvirtDriver(driver.ComputeDriver):
                           write_to_disk=True)
 
         # NOTE (rmk): Re-populate any missing backing files.
-        disk_info_json = self.get_instance_disk_info(instance['name'], xml)
+        disk_info_json = self.get_instance_disk_info(instance['name'], xml,
+                                                     block_device_info)
         self._create_images_and_backing(context, instance, disk_info_json)
 
         # Initialize all the necessary networking, block devices and
@@ -1403,13 +1413,13 @@ class LibvirtDriver(driver.ComputeDriver):
         """Power off the specified instance."""
         self._destroy(instance)
 
-    def power_on(self, instance):
+    def power_on(self, context, instance, network_info,
+                 block_device_info=None):
         """Power on the specified instance."""
-        dom = self._lookup_by_name(instance['name'])
-        self._create_domain(domain=dom, instance=instance)
-        timer = utils.FixedIntervalLoopingCall(self._wait_for_running,
-                                               instance)
-        timer.start(interval=0.5).wait()
+        # We use _hard_reboot here to ensure that all backing files,
+        # network, and block device connections, etc. are established
+        # and available before we attempt to start the instance.
+        self._hard_reboot(context, instance, network_info, block_device_info)
 
     def suspend(self, instance):
         """Suspend the specified instance."""
@@ -1626,8 +1636,7 @@ class LibvirtDriver(driver.ComputeDriver):
         def get_vnc_port_for_instance(instance_name):
             virt_dom = self._lookup_by_name(instance_name)
             xml = virt_dom.XMLDesc(0)
-            # TODO(sleepsonthefloor): use etree instead of minidom
-            dom = minidom.parseString(xml)
+            dom = xmlutils.safe_minidom_parse_string(xml)
 
             for graphic in dom.getElementsByTagName('graphics'):
                 if graphic.getAttribute('type') == 'vnc':
@@ -1644,7 +1653,7 @@ class LibvirtDriver(driver.ComputeDriver):
             virt_dom = self._lookup_by_name(instance_name)
             xml = virt_dom.XMLDesc(0)
             # TODO(sleepsonthefloor): use etree instead of minidom
-            dom = minidom.parseString(xml)
+            dom = xmlutils.safe_minidom_parse_string(xml)
 
             for graphic in dom.getElementsByTagName('graphics'):
                 if graphic.getAttribute('type') == 'spice':
@@ -2258,7 +2267,8 @@ class LibvirtDriver(driver.ComputeDriver):
         for (network, mapping) in network_info:
             cfg = self.vif_driver.get_config(instance,
                                              network, mapping,
-                                             image_meta)
+                                             image_meta,
+                                             inst_type)
             guest.add_device(cfg)
 
         if CONF.libvirt_type == "qemu" or CONF.libvirt_type == "kvm":
@@ -2660,7 +2670,15 @@ class LibvirtDriver(driver.ComputeDriver):
 
     def get_hypervisor_hostname(self):
         """Returns the hostname of the hypervisor."""
-        return self._conn.getHostname()
+        hostname = self._conn.getHostname()
+        if not hasattr(self, '_hypervisor_hostname'):
+            self._hypervisor_hostname = hostname
+        elif hostname != self._hypervisor_hostname:
+            LOG.error(_('Hostname has changed from %(old)s '
+                        'to %(new)s. A restart is required to take effect.'
+                        ) % {'old': self._hypervisor_hostname,
+                             'new': hostname})
+        return self._hypervisor_hostname
 
     def get_instance_capabilities(self):
         """Get hypervisor instance capabilities
@@ -2732,20 +2750,28 @@ class LibvirtDriver(driver.ComputeDriver):
                 mountpoint = bdm['device_name']
                 if mountpoint.startswith('/dev/'):
                     mountpoint = mountpoint[5:]
+                volume_id = bdm['volume_id']
 
                 LOG.debug(_("Trying to get stats for the volume %s"),
-                            bdm['volume_id'])
+                            volume_id)
                 vol_stats = self.block_stats(instance['name'], mountpoint)
 
                 if vol_stats:
-                    rd_req, rd_bytes, wr_req, wr_bytes, flush_ops = vol_stats
-                    vol_usage.append(dict(volume=bdm['volume_id'],
-                                          instance=instance,
-                                          rd_req=rd_req,
-                                          rd_bytes=rd_bytes,
-                                          wr_req=wr_req,
-                                          wr_bytes=wr_bytes,
-                                          flush_operations=flush_ops))
+                    stats = dict(volume=volume_id,
+                                 instance=instance,
+                                 rd_req=vol_stats[0],
+                                 rd_bytes=vol_stats[1],
+                                 wr_req=vol_stats[2],
+                                 wr_bytes=vol_stats[3],
+                                 flush_operations=vol_stats[4])
+                    LOG.debug(
+                        _("Got volume usage stats for the volume=%(volume)s,"
+                          " instance=%(instance)s, rd_req=%(rd_req)d,"
+                          " rd_bytes=%(rd_bytes)d, wr_req=%(wr_req)d,"
+                          " wr_bytes=%(wr_bytes)d")
+                        % stats)
+                    vol_usage.append(stats)
+
         return vol_usage
 
     def block_stats(self, instance_name, disk):
@@ -2758,7 +2784,8 @@ class LibvirtDriver(driver.ComputeDriver):
         except libvirt.libvirtError as e:
             errcode = e.get_error_code()
             LOG.info(_("Getting block stats failed, device might have "
-                       "been detached. Code=%(errcode)s Error=%(e)s")
+                       "been detached. Instance=%(instance_name)s "
+                       "Disk=%(disk)s Code=%(errcode)s Error=%(e)s")
                        % locals())
         except exception.InstanceNotFound:
             LOG.info(_("Could not find domain in libvirt for instance %s. "
@@ -2873,15 +2900,14 @@ class LibvirtDriver(driver.ComputeDriver):
         filename = dest_check_data["filename"]
         self._cleanup_shared_storage_test_file(filename)
 
-    def check_can_live_migrate_source(self, ctxt, instance_ref,
-                                      dest_check_data):
+    def check_can_live_migrate_source(self, ctxt, instance, dest_check_data):
         """Check if it is possible to execute live migration.
 
         This checks if the live migration can succeed, based on the
         results from check_can_live_migrate_destination.
 
         :param context: security context
-        :param instance_ref: nova.db.sqlalchemy.models.Instance
+        :param instance: nova.db.sqlalchemy.models.Instance
         :param dest_check_data: result of check_can_live_migrate_destination
         """
         # Checking shared storage connectivity
@@ -2898,7 +2924,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 reason = _("Block migration can not be used "
                            "with shared storage.")
                 raise exception.InvalidLocalStorage(reason=reason, path=source)
-            self._assert_dest_node_has_enough_disk(ctxt, instance_ref,
+            self._assert_dest_node_has_enough_disk(ctxt, instance,
                                     dest_check_data['disk_available_mb'],
                                     dest_check_data['disk_over_commit'])
 
@@ -2907,6 +2933,14 @@ class LibvirtDriver(driver.ComputeDriver):
                        "without shared storage.")
             raise exception.InvalidSharedStorage(reason=reason, path=source)
         dest_check_data.update({"is_shared_storage": shared})
+
+        # NOTE(mikal): include the instance directory name here because it
+        # doesn't yet exist on the destination but we want to force that
+        # same name to be used
+        instance_path = libvirt_utils.get_instance_path(instance,
+                                                        relative=True)
+        dest_check_data['instance_relative_path'] = instance_path
+
         return dest_check_data
 
     def _assert_dest_node_has_enough_disk(self, context, instance_ref,
@@ -2944,7 +2978,7 @@ class LibvirtDriver(driver.ComputeDriver):
                        "Disk of instance is too large(available"
                        " on destination host:%(available)s "
                        "< need:%(necessary)s)")
-            raise exception.MigrationError(reason=reason % locals())
+            raise exception.MigrationPreCheckError(reason=reason % locals())
 
     def _compare_cpu(self, cpu_info):
         """Checks the host cpu is compatible to a cpu given by xml.
@@ -3157,19 +3191,28 @@ class LibvirtDriver(driver.ComputeDriver):
         is_shared_storage = True
         is_volume_backed = False
         is_block_migration = True
+        instance_relative_path = None
         if migrate_data:
             is_shared_storage = migrate_data.get('is_shared_storage', True)
             is_volume_backed = migrate_data.get('is_volume_backed', False)
             is_block_migration = migrate_data.get('block_migration', True)
+            instance_relative_path = migrate_data.get('instance_relative_path')
 
-        if is_volume_backed and not (is_block_migration or is_shared_storage):
+        if not is_shared_storage:
+            # NOTE(mikal): this doesn't use libvirt_utils.get_instance_path
+            # because we are ensuring that the same instance directory name
+            # is used as was at the source
+            if instance_relative_path:
+                instance_dir = os.path.join(CONF.instances_path,
+                                            instance_relative_path)
+            else:
+                instance_dir = libvirt_utils.get_instance_path(instance)
 
-            # Create the instance directory on destination compute node.
-            instance_dir = libvirt_utils.get_instance_path(instance)
             if os.path.exists(instance_dir):
                 raise exception.DestinationDiskExists(path=instance_dir)
             os.mkdir(instance_dir)
 
+        if is_volume_backed and not (is_block_migration or is_shared_storage):
             # Touch the console.log file, required by libvirt.
             console_file = self._get_console_log_path(instance)
             libvirt_utils.file_open(console_file, 'a').close()
@@ -3295,7 +3338,8 @@ class LibvirtDriver(driver.ComputeDriver):
             dom = self._lookup_by_name(instance_ref["name"])
             self._conn.defineXML(dom.XMLDesc(0))
 
-    def get_instance_disk_info(self, instance_name, xml=None):
+    def get_instance_disk_info(self, instance_name, xml=None,
+                               block_device_info=None):
         """Preparation block migration.
 
         :params instance_ref:
@@ -3325,15 +3369,27 @@ class LibvirtDriver(driver.ComputeDriver):
                 LOG.warn(msg)
                 raise exception.InstanceNotFound(instance_id=instance_name)
 
+        # NOTE (rmk): When block_device_info is provided, we will use it to
+        #             filter out devices which are actually volumes.
+        block_device_mapping = driver.block_device_info_get_mapping(
+            block_device_info)
+
+        volume_devices = set()
+        for vol in block_device_mapping:
+            disk_dev = vol['mount_device'].rpartition("/")[2]
+            volume_devices.add(disk_dev)
+
         disk_info = []
         doc = etree.fromstring(xml)
         disk_nodes = doc.findall('.//devices/disk')
         path_nodes = doc.findall('.//devices/disk/source')
         driver_nodes = doc.findall('.//devices/disk/driver')
+        target_nodes = doc.findall('.//devices/disk/target')
 
         for cnt, path_node in enumerate(path_nodes):
             disk_type = disk_nodes[cnt].get('type')
             path = path_node.get('file')
+            target = target_nodes[cnt].attrib['dev']
 
             if disk_type != 'file':
                 LOG.debug(_('skipping %(path)s since it looks like volume') %
@@ -3344,6 +3400,11 @@ class LibvirtDriver(driver.ComputeDriver):
                 LOG.debug(_('skipping disk for %(instance_name)s as it'
                             ' does not have a path') %
                           locals())
+                continue
+
+            if target in volume_devices:
+                LOG.debug(_('skipping disk %(path)s (%(target)s) as it is a '
+                            'volume'), {'path': path, 'target': target})
                 continue
 
             # get the real disk size or
@@ -3415,22 +3476,46 @@ class LibvirtDriver(driver.ComputeDriver):
         """Manage the local cache of images."""
         self.image_cache_manager.verify_base_images(context, all_instances)
 
-    def _cleanup_remote_migration(self, dest, inst_base, inst_base_resize):
+    def _cleanup_remote_migration(self, dest, inst_base, inst_base_resize,
+                                  shared_storage=False):
         """Used only for cleanup in case migrate_disk_and_power_off fails."""
         try:
             if os.path.exists(inst_base_resize):
                 utils.execute('rm', '-rf', inst_base)
                 utils.execute('mv', inst_base_resize, inst_base)
-                utils.execute('ssh', dest, 'rm', '-rf', inst_base)
+                if not shared_storage:
+                    utils.execute('ssh', dest, 'rm', '-rf', inst_base)
         except Exception:
             pass
+
+    def _is_storage_shared_with(self, dest, inst_base):
+        # NOTE (rmk): There are two methods of determining whether we are
+        #             on the same filesystem: the source and dest IP are the
+        #             same, or we create a file on the dest system via SSH
+        #             and check whether the source system can also see it.
+        shared_storage = (dest == self.get_host_ip_addr())
+        if not shared_storage:
+            tmp_file = uuid.uuid4().hex + '.tmp'
+            tmp_path = os.path.join(inst_base, tmp_file)
+
+            try:
+                utils.execute('ssh', dest, 'touch', tmp_path)
+                if os.path.exists(tmp_path):
+                    shared_storage = True
+                    os.unlink(tmp_path)
+                else:
+                    utils.execute('ssh', dest, 'rm', tmp_path)
+            except Exception:
+                pass
+        return shared_storage
 
     def migrate_disk_and_power_off(self, context, instance, dest,
                                    instance_type, network_info,
                                    block_device_info=None):
         LOG.debug(_("Starting migrate_disk_and_power_off"),
                    instance=instance)
-        disk_info_text = self.get_instance_disk_info(instance['name'])
+        disk_info_text = self.get_instance_disk_info(instance['name'],
+                block_device_info=block_device_info)
         disk_info = jsonutils.loads(disk_info_text)
 
         self.power_off(instance)
@@ -3447,12 +3532,13 @@ class LibvirtDriver(driver.ComputeDriver):
         # copy disks to destination
         # rename instance dir to +_resize at first for using
         # shared storage for instance dir (eg. NFS).
-        same_host = (dest == self.get_host_ip_addr())
         inst_base = libvirt_utils.get_instance_path(instance)
         inst_base_resize = inst_base + "_resize"
+
+        shared_storage = self._is_storage_shared_with(dest, inst_base)
         try:
             utils.execute('mv', inst_base, inst_base_resize)
-            if same_host:
+            if shared_storage:
                 dest = None
                 utils.execute('mkdir', '-p', inst_base)
             else:
@@ -3468,7 +3554,7 @@ class LibvirtDriver(driver.ComputeDriver):
                     utils.execute('qemu-img', 'convert', '-f', 'qcow2',
                                   '-O', 'qcow2', from_path, tmp_path)
 
-                    if same_host:
+                    if shared_storage:
                         utils.execute('mv', tmp_path, img_path)
                     else:
                         libvirt_utils.copy_image(tmp_path, img_path, host=dest)
@@ -3479,7 +3565,8 @@ class LibvirtDriver(driver.ComputeDriver):
         except Exception:
             with excutils.save_and_reraise_exception():
                 self._cleanup_remote_migration(dest, inst_base,
-                                               inst_base_resize)
+                                               inst_base_resize,
+                                               shared_storage)
 
         return disk_info_text
 

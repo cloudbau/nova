@@ -20,6 +20,7 @@ import ast
 import base64
 import contextlib
 import functools
+import mox
 import os
 import re
 
@@ -552,11 +553,11 @@ class XenAPIVMTestCase(stubs.XenAPITestBase):
                               {'broadcast': '192.168.1.255',
                                'dns': ['192.168.1.4', '192.168.1.3'],
                                'gateway': '192.168.1.1',
-                               'gateway_v6': 'fe80::def',
+                               'gateway_v6': '2001:db8:0:1::1',
                                'ip6s': [{'enabled': '1',
                                          'ip': '2001:db8:0:1::1',
                                          'netmask': 64,
-                                         'gateway': 'fe80::def'}],
+                                         'gateway': '2001:db8:0:1::1'}],
                                'ips': [{'enabled': '1',
                                         'ip': '192.168.1.100',
                                         'netmask': '255.255.255.0',
@@ -1556,6 +1557,15 @@ class XenAPIHostTestCase(stubs.XenAPITestBase):
         self.assertEquals(stats['host_memory_overhead'], 20)
         self.assertEquals(stats['host_memory_free'], 30)
         self.assertEquals(stats['host_memory_free_computed'], 40)
+        self.assertEquals(stats['hypervisor_hostname'], 'fake-xenhost')
+
+    def test_host_state_missing_sr(self):
+        def fake_safe_find_sr(session):
+            raise exception.StorageRepositoryNotFound('not there')
+
+        self.stubs.Set(vm_utils, 'safe_find_sr', fake_safe_find_sr)
+        self.assertRaises(exception.StorageRepositoryNotFound,
+                          self.conn.get_host_stats)
 
     def _test_host_action(self, method, action, expected=None):
         result = method('host', action)
@@ -1604,6 +1614,38 @@ class XenAPIHostTestCase(stubs.XenAPITestBase):
 
         stats = self.conn.get_host_stats()
         self.assertEquals("SOMERETURNVALUE", stats['supported_instances'])
+
+    def test_update_stats_caches_hostname(self):
+        self.mox.StubOutWithMock(host, 'call_xenhost')
+        self.mox.StubOutWithMock(vm_utils, 'safe_find_sr')
+        self.mox.StubOutWithMock(self.conn._session, 'call_xenapi')
+        data = {'disk_total': 0,
+                'disk_used': 0,
+                'disk_available': 0,
+                'supported_instances': 0,
+                'host_capabilities': [],
+                'host_hostname': 'foo',
+                }
+        sr_rec = {
+            'physical_size': 0,
+            'physical_utilisation': 0,
+            }
+
+        for i in range(3):
+            host.call_xenhost(mox.IgnoreArg(), 'host_data', {}).AndReturn(data)
+            vm_utils.safe_find_sr(self.conn._session).AndReturn(None)
+            self.conn._session.call_xenapi('SR.scan', None)
+            self.conn._session.call_xenapi('SR.get_record', None).AndReturn(
+                sr_rec)
+            if i == 2:
+                # On the third call (the second below) change the hostname
+                data = dict(data, host_hostname='bar')
+
+        self.mox.ReplayAll()
+        stats = self.conn.get_host_stats(refresh=True)
+        self.assertEqual('foo', stats['hypervisor_hostname'])
+        stats = self.conn.get_host_stats(refresh=True)
+        self.assertEqual('foo', stats['hypervisor_hostname'])
 
 
 class ToSupportedInstancesTestCase(test.TestCase):
@@ -2065,8 +2107,9 @@ class XenAPIDom0IptablesFirewallTestCase(stubs.XenAPITestBase):
         network_model = fake_network.fake_get_instance_nw_info(self.stubs,
                                                       1, spectacular=True)
 
-        fake_network.stub_out_nw_api_get_instance_nw_info(self.stubs,
-                                      lambda *a, **kw: network_model)
+        from nova.compute import utils as compute_utils
+        self.stubs.Set(compute_utils, 'get_nw_info_for_instance',
+                       lambda instance: network_model)
 
         network_info = network_model.legacy()
         self.fw.prepare_instance_filter(instance_ref, network_info)

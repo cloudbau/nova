@@ -36,6 +36,7 @@ from sqlalchemy.exc import NoSuchTableError
 from sqlalchemy import Integer
 from sqlalchemy import MetaData
 from sqlalchemy import or_
+from sqlalchemy.orm import contains_eager
 from sqlalchemy.orm import joinedload
 from sqlalchemy.orm import joinedload_all
 from sqlalchemy.schema import Table
@@ -1521,9 +1522,6 @@ def instance_destroy(context, instance_uuid, constraint=None):
         session.query(models.InstanceMetadata).\
                  filter_by(instance_uuid=instance_uuid).\
                  soft_delete()
-        session.query(models.InstanceSystemMetadata).\
-                 filter_by(instance_uuid=instance_uuid).\
-                 soft_delete()
     return instance_ref
 
 
@@ -1693,7 +1691,7 @@ def instance_get_all_by_filters(context, filters, sort_key, sort_dir,
     # For other filters that don't match this, we will do regexp matching
     exact_match_filter_names = ['project_id', 'user_id', 'image_ref',
                                 'vm_state', 'instance_type_id', 'uuid',
-                                'metadata']
+                                'metadata', 'task_state']
 
     # Filter the query
     query_prefix = exact_filter(query_prefix, models.Instance,
@@ -2937,8 +2935,19 @@ def _block_device_mapping_get_query(context, session=None):
     return model_query(context, models.BlockDeviceMapping, session=session)
 
 
+def _scrub_empty_str_values(dct, keys_to_scrub):
+    """
+    Remove any keys found in sequence keys_to_scrub from the dict
+    if they have the value ''.
+    """
+    for key in keys_to_scrub:
+        if key in dct and dct[key] == '':
+            del dct[key]
+
+
 @require_context
 def block_device_mapping_create(context, values):
+    _scrub_empty_str_values(values, ['volume_size'])
     bdm_ref = models.BlockDeviceMapping()
     bdm_ref.update(values)
     bdm_ref.save()
@@ -2946,6 +2955,7 @@ def block_device_mapping_create(context, values):
 
 @require_context
 def block_device_mapping_update(context, bdm_id, values):
+    _scrub_empty_str_values(values, ['volume_size'])
     _block_device_mapping_get_query(context).\
             filter_by(id=bdm_id).\
             update(values)
@@ -2953,6 +2963,7 @@ def block_device_mapping_update(context, bdm_id, values):
 
 @require_context
 def block_device_mapping_update_or_create(context, values):
+    _scrub_empty_str_values(values, ['volume_size'])
     session = get_session()
     with session.begin():
         result = _block_device_mapping_get_query(context, session=session).\
@@ -3234,6 +3245,8 @@ def security_group_rule_get_by_security_group(context, security_group_id,
             filter_by(parent_group_id=security_group_id).\
             options(joinedload_all('grantee_group.instances.'
                                    'system_metadata')).\
+            options(joinedload('grantee_group.instances.'
+                               'info_cache')).\
             all()
 
 
@@ -3559,7 +3572,7 @@ def instance_type_create(context, values):
             pass
         try:
             instance_type_get_by_flavor_id(context, values['flavorid'],
-                                           session)
+                    read_deleted='no', session=session)
             raise exception.InstanceTypeIdExists(flavor_id=values['flavorid'])
         except exception.FlavorNotFound:
             pass
@@ -3601,9 +3614,16 @@ def _dict_with_extra_specs(inst_type_query):
 
 
 def _instance_type_get_query(context, session=None, read_deleted=None):
-    return model_query(context, models.InstanceTypes, session=session,
+    query = model_query(context, models.InstanceTypes, session=session,
                        read_deleted=read_deleted).\
-                     options(joinedload('extra_specs'))
+                       options(joinedload('extra_specs'))
+    if not context.is_admin:
+        the_filter = [models.InstanceTypes.is_public == True]
+        the_filter.extend([
+            models.InstanceTypes.projects.any(project_id=context.project_id)
+        ])
+        query = query.filter(or_(*the_filter))
+    return query
 
 
 @require_context
@@ -3678,9 +3698,11 @@ def instance_type_get_by_name(context, name, session=None):
 
 
 @require_context
-def instance_type_get_by_flavor_id(context, flavor_id, session=None):
+def instance_type_get_by_flavor_id(context, flavor_id, read_deleted,
+                                   session=None):
     """Returns a dict describing specific flavor_id."""
-    result = _instance_type_get_query(context, session=session).\
+    result = _instance_type_get_query(context, read_deleted=read_deleted,
+                                      session=session).\
                     filter_by(flavorid=flavor_id).\
                     first()
 
@@ -3730,7 +3752,7 @@ def instance_type_access_add(context, flavor_id, project_id):
     session = get_session()
     with session.begin():
         instance_type_ref = instance_type_get_by_flavor_id(context, flavor_id,
-                                                           session=session)
+                read_deleted='no', session=session)
         instance_type_id = instance_type_ref['id']
         access_ref = _instance_type_access_query(context, session=session).\
                         filter_by(instance_type_id=instance_type_id).\
@@ -3753,7 +3775,7 @@ def instance_type_access_remove(context, flavor_id, project_id):
     session = get_session()
     with session.begin():
         instance_type_ref = instance_type_get_by_flavor_id(context, flavor_id,
-                                                           session=session)
+                read_deleted='no', session=session)
         instance_type_id = instance_type_ref['id']
         count = _instance_type_access_query(context, session=session).\
                         filter_by(instance_type_id=instance_type_id).\
@@ -4190,12 +4212,45 @@ def vol_usage_update(context, id, rd_req, rd_bytes, wr_req, wr_bytes,
                       'curr_write_bytes': 0,
                       'instance_id': instance_id}
 
-        rows = model_query(context, models.VolumeUsage,
-                           session=session, read_deleted="yes").\
-                           filter_by(volume_id=id).\
-                           update(values, synchronize_session=False)
+        current_usage = model_query(context, models.VolumeUsage,
+                            session=session, read_deleted="yes").\
+                            filter_by(volume_id=id).\
+                            first()
+        if current_usage:
+            if (rd_req < current_usage['curr_reads'] or
+                rd_bytes < current_usage['curr_read_bytes'] or
+                wr_req < current_usage['curr_writes'] or
+                wr_bytes < current_usage['curr_write_bytes']):
+                LOG.info(_("Volume(%s) has lower stats then what is in "
+                           "the database. Instance must have been rebooted "
+                           "or crashed. Updating totals.") % id)
+                if not update_totals:
+                    values['tot_last_refreshed'] = last_refreshed
+                    values['tot_reads'] = (models.VolumeUsage.tot_reads +
+                                           current_usage['curr_reads'])
+                    values['tot_read_bytes'] = (
+                        models.VolumeUsage.tot_read_bytes +
+                        current_usage['curr_read_bytes'])
+                    values['tot_writes'] = (models.VolumeUsage.tot_writes +
+                                            current_usage['curr_writes'])
+                    values['tot_write_bytes'] = (
+                        models.VolumeUsage.tot_write_bytes +
+                        current_usage['curr_write_bytes'])
+                else:
+                    values['tot_reads'] = (models.VolumeUsage.tot_reads +
+                                           current_usage['curr_reads'] +
+                                           rd_req)
+                    values['tot_read_bytes'] = (
+                        models.VolumeUsage.tot_read_bytes +
+                        current_usage['curr_read_bytes'] + rd_bytes)
+                    values['tot_writes'] = (models.VolumeUsage.tot_writes +
+                                            current_usage['curr_writes'] +
+                                            wr_req)
+                    values['tot_write_bytes'] = (
+                        models.VolumeUsage.tot_write_bytes +
+                        current_usage['curr_write_bytes'] + wr_bytes)
 
-        if rows:
+            current_usage.update(values)
             return
 
         vol_usage = models.VolumeUsage()
@@ -4215,8 +4270,6 @@ def vol_usage_update(context, id, rd_req, rd_bytes, wr_req, wr_bytes,
             vol_usage.tot_write_bytes = wr_bytes
 
         vol_usage.save(session=session)
-
-    return
 
 
 ####################
@@ -4318,8 +4371,16 @@ def aggregate_get(context, aggregate_id):
 
 @require_admin_context
 def aggregate_get_by_host(context, host, key=None):
-    query = _aggregate_get_query(context, models.Aggregate,
-            models.AggregateHost.host, host)
+    """Return rows that match host (mandatory) and metadata key (optional).
+
+    :param host matches host, and is required.
+    :param key Matches metadata key, if not None.
+    """
+    query = model_query(context, models.Aggregate)
+    query = query.options(joinedload('_hosts'))
+    query = query.options(joinedload('_metadata'))
+    query = query.join('_hosts')
+    query = query.filter(models.AggregateHost.host == host)
 
     if key:
         query = query.join("_metadata").filter(
@@ -4329,13 +4390,16 @@ def aggregate_get_by_host(context, host, key=None):
 
 @require_admin_context
 def aggregate_metadata_get_by_host(context, host, key=None):
-    query = model_query(context, models.Aggregate).join(
-            "_hosts").filter(models.AggregateHost.host == host).join(
-            "_metadata")
+    query = model_query(context, models.Aggregate)
+    query = query.join("_hosts")
+    query = query.join("_metadata")
+    query = query.filter(models.AggregateHost.host == host)
+    query = query.options(contains_eager("_metadata"))
 
     if key:
         query = query.filter(models.AggregateMetadata.key == key)
     rows = query.all()
+
     metadata = collections.defaultdict(set)
     for agg in rows:
         for kv in agg._metadata:
@@ -4345,9 +4409,13 @@ def aggregate_metadata_get_by_host(context, host, key=None):
 
 @require_admin_context
 def aggregate_host_get_by_metadata_key(context, key):
-    query = model_query(context, models.Aggregate).join(
-            "_metadata").filter(models.AggregateMetadata.key == key)
+    query = model_query(context, models.Aggregate)
+    query = query.join("_metadata")
+    query = query.filter(models.AggregateMetadata.key == key)
+    query = query.options(contains_eager("_metadata"))
+    query = query.options(joinedload("_hosts"))
     rows = query.all()
+
     metadata = collections.defaultdict(set)
     for agg in rows:
         for agghost in agg._hosts:

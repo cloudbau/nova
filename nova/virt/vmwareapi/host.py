@@ -126,8 +126,8 @@ class HostState(object):
                               "sockets": summary.hardware.numCpuPkgs,
                               "threads": summary.hardware.numCpuThreads}
                 }
-        data["disk_total"] = ds[2] / (1024 * 1024)
-        data["disk_available"] = ds[3] / (1024 * 1024)
+        data["disk_total"] = ds[2] / (1024 * 1024 * 1024)
+        data["disk_available"] = ds[3] / (1024 * 1024 * 1024)
         data["disk_used"] = data["disk_total"] - data["disk_available"]
         data["host_memory_total"] = summary.hardware.memorySize / (1024 * 1024)
         data["host_memory_free"] = data["host_memory_total"] - \
@@ -193,8 +193,8 @@ class VCState(object):
                       "sockets": summary.hardware.numCpuPkgs,
                       "threads": summary.hardware.numCpuThreads}
         }
-        data["disk_total"] = ds[2] / (1024 * 1024)
-        data["disk_available"] = ds[3] / (1024 * 1024)
+        data["disk_total"] = ds[2] / (1024 * 1024 * 1024)
+        data["disk_available"] = ds[3] / (1024 * 1024 * 1024)
         data["disk_used"] = data["disk_total"] - data["disk_available"]
         data["host_memory_total"] = summary.hardware.memorySize / (1024 * 1024)
         data["host_memory_free"] = data["host_memory_total"] -\
@@ -202,6 +202,8 @@ class VCState(object):
         data["hypervisor_type"] = summary.config.product.name
         data["hypervisor_version"] = summary.config.product.version
         data["hypervisor_hostname"] = self._host_name
+        data["supported_instances"] = [('i686', 'vmware', 'hvm'),
+                                       ('x86_64', 'vmware', 'hvm')]
 
         self._stats = data
         return data

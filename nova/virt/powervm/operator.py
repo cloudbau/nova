@@ -416,23 +416,24 @@ class PowerVMOperator(object):
         return disk_info
 
     def deploy_from_migrated_file(self, lpar, file_path, size):
-        # decompress file
-        gzip_ending = '.gz'
-        if file_path.endswith(gzip_ending):
-            raw_file_path = file_path[:-len(gzip_ending)]
-        else:
-            raw_file_path = file_path
+        """Deploy the logical volume and attach to new lpar.
 
-        self._operator._decompress_image_file(file_path, raw_file_path)
+        :param lpar: lar instance
+        :param file_path: logical volume path
+        :param size: new size of the logical volume
+        """
+        need_decompress = file_path.endswith('.gz')
 
         try:
             # deploy lpar from file
-            self._deploy_from_vios_file(lpar, raw_file_path, size)
+            self._deploy_from_vios_file(lpar, file_path, size,
+                                        decompress=need_decompress)
         finally:
             # cleanup migrated file
-            self._operator._remove_file(raw_file_path)
+            self._operator._remove_file(file_path)
 
-    def _deploy_from_vios_file(self, lpar, file_path, size):
+    def _deploy_from_vios_file(self, lpar, file_path, size,
+                               decompress=True):
         self._operator.create_lpar(lpar)
         lpar = self._operator.get_lpar(lpar['name'])
         instance_id = lpar['lpar_id']
@@ -444,7 +445,8 @@ class PowerVMOperator(object):
         self._operator.attach_disk_to_vhost(diskName, vhost)
 
         # Copy file to device
-        self._disk_adapter._copy_file_to_device(file_path, diskName)
+        self._disk_adapter._copy_file_to_device(file_path, diskName,
+                                                decompress)
 
         self._operator.start_lpar(lpar['name'])
 
@@ -584,7 +586,14 @@ class BaseOperator(object):
         :returns: string -- hostname
         """
         output = self.run_vios_command(self.command.hostname())
-        return output[0]
+        hostname = output[0]
+        if not hasattr(self, '_hostname'):
+            self._hostname = hostname
+        elif hostname != self._hostname:
+            LOG.error(_('Hostname has changed from %(old)s to %(new)s. '
+                        'A restart is required to take effect.'
+                        ) % {'old': self._hostname, 'new': hostname})
+        return self._hostname
 
     def get_disk_name_by_vhost(self, vhost):
         """Returns the disk name attached to a vhost.

@@ -176,7 +176,7 @@ class FlatNetworkTestCase(test.TestCase):
                      'dhcp_server': '192.168.1.1',
                      'dns': ['192.168.%d.3' % nid, '192.168.%d.4' % nid],
                      'gateway': '192.168.%d.1' % nid,
-                     'gateway_v6': 'fe80::def',
+                     'gateway_v6': '2001:db8:0:1::1',
                      'ip6s': 'DONTCARE',
                      'ips': 'DONTCARE',
                      'label': 'test%d' % nid,
@@ -196,7 +196,7 @@ class FlatNetworkTestCase(test.TestCase):
             check = [{'enabled': 'DONTCARE',
                       'ip': '2001:db8:0:1::%x' % nid,
                       'netmask': 64,
-                      'gateway': 'fe80::def'}]
+                      'gateway': '2001:db8:0:1::1'}]
             self.assertThat(info['ip6s'], matchers.DictListMatches(check))
 
             num_fixed_ips = len(info['ips'])
@@ -301,6 +301,9 @@ class FlatNetworkTestCase(test.TestCase):
         self.network.validate_networks(self.context, requested_networks)
 
     def test_add_fixed_ip_instance_using_id_without_vpn(self):
+        self.stubs.Set(self.network,
+                '_do_trigger_security_group_members_refresh_for_instance',
+                lambda *a, **kw: None)
         self.mox.StubOutWithMock(db, 'network_get')
         self.mox.StubOutWithMock(db, 'network_update')
         self.mox.StubOutWithMock(db, 'fixed_ip_associate_pool')
@@ -315,9 +318,6 @@ class FlatNetworkTestCase(test.TestCase):
                                    mox.IgnoreArg(),
                                    mox.IgnoreArg()).AndReturn('192.168.0.101')
 
-        db.instance_get_by_uuid(mox.IgnoreArg(),
-                mox.IgnoreArg()).AndReturn({'security_groups':
-                                            [{'id': 0}]})
         db.instance_get_by_uuid(mox.IgnoreArg(),
                 mox.IgnoreArg()).AndReturn({'security_groups':
                                             [{'id': 0, 'name': 'test'}]})
@@ -347,6 +347,9 @@ class FlatNetworkTestCase(test.TestCase):
                                               networks[0]['id'])
 
     def test_add_fixed_ip_instance_using_uuid_without_vpn(self):
+        self.stubs.Set(self.network,
+                '_do_trigger_security_group_members_refresh_for_instance',
+                lambda *a, **kw: None)
         self.mox.StubOutWithMock(db, 'network_get_by_uuid')
         self.mox.StubOutWithMock(db, 'network_update')
         self.mox.StubOutWithMock(db, 'fixed_ip_associate_pool')
@@ -361,9 +364,6 @@ class FlatNetworkTestCase(test.TestCase):
                                    mox.IgnoreArg(),
                                    mox.IgnoreArg()).AndReturn('192.168.0.101')
 
-        db.instance_get_by_uuid(mox.IgnoreArg(),
-                mox.IgnoreArg()).AndReturn({'security_groups':
-                                            [{'id': 0}]})
         db.instance_get_by_uuid(mox.IgnoreArg(),
                 mox.IgnoreArg()).AndReturn({'security_groups':
                                             [{'id': 0, 'name': 'test'}]})
@@ -436,6 +436,9 @@ class FlatNetworkTestCase(test.TestCase):
         self.assertEqual(len(addresses), 0)
 
     def test_instance_dns(self):
+        self.stubs.Set(self.network,
+                '_do_trigger_security_group_members_refresh_for_instance',
+                lambda *a, **kw: None)
         fixedip = '192.168.0.101'
         self.mox.StubOutWithMock(db, 'network_get_by_uuid')
         self.mox.StubOutWithMock(db, 'network_update')
@@ -451,9 +454,6 @@ class FlatNetworkTestCase(test.TestCase):
                                    mox.IgnoreArg(),
                                    mox.IgnoreArg()).AndReturn(fixedip)
 
-        db.instance_get_by_uuid(mox.IgnoreArg(),
-                mox.IgnoreArg()).AndReturn({'security_groups':
-                                            [{'id': 0}]})
         db.instance_get_by_uuid(mox.IgnoreArg(),
                 mox.IgnoreArg()).AndReturn({'security_groups':
                                             [{'id': 0, 'name': 'test'}]})
@@ -573,15 +573,14 @@ class VlanNetworkTestCase(test.TestCase):
                 vpn=True)
 
     def test_allocate_fixed_ip(self):
+        self.stubs.Set(self.network,
+                '_do_trigger_security_group_members_refresh_for_instance',
+                lambda *a, **kw: None)
         self.mox.StubOutWithMock(db, 'fixed_ip_associate_pool')
         self.mox.StubOutWithMock(db, 'fixed_ip_update')
         self.mox.StubOutWithMock(db,
                               'virtual_interface_get_by_instance_and_network')
         self.mox.StubOutWithMock(db, 'instance_get_by_uuid')
-
-        db.instance_get_by_uuid(mox.IgnoreArg(),
-                        mox.IgnoreArg()).AndReturn({'security_groups':
-                                                             [{'id': 0}]})
 
         db.fixed_ip_associate_pool(mox.IgnoreArg(),
                                    mox.IgnoreArg(),
@@ -1042,6 +1041,9 @@ class VlanNetworkTestCase(test.TestCase):
                           mox.IgnoreArg())
 
     def test_add_fixed_ip_instance_without_vpn_requested_networks(self):
+        self.stubs.Set(self.network,
+                '_do_trigger_security_group_members_refresh_for_instance',
+                lambda *a, **kw: None)
         self.mox.StubOutWithMock(db, 'network_get')
         self.mox.StubOutWithMock(db, 'fixed_ip_associate_pool')
         self.mox.StubOutWithMock(db,
@@ -1056,10 +1058,6 @@ class VlanNetworkTestCase(test.TestCase):
         db.virtual_interface_get_by_instance_and_network(mox.IgnoreArg(),
                 mox.IgnoreArg(), mox.IgnoreArg()).AndReturn({'id': 0})
 
-        db.instance_get_by_uuid(mox.IgnoreArg(),
-                mox.IgnoreArg()).AndReturn({'security_groups': [{'id': 0}],
-                                            'availability_zone': '',
-                                            'uuid': FAKEUUID})
         db.fixed_ip_associate_pool(mox.IgnoreArg(),
                                    mox.IgnoreArg(),
                                    mox.IgnoreArg()).AndReturn('192.168.0.101')
@@ -1355,11 +1353,12 @@ class CommonNetworkTestCase(test.TestCase):
         manager.db.network_get_all(ctxt).AndReturn([{'id': 1,
                                      'cidr': '192.168.2.9/25'}])
         self.mox.ReplayAll()
-        # ValueError: requested cidr (192.168.2.0/24) conflicts with
-        #             existing smaller cidr
+        # CidrConflict: requested cidr (192.168.2.0/24) conflicts with
+        #               existing smaller cidr
         args = (None, 'fake', '192.168.2.0/24', False, 1, 256, None, None,
                 None, None, None)
-        self.assertRaises(ValueError, manager.create_networks, *args)
+        self.assertRaises(exception.CidrConflict,
+                          manager.create_networks, *args)
 
     def test_validate_cidrs_split_smaller_cidr_in_use(self):
         manager = fake_network.FakeNetworkManager()
@@ -1407,10 +1406,11 @@ class CommonNetworkTestCase(test.TestCase):
         self.mox.ReplayAll()
         args = (None, 'fake', '192.168.2.0/24', False, 3, 64, None, None,
                 None, None, None)
-        # ValueError: Not enough subnets avail to satisfy requested num_
-        #             networks - some subnets in requested range already
-        #             in use
-        self.assertRaises(ValueError, manager.create_networks, *args)
+        # CidrConflict: Not enough subnets avail to satisfy requested num_
+        #               networks - some subnets in requested range already
+        #               in use
+        self.assertRaises(exception.CidrConflict,
+                          manager.create_networks, *args)
 
     def test_validate_cidrs_one_in_use(self):
         manager = fake_network.FakeNetworkManager()
@@ -1426,10 +1426,11 @@ class CommonNetworkTestCase(test.TestCase):
         manager.db.network_get_all(ctxt).AndReturn([{'id': 1,
                                      'cidr': '192.168.0.0/24'}])
         self.mox.ReplayAll()
-        # ValueError: cidr already in use
+        # CidrConflict: cidr already in use
         args = (None, 'fake', '192.168.0.0/24', False, 1, 256, None, None,
                 None, None, None)
-        self.assertRaises(ValueError, manager.create_networks, *args)
+        self.assertRaises(exception.CidrConflict,
+                          manager.create_networks, *args)
 
     def test_validate_cidrs_too_many(self):
         manager = fake_network.FakeNetworkManager()
@@ -1457,9 +1458,10 @@ class CommonNetworkTestCase(test.TestCase):
         self.mox.ReplayAll()
         args = (None, 'fake', '192.168.0.0/24', False, 1, 256, None, None,
                 None, None, None)
-        # ValueError: requested cidr (192.168.0.0/24) conflicts
-        #             with existing supernet
-        self.assertRaises(ValueError, manager.create_networks, *args)
+        # CidrConflict: requested cidr (192.168.0.0/24) conflicts
+        #               with existing supernet
+        self.assertRaises(exception.CidrConflict,
+                          manager.create_networks, *args)
 
     def test_create_networks(self):
         cidr = '192.168.0.0/24'
@@ -1479,7 +1481,8 @@ class CommonNetworkTestCase(test.TestCase):
         self.mox.ReplayAll()
         args = [None, 'foo', '192.168.0.0/24', None, 1, 256,
                  'fd00::/48', None, None, None, None, None]
-        self.assertRaises(ValueError, manager.create_networks, *args)
+        self.assertRaises(exception.CidrConflict,
+                          manager.create_networks, *args)
 
     def test_create_networks_many(self):
         cidr = '192.168.0.0/16'
@@ -1700,7 +1703,8 @@ class CommonNetworkTestCase(test.TestCase):
                                        table_name='nat')
 
         # The expected rules that should be configured based on the fixed_range
-        expected_lines = ['[0:0] -A %s-snat -s %s -j SNAT --to-source %s -o %s'
+        expected_lines = ['[0:0] -A %s-snat -s %s -d 0.0.0.0/0 '
+                          '-j SNAT --to-source %s -o %s'
                           % (binary_name, CONF.fixed_range,
                                           CONF.routing_source_ip,
                                           CONF.public_interface),
@@ -1748,7 +1752,8 @@ class CommonNetworkTestCase(test.TestCase):
                                        table_name='nat')
 
         # The expected rules that should be configured based on the fixed_range
-        expected_lines = ['[0:0] -A %s-snat -s %s -j SNAT --to-source %s -o %s'
+        expected_lines = ['[0:0] -A %s-snat -s %s -d 0.0.0.0/0 '
+                          '-j SNAT --to-source %s -o %s'
                           % (binary_name, networks[0]['cidr'],
                                           CONF.routing_source_ip,
                                           CONF.public_interface),
@@ -1762,7 +1767,8 @@ class CommonNetworkTestCase(test.TestCase):
                           '--ctstate DNAT -j ACCEPT' % (binary_name,
                                                         networks[0]['cidr'],
                                                         networks[0]['cidr']),
-                          '[0:0] -A %s-snat -s %s -j SNAT --to-source %s -o %s'
+                          '[0:0] -A %s-snat -s %s -d 0.0.0.0/0 '
+                          '-j SNAT --to-source %s -o %s'
                           % (binary_name, networks[1]['cidr'],
                                           CONF.routing_source_ip,
                                           CONF.public_interface),
@@ -1816,10 +1822,11 @@ class CommonNetworkTestCase(test.TestCase):
                                        table_name='nat')
 
         # Add the new expected rules to the old ones
-        expected_lines += ['[0:0] -A %s-snat -s %s -j SNAT --to-source %s -o '
-                           '%s' % (binary_name, new_network['cidr'],
-                                                CONF.routing_source_ip,
-                                                CONF.public_interface),
+        expected_lines += ['[0:0] -A %s-snat -s %s -d 0.0.0.0/0 '
+                           '-j SNAT --to-source %s -o %s'
+                           % (binary_name, new_network['cidr'],
+                                           CONF.routing_source_ip,
+                                           CONF.public_interface),
                            '[0:0] -A %s-POSTROUTING -s %s -d %s/32 -j ACCEPT'
                            % (binary_name, new_network['cidr'],
                                            CONF.metadata_host),
