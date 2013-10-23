@@ -21,6 +21,7 @@ from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
 from nova import exception
 import nova.image.glance
+from nova.openstack.common.gettextutils import _
 import nova.utils
 
 
@@ -181,7 +182,7 @@ class Controller(wsgi.Controller):
             images = self._image_service.detail(context, filters=filters,
                                                 **page_params)
         except exception.Invalid as e:
-            raise webob.exc.HTTPBadRequest(explanation=str(e))
+            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
         return self._view_builder.index(req, images)
 
     @wsgi.serializers(xml=ImagesTemplate)
@@ -201,7 +202,7 @@ class Controller(wsgi.Controller):
             images = self._image_service.detail(context, filters=filters,
                                                 **page_params)
         except exception.Invalid as e:
-            raise webob.exc.HTTPBadRequest(explanation=str(e))
+            raise webob.exc.HTTPBadRequest(explanation=e.format_message())
 
         req.cache_db_items('images', images, 'id')
         return self._view_builder.detail(req, images)

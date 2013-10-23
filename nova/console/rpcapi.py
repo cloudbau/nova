@@ -20,7 +20,7 @@ Client side of the console RPC API.
 
 from oslo.config import cfg
 
-import nova.openstack.common.rpc.proxy
+from nova import rpcclient
 
 rpcapi_opts = [
     cfg.StrOpt('console_topic',
@@ -31,14 +31,22 @@ rpcapi_opts = [
 CONF = cfg.CONF
 CONF.register_opts(rpcapi_opts)
 
+rpcapi_cap_opt = cfg.StrOpt('console',
+        help='Set a version cap for messages sent to console services')
+CONF.register_opt(rpcapi_cap_opt, 'upgrade_levels')
 
-class ConsoleAPI(nova.openstack.common.rpc.proxy.RpcProxy):
+
+class ConsoleAPI(rpcclient.RpcProxy):
     '''Client side of the console rpc API.
 
     API version history:
 
         1.0 - Initial version.
         1.1 - Added get_backdoor_port()
+
+        ... Grizzly and Havana support message version 1.1.  So, any changes to
+        existing methods in 2.x after that point should be done such that they
+        can handle the version_cap being set to 1.1.
     '''
 
     #
@@ -51,14 +59,23 @@ class ConsoleAPI(nova.openstack.common.rpc.proxy.RpcProxy):
     #
     BASE_RPC_API_VERSION = '1.0'
 
+    VERSION_ALIASES = {
+        'grizzly': '1.1',
+        'havana': '1.1',
+    }
+
     def __init__(self, topic=None):
         topic = topic if topic else CONF.console_topic
+        version_cap = self.VERSION_ALIASES.get(CONF.upgrade_levels.console,
+                                               CONF.upgrade_levels.console)
         super(ConsoleAPI, self).__init__(
                 topic=topic,
-                default_version=self.BASE_RPC_API_VERSION)
+                default_version=self.BASE_RPC_API_VERSION,
+                version_cap=version_cap)
+        self.client = self.get_client()
 
     def add_console(self, ctxt, instance_id):
-        self.cast(ctxt, self.make_msg('add_console', instance_id=instance_id))
+        self.client.cast(ctxt, 'add_console', instance_id=instance_id)
 
     def remove_console(self, ctxt, console_id):
-        self.cast(ctxt, self.make_msg('remove_console', console_id=console_id))
+        self.client.cast(ctxt, 'remove_console', console_id=console_id)

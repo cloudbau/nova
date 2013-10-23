@@ -24,8 +24,8 @@ from oslo.config import cfg
 
 from nova.cells import rpcapi as cells_rpcapi
 from nova.compute import rpcapi as compute_rpcapi
-from nova.conductor import api as conductor_api
 from nova import manager
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import memorycache
@@ -56,9 +56,15 @@ class ConsoleAuthManager(manager.Manager):
         super(ConsoleAuthManager, self).__init__(service_name='consoleauth',
                                                  *args, **kwargs)
         self.mc = memorycache.get_client()
-        self.conductor_api = conductor_api.API()
         self.compute_rpcapi = compute_rpcapi.ComputeAPI()
         self.cells_rpcapi = cells_rpcapi.CellsAPI()
+
+    def create_rpc_dispatcher(self, backdoor_port=None, additional_apis=None):
+        if not additional_apis:
+            additional_apis = []
+        additional_apis.append(_ConsoleAuthManagerV2Proxy(self))
+        return super(ConsoleAuthManager, self).create_rpc_dispatcher(
+                backdoor_port, additional_apis)
 
     def _get_tokens_for_instance(self, instance_uuid):
         tokens_str = self.mc.get(instance_uuid.encode('UTF-8'))
@@ -82,11 +88,17 @@ class ConsoleAuthManager(manager.Manager):
         self.mc.set(token.encode('UTF-8'), data, CONF.console_token_ttl)
         if instance_uuid is not None:
             tokens = self._get_tokens_for_instance(instance_uuid)
+            # Remove the expired tokens from cache.
+            for tok in tokens:
+                token_str = self.mc.get(tok.encode('UTF-8'))
+                if not token_str:
+                    tokens.remove(tok)
             tokens.append(token)
             self.mc.set(instance_uuid.encode('UTF-8'),
                         jsonutils.dumps(tokens))
 
-        LOG.audit(_("Received Token: %(token)s, %(token_dict)s)"), locals())
+        LOG.audit(_("Received Token: %(token)s, %(token_dict)s"),
+                  {'token': token, 'token_dict': token_dict})
 
     def _validate_token(self, context, token):
         instance_uuid = token['instance_uuid']
@@ -100,8 +112,8 @@ class ConsoleAuthManager(manager.Manager):
             return self.cells_rpcapi.validate_console_port(context,
                     instance_uuid, token['port'], token['console_type'])
 
-        instance = self.conductor_api.instance_get_by_uuid(context,
-                                                           instance_uuid)
+        instance = self.db.instance_get_by_uuid(context, instance_uuid)
+
         return self.compute_rpcapi.validate_console_port(context,
                                             instance,
                                             token['port'],
@@ -110,7 +122,8 @@ class ConsoleAuthManager(manager.Manager):
     def check_token(self, context, token):
         token_str = self.mc.get(token.encode('UTF-8'))
         token_valid = (token_str is not None)
-        LOG.audit(_("Checking Token: %(token)s, %(token_valid)s)"), locals())
+        LOG.audit(_("Checking Token: %(token)s, %(token_valid)s"),
+                  {'token': token, 'token_valid': token_valid})
         if token_valid:
             token = jsonutils.loads(token_str)
             if self._validate_token(context, token):
@@ -126,3 +139,25 @@ class ConsoleAuthManager(manager.Manager):
     # deprecated in favor of the method in the base API.
     def get_backdoor_port(self, context):
         return self.backdoor_port
+
+
+class _ConsoleAuthManagerV2Proxy(object):
+    # Notes for changes since 1.X
+    # - removed get_backdoor_port()
+    # - instance_uuid required for authorize_console()
+
+    RPC_API_VERSION = '2.0'
+
+    def __init__(self, manager):
+        self.manager = manager
+
+    def authorize_console(self, context, token, console_type, host, port,
+                          internal_access_path, instance_uuid):
+        self.manager.authorize_console(context, token, console_type, host,
+                port, internal_access_path, instance_uuid)
+
+    def check_token(self, context, token):
+        self.manager.check_token(context, token)
+
+    def delete_tokens_for_instance(self, ctxt, instance_uuid):
+        self.manager.delete_tokens_for_instance(ctxt, instance_uuid)

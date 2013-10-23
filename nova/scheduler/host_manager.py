@@ -25,8 +25,12 @@ from nova.compute import task_states
 from nova.compute import vm_states
 from nova import db
 from nova import exception
+from nova.openstack.common.gettextutils import _
+from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
+from nova.pci import pci_request
+from nova.pci import pci_stats
 from nova.scheduler import filters
 from nova.scheduler import weights
 
@@ -66,19 +70,19 @@ class ReadOnlyDict(UserDict.IterableUserDict):
         self.update(source)
 
     def __setitem__(self, key, item):
-        raise TypeError
+        raise TypeError()
 
     def __delitem__(self, key):
-        raise TypeError
+        raise TypeError()
 
     def clear(self):
-        raise TypeError
+        raise TypeError()
 
     def pop(self, key, *args):
-        raise TypeError
+        raise TypeError()
 
     def popitem(self):
-        raise TypeError
+        raise TypeError()
 
     def update(self, source=None):
         if source is None:
@@ -88,7 +92,7 @@ class ReadOnlyDict(UserDict.IterableUserDict):
         elif isinstance(source, type({})):
             self.data = source
         else:
-            raise TypeError
+            raise TypeError()
 
 
 class HostState(object):
@@ -110,11 +114,6 @@ class HostState(object):
         self.free_disk_mb = 0
         self.vcpus_total = 0
         self.vcpus_used = 0
-        # Valid vm types on this host: 'pv', 'hvm' or 'all'
-        if 'allowed_vm_type' in self.capabilities:
-            self.allowed_vm_type = self.capabilities['allowed_vm_type']
-        else:
-            self.allowed_vm_type = 'all'
 
         # Additional host information from the compute node stats:
         self.vm_states = {}
@@ -123,6 +122,14 @@ class HostState(object):
         self.num_instances_by_project = {}
         self.num_instances_by_os_type = {}
         self.num_io_ops = 0
+
+        # Other information
+        self.host_ip = None
+        self.hypervisor_type = None
+        self.hypervisor_version = None
+        self.hypervisor_hostname = None
+        self.cpu_info = None
+        self.supported_instances = None
 
         # Resource oversubscription values for the compute host:
         self.limits = {}
@@ -142,7 +149,7 @@ class HostState(object):
     def update_from_compute_node(self, compute):
         """Update information about a host from its compute_node info."""
         if (self.updated and compute['updated_at']
-            and self.updated > compute['updated_at']):
+                and self.updated > compute['updated_at']):
             return
         all_ram_mb = compute['memory_mb']
 
@@ -161,40 +168,58 @@ class HostState(object):
         self.vcpus_total = compute['vcpus']
         self.vcpus_used = compute['vcpus_used']
         self.updated = compute['updated_at']
+        if 'pci_stats' in compute:
+            self.pci_stats = pci_stats.PciDeviceStats(compute['pci_stats'])
+        else:
+            self.pci_stats = None
 
-        stats = compute.get('stats', [])
-        statmap = self._statmap(stats)
+        # All virt drivers report host_ip
+        self.host_ip = compute['host_ip']
+        self.hypervisor_type = compute.get('hypervisor_type')
+        self.hypervisor_version = compute.get('hypervisor_version')
+        self.hypervisor_hostname = compute.get('hypervisor_hostname')
+        self.cpu_info = compute.get('cpu_info')
+        if compute.get('supported_instances'):
+            self.supported_instances = jsonutils.loads(
+                    compute.get('supported_instances'))
+
+        # Don't store stats directly in host_state to make sure these don't
+        # overwrite any values, or get overwritten themselves. Store in self so
+        # filters can schedule with them.
+        self.stats = self._statmap(compute.get('stats', []))
 
         # Track number of instances on host
-        self.num_instances = int(statmap.get('num_instances', 0))
+        self.num_instances = int(self.stats.get('num_instances', 0))
 
         # Track number of instances by project_id
-        project_id_keys = [k for k in statmap.keys() if
+        project_id_keys = [k for k in self.stats.keys() if
                 k.startswith("num_proj_")]
         for key in project_id_keys:
             project_id = key[9:]
-            self.num_instances_by_project[project_id] = int(statmap[key])
+            self.num_instances_by_project[project_id] = int(self.stats[key])
 
         # Track number of instances in certain vm_states
-        vm_state_keys = [k for k in statmap.keys() if k.startswith("num_vm_")]
+        vm_state_keys = [k for k in self.stats.keys() if
+                k.startswith("num_vm_")]
         for key in vm_state_keys:
             vm_state = key[7:]
-            self.vm_states[vm_state] = int(statmap[key])
+            self.vm_states[vm_state] = int(self.stats[key])
 
         # Track number of instances in certain task_states
-        task_state_keys = [k for k in statmap.keys() if
+        task_state_keys = [k for k in self.stats.keys() if
                 k.startswith("num_task_")]
         for key in task_state_keys:
             task_state = key[9:]
-            self.task_states[task_state] = int(statmap[key])
+            self.task_states[task_state] = int(self.stats[key])
 
         # Track number of instances by host_type
-        os_keys = [k for k in statmap.keys() if k.startswith("num_os_type_")]
+        os_keys = [k for k in self.stats.keys() if
+                k.startswith("num_os_type_")]
         for key in os_keys:
             os = key[12:]
-            self.num_instances_by_os_type[os] = int(statmap[key])
+            self.num_instances_by_os_type[os] = int(self.stats[key])
 
-        self.num_io_ops = int(statmap.get('io_workload', 0))
+        self.num_io_ops = int(self.stats.get('io_workload', 0))
 
     def consume_from_instance(self, instance):
         """Incrementally update host state from an instance."""
@@ -233,21 +258,25 @@ class HostState(object):
             self.num_instances_by_os_type[os_type] = 0
         self.num_instances_by_os_type[os_type] += 1
 
+        pci_requests = pci_request.get_instance_pci_requests(instance)
+        if pci_requests and self.pci_stats:
+            self.pci_stats.apply_requests(pci_requests)
+
         vm_state = instance.get('vm_state', vm_states.BUILDING)
         task_state = instance.get('task_state')
         if vm_state == vm_states.BUILDING or task_state in [
                 task_states.RESIZE_MIGRATING, task_states.REBUILDING,
                 task_states.RESIZE_PREP, task_states.IMAGE_SNAPSHOT,
-                task_states.IMAGE_BACKUP]:
+                task_states.IMAGE_LIVE_SNAPSHOT, task_states.IMAGE_BACKUP]:
             self.num_io_ops += 1
 
     def _statmap(self, stats):
         return dict((st['key'], st['value']) for st in stats)
 
     def __repr__(self):
-        return ("(%s, %s) ram:%s disk:%s io_ops:%s instances:%s vm_type:%s" %
+        return ("(%s, %s) ram:%s disk:%s io_ops:%s instances:%s" %
                 (self.host, self.nodename, self.free_ram_mb, self.free_disk_mb,
-                 self.num_io_ops, self.num_instances, self.allowed_vm_type))
+                 self.num_io_ops, self.num_instances))
 
 
 class HostManager(object):
@@ -294,7 +323,7 @@ class HostManager(object):
         return good_filters
 
     def get_filtered_hosts(self, hosts, filter_properties,
-            filter_class_names=None):
+            filter_class_names=None, index=0):
         """Filter hosts and return only ones passing all filters."""
 
         def _strip_ignore_hosts(host_map, hosts_to_ignore):
@@ -306,7 +335,7 @@ class HostManager(object):
                         ignored_hosts.append(host)
             ignored_hosts_str = ', '.join(ignored_hosts)
             msg = _('Host filter ignoring hosts: %s')
-            LOG.debug(msg % ignored_hosts_str)
+            LOG.audit(msg % ignored_hosts_str)
 
         def _match_forced_hosts(host_map, hosts_to_force):
             forced_hosts = []
@@ -322,7 +351,7 @@ class HostManager(object):
                 forced_hosts_str = ', '.join(hosts_to_force)
                 msg = _("No hosts matched due to not matching "
                         "'force_hosts' value of '%s'")
-            LOG.debug(msg % forced_hosts_str)
+            LOG.audit(msg % forced_hosts_str)
 
         def _match_forced_nodes(host_map, nodes_to_force):
             forced_nodes = []
@@ -338,7 +367,7 @@ class HostManager(object):
                 forced_nodes_str = ', '.join(nodes_to_force)
                 msg = _("No nodes matched due to not matching "
                         "'force_nodes' value of '%s'")
-            LOG.debug(msg % forced_nodes_str)
+            LOG.audit(msg % forced_nodes_str)
 
         filter_classes = self._choose_host_filters(filter_class_names)
         ignore_hosts = filter_properties.get('ignore_hosts', [])
@@ -365,7 +394,7 @@ class HostManager(object):
             hosts = name_to_cls_map.itervalues()
 
         return self.filter_handler.get_filtered_objects(filter_classes,
-                hosts, filter_properties)
+                hosts, filter_properties, index)
 
     def get_weighed_hosts(self, hosts, weight_properties):
         """Weigh the hosts."""
@@ -377,12 +406,14 @@ class HostManager(object):
 
         if service_name != 'compute':
             LOG.debug(_('Ignoring %(service_name)s service update '
-                    'from %(host)s'), locals())
+                        'from %(host)s'), {'service_name': service_name,
+                                           'host': host})
             return
 
         state_key = (host, capabilities.get('hypervisor_hostname'))
         LOG.debug(_("Received %(service_name)s service update from "
-                    "%(state_key)s.") % locals())
+                    "%(state_key)s."), {'service_name': service_name,
+                                        'state_key': state_key})
         # Copy the capabilities, so we don't modify the original dict
         capab_copy = dict(capabilities)
         capab_copy["timestamp"] = timeutils.utcnow()  # Reported time
@@ -423,7 +454,7 @@ class HostManager(object):
         for state_key in dead_nodes:
             host, node = state_key
             LOG.info(_("Removing dead compute node %(host)s:%(node)s "
-                       "from scheduler") % locals())
+                       "from scheduler") % {'host': host, 'node': node})
             del self.host_state_map[state_key]
 
         return self.host_state_map.itervalues()

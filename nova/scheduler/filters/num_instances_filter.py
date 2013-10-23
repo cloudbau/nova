@@ -15,6 +15,7 @@
 
 from oslo.config import cfg
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.scheduler import filters
 
@@ -38,5 +39,6 @@ class NumInstancesFilter(filters.BaseHostFilter):
         if not passes:
             LOG.debug(_("%(host_state)s fails num_instances check: Max "
                         "instances per host is set to %(max_instances)s"),
-                        locals())
+                        {'host_state': host_state,
+                         'max_instances': max_instances})
         return passes

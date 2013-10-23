@@ -17,19 +17,34 @@
 
 import base64
 import binascii
+from distutils import version
 import os
+import sys
 import time
 import uuid
 
 from oslo.config import cfg
 
 from nova.api.metadata import password
+from nova.compute import utils as compute_utils
+from nova import conductor
 from nova import context
 from nova import crypto
+from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
+from nova.openstack.common import strutils
 from nova import utils
 
+
+USE_AGENT_KEY = "xenapi_use_agent"
+USE_AGENT_SM_KEY = utils.SM_IMAGE_PROP_PREFIX + USE_AGENT_KEY
+SKIP_SSH_KEY = "xenapi_skip_agent_inject_ssh"
+SKIP_SSH_SM_KEY = utils.SM_IMAGE_PROP_PREFIX + SKIP_SSH_KEY
+SKIP_FILES_AT_BOOT_KEY = "xenapi_skip_agent_inject_files_at_boot"
+SKIP_FILES_AT_BOOT_SM_KEY = utils.SM_IMAGE_PROP_PREFIX \
+                                        + SKIP_FILES_AT_BOOT_KEY
 
 LOG = logging.getLogger(__name__)
 
@@ -54,9 +69,17 @@ xenapi_agent_opts = [
                     ' flat_injected=True'),
     cfg.BoolOpt('xenapi_disable_agent',
                default=False,
-               help='Disable XenAPI agent. Reduces the amount of time '
-                    'it takes nova to detect that a VM has started, when '
-                    'that VM does not have the agent installed'),
+               help='Disables the use of the XenAPI agent in any image '
+                    'regardless of what image properties are present.'),
+    cfg.BoolOpt('xenapi_use_agent_default',
+               default=False,
+               help='Determines if the xenapi agent should be used when '
+                    'the image used does not contain a hint to declare if '
+                    'the agent is present or not. '
+                    'The hint is a glance property "' + USE_AGENT_KEY + '" '
+                    'that has the value "true" or "false". '
+                    'Note that waiting for the agent when it is not present '
+                    'will significantly increase server boot times.'),
 ]
 
 CONF = cfg.CONF
@@ -64,12 +87,14 @@ CONF.register_opts(xenapi_agent_opts)
 
 
 def _call_agent(session, instance, vm_ref, method, addl_args=None,
-                timeout=None):
+                timeout=None, success_codes=None):
     """Abstracts out the interaction with the agent xenapi plugin."""
     if addl_args is None:
         addl_args = {}
     if timeout is None:
         timeout = CONF.agent_timeout
+    if success_codes is None:
+        success_codes = ['0']
 
     vm_rec = session.call_xenapi("VM.get_record", vm_ref)
 
@@ -86,41 +111,54 @@ def _call_agent(session, instance, vm_ref, method, addl_args=None,
         err_msg = e.details[-1].splitlines()[-1]
         if 'TIMEOUT:' in err_msg:
             LOG.error(_('TIMEOUT: The call to %(method)s timed out. '
-                        'args=%(args)r'), locals(), instance=instance)
-            return {'returncode': 'timeout', 'message': err_msg}
+                        'args=%(args)r'),
+                      {'method': method, 'args': args}, instance=instance)
+            raise exception.AgentTimeout(method=method)
         elif 'NOT IMPLEMENTED:' in err_msg:
-            LOG.error(_('NOT IMPLEMENTED: The call to %(method)s is not'
-                        ' supported by the agent. args=%(args)r'),
-                      locals(), instance=instance)
-            return {'returncode': 'notimplemented', 'message': err_msg}
+            LOG.error(_('NOT IMPLEMENTED: The call to %(method)s is not '
+                        'supported by the agent. args=%(args)r'),
+                      {'method': method, 'args': args}, instance=instance)
+            raise exception.AgentNotImplemented(method=method)
         else:
             LOG.error(_('The call to %(method)s returned an error: %(e)s. '
-                        'args=%(args)r'), locals(), instance=instance)
-            return {'returncode': 'error', 'message': err_msg}
-        return None
+                        'args=%(args)r'),
+                      {'method': method, 'args': args, 'e': e},
+                      instance=instance)
+            raise exception.AgentError(method=method)
 
-    if isinstance(ret, dict):
-        return ret
-    try:
-        return jsonutils.loads(ret)
-    except TypeError:
-        LOG.error(_('The agent call to %(method)s returned an invalid'
-                    ' response: %(ret)r. path=%(path)s; args=%(args)r'),
-                  locals(), instance=instance)
-        return {'returncode': 'error',
-                'message': 'unable to deserialize response'}
+    if not isinstance(ret, dict):
+        try:
+            ret = jsonutils.loads(ret)
+        except TypeError:
+            LOG.error(_('The agent call to %(method)s returned an invalid '
+                        'response: %(ret)r. args=%(args)r'),
+                      {'method': method, 'ret': ret, 'args': args},
+                      instance=instance)
+            raise exception.AgentError(method=method)
 
+    if ret['returncode'] not in success_codes:
+        LOG.error(_('The agent call to %(method)s returned an '
+                    'an error: %(ret)r. args=%(args)r'),
+                  {'method': method, 'ret': ret, 'args': args},
+                  instance=instance)
+        raise exception.AgentError(method=method)
 
-def _get_agent_version(session, instance, vm_ref):
-    resp = _call_agent(session, instance, vm_ref, 'version')
-    if resp['returncode'] != '0':
-        LOG.error(_('Failed to query agent version: %(resp)r'),
-                  locals(), instance=instance)
-        return None
+    LOG.debug(_('The agent call to %(method)s was successful: '
+                '%(ret)r. args=%(args)r'),
+              {'method': method, 'ret': ret, 'args': args},
+              instance=instance)
 
     # Some old versions of the Windows agent have a trailing \\r\\n
     # (ie CRLF escaped) for some reason. Strip that off.
-    return resp['message'].replace('\\r\\n', '')
+    return ret['message'].replace('\\r\\n', '')
+
+
+def is_upgrade_required(current_version, available_version):
+    # NOTE(johngarbutt): agent version numbers are four part,
+    # so we need to use the loose version to compare them
+    current = version.LooseVersion(current_version)
+    available = version.LooseVersion(available_version)
+    return available > current
 
 
 class XenAPIBasedAgent(object):
@@ -130,43 +168,102 @@ class XenAPIBasedAgent(object):
         self.instance = instance
         self.vm_ref = vm_ref
 
-    def get_agent_version(self):
-        """Get the version of the agent running on the VM instance."""
+    def _add_instance_fault(self, error, exc_info):
+        LOG.warning(_("Ignoring error while configuring instance with "
+                      "agent: %s") % error,
+                    instance=self.instance, exc_info=True)
+        try:
+            ctxt = context.get_admin_context()
+            capi = conductor.API()
+            compute_utils.add_instance_fault_from_exc(
+                    ctxt, capi, self.instance, error, exc_info=exc_info)
+        except Exception:
+            pass
 
+    def _call_agent(self, method, addl_args=None, timeout=None,
+                    success_codes=None, ignore_errors=True):
+        try:
+            return _call_agent(self.session, self.instance, self.vm_ref,
+                               method, addl_args, timeout, success_codes)
+        except exception.AgentError as error:
+            if ignore_errors:
+                self._add_instance_fault(error, sys.exc_info())
+            else:
+                raise
+
+    def get_version(self):
         LOG.debug(_('Querying agent version'), instance=self.instance)
 
         # The agent can be slow to start for a variety of reasons. On Windows,
         # it will generally perform a setup process on first boot that can
         # take a couple of minutes and then reboot. On Linux, the system can
-        # also take a while to boot. So we need to be more patient than
-        # normal as well as watch for domid changes
-
+        # also take a while to boot.
         expiration = time.time() + CONF.agent_version_timeout
-        while time.time() < expiration:
-            ret = _get_agent_version(self.session, self.instance, self.vm_ref)
-            if ret:
-                return ret
+        while True:
+            try:
+                # NOTE(johngarbutt): we can't use the xapi plugin
+                # timeout, because the domid may change when
+                # the server is rebooted
+                return self._call_agent('version', ignore_errors=False)
+            except exception.AgentError as error:
+                if time.time() > expiration:
+                    self._add_instance_fault(error, sys.exc_info())
+                    return
 
-        LOG.info(_('Reached maximum time attempting to query agent version'),
-                 instance=self.instance)
+    def _get_expected_build(self):
+        ctxt = context.get_admin_context()
+        agent_build = self.virtapi.agent_build_get_by_triple(
+            ctxt, 'xen', self.instance['os_type'],
+            self.instance['architecture'])
+        if agent_build:
+            LOG.debug(_('Latest agent build for %(hypervisor)s/%(os)s'
+                        '/%(architecture)s is %(version)s') % agent_build)
+        else:
+            LOG.debug(_('No agent build found for %(hypervisor)s/%(os)s'
+                        '/%(architecture)s') % {
+                            'hypervisor': 'xen',
+                            'os': self.instance['os_type'],
+                            'architecture': self.instance['architecture']})
+        return agent_build
 
-        return None
-
-    def agent_update(self, agent_build):
-        """Update agent on the VM instance."""
-
-        LOG.info(_('Updating agent to %s'), agent_build['version'],
-                 instance=self.instance)
-
-        # Send the encrypted password
-        args = {'url': agent_build['url'], 'md5sum': agent_build['md5hash']}
-        resp = _call_agent(
-            self.session, self.instance, self.vm_ref, 'agentupdate', args)
-        if resp['returncode'] != '0':
-            LOG.error(_('Failed to update agent: %(resp)r'), locals(),
+    def update_if_needed(self, version):
+        agent_build = self._get_expected_build()
+        if version and agent_build and \
+                is_upgrade_required(version, agent_build['version']):
+            LOG.debug(_('Updating agent to %s'), agent_build['version'],
                       instance=self.instance)
-            return None
-        return resp['message']
+            self._perform_update(agent_build)
+        else:
+            LOG.debug(_('Skipping agent update.'), instance=self.instance)
+
+    def _perform_update(self, agent_build):
+        args = {'url': agent_build['url'], 'md5sum': agent_build['md5hash']}
+        try:
+            self._call_agent('agentupdate', args)
+        except exception.AgentError as exc:
+            # Silently fail for agent upgrades
+            LOG.warning(_("Unable to update the agent due "
+                          "to: %(exc)s") % dict(exc=exc),
+                        instance=self.instance)
+
+    def _exchange_key_with_agent(self):
+        dh = SimpleDH()
+        args = {'pub': str(dh.get_public())}
+        resp = self._call_agent('key_init', args, success_codes=['D0'])
+        agent_pub = int(resp)
+        dh.compute_shared(agent_pub)
+        return dh
+
+    def _save_instance_password_if_sshkey_present(self, new_pass):
+        sshkey = self.instance.get('key_data')
+        if sshkey and sshkey.startswith("ssh-rsa"):
+            ctxt = context.get_admin_context()
+            enc = crypto.ssh_encrypt_text(sshkey, new_pass)
+            sys_meta = utils.instance_sys_meta(self.instance)
+            sys_meta.update(password.convert_password(ctxt,
+                                                      base64.b64encode(enc)))
+            self.virtapi.instance_update(ctxt, self.instance['uuid'],
+                                         {'system_metadata': sys_meta})
 
     def set_admin_password(self, new_pass):
         """Set the root/admin password on the VM instance.
@@ -179,59 +276,30 @@ class XenAPIBasedAgent(object):
         """
         LOG.debug(_('Setting admin password'), instance=self.instance)
 
-        dh = SimpleDH()
-
-        # Exchange keys
-        args = {'pub': str(dh.get_public())}
-        resp = _call_agent(
-            self.session, self.instance, self.vm_ref, 'key_init', args)
-
-        # Successful return code from key_init is 'D0'
-        if resp['returncode'] != 'D0':
-            msg = _('Failed to exchange keys: %(resp)r') % locals()
-            LOG.error(msg, instance=self.instance)
-            raise NotImplementedError(msg)
-
-        # Some old versions of the Windows agent have a trailing \\r\\n
-        # (ie CRLF escaped) for some reason. Strip that off.
-        agent_pub = int(resp['message'].replace('\\r\\n', ''))
-        dh.compute_shared(agent_pub)
-
+        dh = self._exchange_key_with_agent()
         # Some old versions of Linux and Windows agent expect trailing \n
         # on password to work correctly.
         enc_pass = dh.encrypt(new_pass + '\n')
 
-        # Send the encrypted password
         args = {'enc_pass': enc_pass}
-        resp = _call_agent(
-            self.session, self.instance, self.vm_ref, 'password', args)
-
-        # Successful return code from password is '0'
-        if resp['returncode'] != '0':
-            msg = _('Failed to update password: %(resp)r') % locals()
-            LOG.error(msg, instance=self.instance)
-            raise NotImplementedError(msg)
-
-        sshkey = self.instance.get('key_data')
-        if sshkey:
-            ctxt = context.get_admin_context()
-            enc = crypto.ssh_encrypt_text(sshkey, new_pass)
-            sys_meta = utils.metadata_to_dict(self.instance['system_metadata'])
-            sys_meta.update(password.convert_password(ctxt,
-                                                      base64.b64encode(enc)))
-            self.virtapi.instance_update(ctxt, self.instance['uuid'],
-                                         {'system_metadata': sys_meta})
-
-        return resp['message']
+        self._call_agent('password', args)
+        self._save_instance_password_if_sshkey_present(new_pass)
 
     def inject_ssh_key(self):
         sshkey = self.instance.get('key_data')
         if not sshkey:
             return
+
         if self.instance['os_type'] == 'windows':
-            LOG.warning(_("Skipping setting of ssh key for Windows."),
-                        instance=self.instance)
+            LOG.debug(_("Skipping setting of ssh key for Windows."),
+                      instance=self.instance)
             return
+
+        if self._skip_ssh_key_inject():
+            LOG.debug(_("Skipping agent ssh key injection for this image."),
+                      instance=self.instance)
+            return
+
         sshkey = str(sshkey)
         keyfile = '/root/.ssh/authorized_keys'
         key_data = ''.join([
@@ -243,6 +311,14 @@ class XenAPIBasedAgent(object):
         ])
         return self.inject_file(keyfile, key_data)
 
+    def inject_files(self, injected_files):
+        if self._skip_inject_files_at_boot():
+            LOG.debug(_("Skipping agent file injection for this image."),
+                      instance=self.instance)
+        else:
+            for path, contents in injected_files:
+                self.inject_file(path, contents)
+
     def inject_file(self, path, contents):
         LOG.debug(_('Injecting file path: %r'), path, instance=self.instance)
 
@@ -251,36 +327,32 @@ class XenAPIBasedAgent(object):
         b64_contents = base64.b64encode(contents)
 
         args = {'b64_path': b64_path, 'b64_contents': b64_contents}
-
-        # If the agent doesn't support file injection, a NotImplementedError
-        # will be raised with the appropriate message.
-        resp = _call_agent(
-            self.session, self.instance, self.vm_ref, 'inject_file', args)
-        if resp['returncode'] != '0':
-            LOG.error(_('Failed to inject file: %(resp)r'), locals(),
-                      instance=self.instance)
-            return None
-
-        return resp['message']
+        return self._call_agent('inject_file', args)
 
     def resetnetwork(self):
         LOG.debug(_('Resetting network'), instance=self.instance)
 
-        resp = _call_agent(
-            self.session, self.instance, self.vm_ref, 'resetnetwork',
-            timeout=CONF.agent_resetnetwork_timeout)
-        if resp['returncode'] != '0':
-            LOG.error(_('Failed to reset network: %(resp)r'), locals(),
-                      instance=self.instance)
-            return None
+        #NOTE(johngarbutt) old FreeBSD and Gentoo agents return 500 on success
+        return self._call_agent('resetnetwork',
+                                timeout=CONF.agent_resetnetwork_timeout,
+                                success_codes=['0', '500'])
 
-        return resp['message']
+    def _skip_ssh_key_inject(self):
+        return self._get_sys_meta_key(SKIP_SSH_SM_KEY)
+
+    def _skip_inject_files_at_boot(self):
+        return self._get_sys_meta_key(SKIP_FILES_AT_BOOT_SM_KEY)
+
+    def _get_sys_meta_key(self, key):
+        sys_meta = utils.instance_sys_meta(self.instance)
+        raw_value = sys_meta.get(key, 'False')
+        return strutils.bool_from_string(raw_value, strict=False)
 
 
 def find_guest_agent(base_dir):
     """
     tries to locate a guest agent at the path
-    specificed by agent_rel_path
+    specified by agent_rel_path
     """
     if CONF.xenapi_disable_agent:
         return False
@@ -310,6 +382,21 @@ def find_guest_agent(base_dir):
     return False
 
 
+def should_use_agent(instance):
+    sys_meta = utils.instance_sys_meta(instance)
+    if USE_AGENT_SM_KEY not in sys_meta:
+        return CONF.xenapi_use_agent_default
+    else:
+        use_agent_raw = sys_meta[USE_AGENT_SM_KEY]
+        try:
+            return strutils.bool_from_string(use_agent_raw, strict=True)
+        except ValueError:
+            LOG.warn(_("Invalid 'agent_present' value. "
+                       "Falling back to the default."),
+                       instance=instance)
+            return CONF.xenapi_use_agent_default
+
+
 class SimpleDH(object):
     """
     This class wraps all the functionality needed to implement
@@ -332,23 +419,12 @@ class SimpleDH(object):
         return self._private
 
     def get_public(self):
-        self._public = self.mod_exp(self._base, self._private, self._prime)
+        self._public = pow(self._base, self._private, self._prime)
         return self._public
 
     def compute_shared(self, other):
-        self._shared = self.mod_exp(other, self._private, self._prime)
+        self._shared = pow(other, self._private, self._prime)
         return self._shared
-
-    @staticmethod
-    def mod_exp(num, exp, mod):
-        """Efficient implementation of (num ** exp) % mod."""
-        result = 1
-        while exp > 0:
-            if (exp & 1) == 1:
-                result = (result * num) % mod
-            exp = exp >> 1
-            num = (num * num) % mod
-        return result
 
     def _run_ssl(self, text, decrypt=False):
         cmd = ['openssl', 'aes-128-cbc', '-A', '-a', '-pass',

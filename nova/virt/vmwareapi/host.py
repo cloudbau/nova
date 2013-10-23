@@ -19,6 +19,7 @@ Management class for host-related functions (start, reboot, etc).
 """
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.vmwareapi import vim_util
 from nova.virt.vmwareapi import vm_util
@@ -35,9 +36,8 @@ class Host(object):
 
     def host_power_action(self, host, action):
         """Reboots or shuts down the host."""
-        host_mor = self._session._call_method(vim_util, "get_objects",
-                                              "HostSystem")[0].obj
-        LOG.debug(_("%(action)s %(host)s") % locals())
+        host_mor = vm_util.get_host_ref(self._session)
+        LOG.debug(_("%(action)s %(host)s"), {'action': action, 'host': host})
         if action == "reboot":
             host_task = self._session._call_method(
                                     self._session._get_vim(),
@@ -57,10 +57,11 @@ class Host(object):
 
     def host_maintenance_mode(self, host, mode):
         """Start/Stop host maintenance window. On start, it triggers
-        guest VMs evacuation."""
-        host_mor = self._session._call_method(vim_util, "get_objects",
-                                              "HostSystem")[0].obj
-        LOG.debug(_("Set maintenance mod on %(host)s to %(mode)s") % locals())
+        guest VMs evacuation.
+        """
+        host_mor = vm_util.get_host_ref(self._session)
+        LOG.debug(_("Set maintenance mod on %(host)s to %(mode)s"),
+                  {'host': host, 'mode': mode})
         if mode:
             host_task = self._session._call_method(
                                     self._session._get_vim(),
@@ -94,15 +95,14 @@ class HostState(object):
         """Return the current state of the host. If 'refresh' is
         True, run the update first.
         """
-        if refresh:
+        if refresh or not self._stats:
             self.update_status()
         return self._stats
 
     def update_status(self):
         """Update the current state of the host.
         """
-        host_mor = self._session._call_method(vim_util, "get_objects",
-                                              "HostSystem")[0].obj
+        host_mor = vm_util.get_host_ref(self._session)
         summary = self._session._call_method(vim_util,
                                              "get_dynamic_property",
                                              host_mor,
@@ -126,8 +126,8 @@ class HostState(object):
                               "sockets": summary.hardware.numCpuPkgs,
                               "threads": summary.hardware.numCpuThreads}
                 }
-        data["disk_total"] = ds[2] / (1024 * 1024)
-        data["disk_available"] = ds[3] / (1024 * 1024)
+        data["disk_total"] = ds[2] / (1024 * 1024 * 1024)
+        data["disk_available"] = ds[3] / (1024 * 1024 * 1024)
         data["disk_used"] = data["disk_total"] - data["disk_available"]
         data["host_memory_total"] = summary.hardware.memorySize / (1024 * 1024)
         data["host_memory_free"] = data["host_memory_total"] - \
@@ -158,49 +158,35 @@ class VCState(object):
         """Return the current state of the host. If 'refresh' is
         True, run the update first.
         """
-        if refresh:
+        if refresh or not self._stats:
             self.update_status()
         return self._stats
 
     def update_status(self):
-        """Update the current state of the host.
-        """
-        host_mor = vm_util.get_host_ref(self._session, self._cluster)
-        if host_mor is None:
-            return
-
-        summary = self._session._call_method(vim_util,
-                                             "get_dynamic_property",
-                                             host_mor,
-                                             "HostSystem",
-                                             "summary")
-
-        if summary is None:
-            return
-
+        """Update the current state of the cluster."""
+        # Get the datastore in the cluster
         try:
             ds = vm_util.get_datastore_ref_and_name(self._session,
                                                     self._cluster)
         except exception.DatastoreNotFound:
             ds = (None, None, 0, 0)
 
+        # Get cpu, memory stats from the cluster
+        stats = vm_util.get_stats_from_cluster(self._session, self._cluster)
+        about_info = self._session._call_method(vim_util, "get_about_info")
         data = {}
-        data["vcpus"] = summary.hardware.numCpuThreads
-        data["cpu_info"] =\
-        {"vendor": summary.hardware.vendor,
-         "model": summary.hardware.cpuModel,
-         "topology": {"cores": summary.hardware.numCpuCores,
-                      "sockets": summary.hardware.numCpuPkgs,
-                      "threads": summary.hardware.numCpuThreads}
-        }
-        data["disk_total"] = ds[2] / (1024 * 1024)
-        data["disk_available"] = ds[3] / (1024 * 1024)
+        data["vcpus"] = stats['cpu']['vcpus']
+        data["cpu_info"] = {"vendor": stats['cpu']['vendor'],
+                            "model": stats['cpu']['model'],
+                            "topology": {"cores": stats['cpu']['cores'],
+                                         "threads": stats['cpu']['vcpus']}}
+        data["disk_total"] = ds[2] / (1024 * 1024 * 1024)
+        data["disk_available"] = ds[3] / (1024 * 1024 * 1024)
         data["disk_used"] = data["disk_total"] - data["disk_available"]
-        data["host_memory_total"] = summary.hardware.memorySize / (1024 * 1024)
-        data["host_memory_free"] = data["host_memory_total"] -\
-                                   summary.quickStats.overallMemoryUsage
-        data["hypervisor_type"] = summary.config.product.name
-        data["hypervisor_version"] = summary.config.product.version
+        data["host_memory_total"] = stats['mem']['total']
+        data["host_memory_free"] = stats['mem']['free']
+        data["hypervisor_type"] = about_info.name
+        data["hypervisor_version"] = about_info.version
         data["hypervisor_hostname"] = self._host_name
         data["supported_instances"] = [('i686', 'vmware', 'hvm'),
                                        ('x86_64', 'vmware', 'hvm')]

@@ -21,16 +21,17 @@
 
 import calendar
 import inspect
-import netaddr
 import os
 import re
 
+import netaddr
 from oslo.config import cfg
 
 from nova import db
 from nova import exception
 from nova.openstack.common import excutils
 from nova.openstack.common import fileutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
@@ -53,7 +54,6 @@ linux_net_opts = [
                default='eth0',
                help='Interface for public IP addresses'),
     cfg.StrOpt('network_device_mtu',
-               default=None,
                help='MTU setting for vlan'),
     cfg.StrOpt('dhcpbridge',
                default=paths.bindir_def('nova-dhcpbridge'),
@@ -112,11 +112,11 @@ linux_net_opts = [
                help='the port for the metadata api port'),
     cfg.StrOpt('iptables_top_regex',
                default='',
-               help='Regular expression to match iptables rule that should'
+               help='Regular expression to match iptables rule that should '
                     'always be on the top.'),
     cfg.StrOpt('iptables_bottom_regex',
                default='',
-               help='Regular expression to match iptables rule that should'
+               help='Regular expression to match iptables rule that should '
                     'always be on the bottom.'),
     cfg.StrOpt('iptables_drop_action',
                default='DROP',
@@ -183,6 +183,7 @@ class IptablesTable(object):
         self.chains = set()
         self.unwrapped_chains = set()
         self.remove_chains = set()
+        self.dirty = True
 
     def add_chain(self, name, wrap=True):
         """Adds a named chain to the table.
@@ -200,6 +201,7 @@ class IptablesTable(object):
             self.chains.add(name)
         else:
             self.unwrapped_chains.add(name)
+        self.dirty = True
 
     def remove_chain(self, name, wrap=True):
         """Remove named chain.
@@ -219,6 +221,7 @@ class IptablesTable(object):
             LOG.warn(_('Attempted to remove chain %s which does not exist'),
                      name)
             return
+        self.dirty = True
 
         # non-wrapped chains and rules need to be dealt with specially,
         # so we keep a list of them to be iterated over in apply()
@@ -256,7 +259,12 @@ class IptablesTable(object):
         if '$' in rule:
             rule = ' '.join(map(self._wrap_target_chain, rule.split(' ')))
 
-        self.rules.append(IptablesRule(chain, rule, wrap, top))
+        rule_obj = IptablesRule(chain, rule, wrap, top)
+        if rule_obj in self.rules:
+            LOG.debug(_("Skipping duplicate iptables rule addition"))
+        else:
+            self.rules.append(IptablesRule(chain, rule, wrap, top))
+            self.dirty = True
 
     def _wrap_target_chain(self, s):
         if s.startswith('$'):
@@ -275,6 +283,7 @@ class IptablesTable(object):
             self.rules.remove(IptablesRule(chain, rule, wrap, top))
             if not wrap:
                 self.remove_rules.append(IptablesRule(chain, rule, wrap, top))
+            self.dirty = True
         except ValueError:
             LOG.warn(_('Tried to remove rule that was not there:'
                        ' %(chain)r %(rule)r %(wrap)r %(top)r'),
@@ -287,12 +296,17 @@ class IptablesTable(object):
             regex = re.compile(regex)
         num_rules = len(self.rules)
         self.rules = filter(lambda r: not regex.match(str(r)), self.rules)
-        return num_rules - len(self.rules)
+        removed = num_rules - len(self.rules)
+        if removed > 0:
+            self.dirty = True
+        return removed
 
     def empty_chain(self, chain, wrap=True):
         """Remove all rules from a chain."""
         chained_rules = [rule for rule in self.rules
                               if rule.chain == chain and rule.wrap == wrap]
+        if chained_rules:
+            self.dirty = True
         for rule in chained_rules:
             self.rules.remove(rule)
 
@@ -388,13 +402,25 @@ class IptablesManager(object):
 
     def defer_apply_off(self):
         self.iptables_apply_deferred = False
-        self._apply()
+        self.apply()
+
+    def dirty(self):
+        for table in self.ipv4.itervalues():
+            if table.dirty:
+                return True
+        if CONF.use_ipv6:
+            for table in self.ipv6.itervalues():
+                if table.dirty:
+                    return True
+        return False
 
     def apply(self):
         if self.iptables_apply_deferred:
             return
-
-        self._apply()
+        if self.dirty():
+            self._apply()
+        else:
+            LOG.debug(_("Skipping apply due to lack of new rules"))
 
     @utils.synchronized('iptables', external=True)
     def _apply(self):
@@ -418,6 +444,7 @@ class IptablesManager(object):
                 start, end = self._find_table(all_lines, table_name)
                 all_lines[start:end] = self._modify_rules(
                         all_lines[start:end], table, table_name)
+                table.dirty = False
             self.execute('%s-restore' % (cmd,), '-c', run_as_root=True,
                          process_input='\n'.join(all_lines),
                          attempts=5)
@@ -617,31 +644,30 @@ def metadata_forward():
 
 def metadata_accept():
     """Create the filter accept rule for metadata."""
-    iptables_manager.ipv4['filter'].add_rule('INPUT',
-                                             '-s 0.0.0.0/0 -d %s '
-                                             '-p tcp -m tcp --dport %s '
-                                             '-j ACCEPT' %
-                                             (CONF.metadata_host,
-                                              CONF.metadata_port))
+    rule = '-s 0.0.0.0/0 -p tcp -m tcp --dport %s' % CONF.metadata_port
+    if CONF.metadata_host != '127.0.0.1':
+        rule += ' -d %s -j ACCEPT' % CONF.metadata_host
+    else:
+        rule += ' -m addrtype --dst-type LOCAL -j ACCEPT'
+    iptables_manager.ipv4['filter'].add_rule('INPUT', rule)
     iptables_manager.apply()
 
 
 def add_snat_rule(ip_range):
     if CONF.routing_source_ip:
-        rule = '-s %s -j SNAT --to-source %s' % (ip_range,
-                                                 CONF.routing_source_ip)
-        if CONF.public_interface:
-            rule += ' -o %s' % CONF.public_interface
-        iptables_manager.ipv4['nat'].add_rule('snat', rule)
+        for dest_range in CONF.force_snat_range or ['0.0.0.0/0']:
+            rule = ('-s %s -d %s -j SNAT --to-source %s'
+                    % (ip_range, dest_range, CONF.routing_source_ip))
+            if CONF.public_interface:
+                rule += ' -o %s' % CONF.public_interface
+            iptables_manager.ipv4['nat'].add_rule('snat', rule)
         iptables_manager.apply()
 
 
-def init_host(ip_range=None):
+def init_host(ip_range):
     """Basic networking setup goes here."""
     # NOTE(devcamcar): Cloud public SNAT entries and the default
     # SNAT rule for outbound traffic.
-    if not ip_range:
-        ip_range = CONF.fixed_range
 
     add_snat_rule(ip_range)
 
@@ -778,6 +804,7 @@ def clean_conntrack(fixed_ip):
         LOG.exception(_('Error deleting conntrack entries for %s'), fixed_ip)
 
 
+@utils.synchronized('lock_gateway', external=True)
 def initialize_gateway_device(dev, network_ref):
     if not network_ref:
         return
@@ -896,6 +923,8 @@ def _remove_dnsmasq_accept_rules(dev):
     iptables_manager.apply()
 
 
+# NOTE(russellb) Curious why this is needed?  Check out this explanation from
+# markmc: https://bugzilla.redhat.com/show_bug.cgi?id=910619#c6
 def _add_dhcp_mangle_rule(dev):
     if not os.path.exists('/dev/vhost-net'):
         return
@@ -997,13 +1026,13 @@ def restart_dhcp(context, dev, network_ref):
         #             are not in multi_host mode.
         optsfile = _dhcp_file(dev, 'opts')
         write_to_file(optsfile, get_dhcp_opts(context, network_ref))
-        os.chmod(optsfile, 0644)
+        os.chmod(optsfile, 0o644)
 
     if network_ref['multi_host']:
         _add_dhcp_mangle_rule(dev)
 
     # Make sure dnsmasq can actually read it (it setuid()s to "nobody")
-    os.chmod(conffile, 0644)
+    os.chmod(conffile, 0o644)
 
     pid = _dnsmasq_pid_for(dev)
 
@@ -1089,7 +1118,7 @@ interface %s
     write_to_file(conffile, conf_str)
 
     # Make sure radvd can actually read it (it setuid()s to "nobody")
-    os.chmod(conffile, 0644)
+    os.chmod(conffile, 0o644)
 
     pid = _ra_pid_for(dev)
 
@@ -1257,6 +1286,18 @@ def delete_ovs_vif_port(bridge, dev):
     delete_net_dev(dev)
 
 
+def create_ivs_vif_port(dev, iface_id, mac, instance_id):
+    utils.execute('ivs-ctl', 'add-port',
+                   dev, run_as_root=True)
+
+
+def delete_ivs_vif_port(dev):
+    utils.execute('ivs-ctl', 'del-port', dev,
+                  run_as_root=True)
+    utils.execute('ip', 'link', 'delete', dev,
+                  run_as_root=True)
+
+
 def create_tap_dev(dev, mac_address=None):
     if not device_exists(dev):
         try:
@@ -1379,24 +1420,24 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
     def get_dev(self, network):
         return network['bridge']
 
-    @classmethod
-    def ensure_vlan_bridge(_self, vlan_num, bridge, bridge_interface,
-                                            net_attrs=None, mac_address=None):
+    @staticmethod
+    def ensure_vlan_bridge(vlan_num, bridge, bridge_interface,
+                           net_attrs=None, mac_address=None):
         """Create a vlan and bridge unless they already exist."""
         interface = LinuxBridgeInterfaceDriver.ensure_vlan(vlan_num,
                                                bridge_interface, mac_address)
         LinuxBridgeInterfaceDriver.ensure_bridge(bridge, interface, net_attrs)
         return interface
 
-    @classmethod
-    def remove_vlan_bridge(cls, vlan_num, bridge):
+    @staticmethod
+    def remove_vlan_bridge(vlan_num, bridge):
         """Delete a bridge and vlan."""
         LinuxBridgeInterfaceDriver.remove_bridge(bridge)
         LinuxBridgeInterfaceDriver.remove_vlan(vlan_num)
 
-    @classmethod
+    @staticmethod
     @utils.synchronized('lock_vlan', external=True)
-    def ensure_vlan(_self, vlan_num, bridge_interface, mac_address=None):
+    def ensure_vlan(vlan_num, bridge_interface, mac_address=None):
         """Create a vlan unless it already exists."""
         interface = 'vlan%s' % vlan_num
         if not device_exists(interface):
@@ -1419,16 +1460,16 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
                          check_exit_code=[0, 2, 254])
         return interface
 
-    @classmethod
+    @staticmethod
     @utils.synchronized('lock_vlan', external=True)
-    def remove_vlan(cls, vlan_num):
+    def remove_vlan(vlan_num):
         """Delete a vlan."""
         vlan_interface = 'vlan%s' % vlan_num
         delete_net_dev(vlan_interface)
 
-    @classmethod
+    @staticmethod
     @utils.synchronized('lock_bridge', external=True)
-    def ensure_bridge(_self, bridge, interface, net_attrs=None, gateway=True,
+    def ensure_bridge(bridge, interface, net_attrs=None, gateway=True,
                       filtering=True):
         """Create a bridge unless it already exists.
 
@@ -1459,8 +1500,10 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
 
         if interface:
             msg = _('Adding interface %(interface)s to bridge %(bridge)s')
-            LOG.debug(msg % locals())
+            LOG.debug(msg, {'interface': interface, 'bridge': bridge})
             out, err = _execute('brctl', 'addif', bridge, interface,
+                                check_exit_code=False, run_as_root=True)
+            out, err = _execute('ip', 'link', 'set', interface, 'up',
                                 check_exit_code=False, run_as_root=True)
 
             # NOTE(vish): This will break if there is already an ip on the
@@ -1511,9 +1554,9 @@ class LinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
                                      ('--out-interface %s -j %s'
                                       % (bridge, CONF.iptables_drop_action)))
 
-    @classmethod
+    @staticmethod
     @utils.synchronized('lock_bridge', external=True)
-    def remove_bridge(cls, bridge, gateway=True, filtering=True):
+    def remove_bridge(bridge, gateway=True, filtering=True):
         """Delete a bridge."""
         if not device_exists(bridge):
             return
@@ -1704,8 +1747,8 @@ class LinuxOVSInterfaceDriver(LinuxNetInterfaceDriver):
         return dev
 
 
-# plugs interfaces using Linux Bridge when using QuantumManager
-class QuantumLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
+# plugs interfaces using Linux Bridge when using NeutronManager
+class NeutronLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
 
     BRIDGE_NAME_PREFIX = 'brq'
     GATEWAY_INTERFACE_PREFIX = 'gw-'
@@ -1763,5 +1806,8 @@ class QuantumLinuxBridgeInterfaceDriver(LinuxNetInterfaceDriver):
     def get_bridge(self, network):
         bridge = self.BRIDGE_NAME_PREFIX + str(network['uuid'][0:11])
         return bridge
+
+# provide compatibility with existing configs
+QuantumLinuxBridgeInterfaceDriver = NeutronLinuxBridgeInterfaceDriver
 
 iptables_manager = IptablesManager()

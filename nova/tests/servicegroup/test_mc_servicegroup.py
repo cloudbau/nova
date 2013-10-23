@@ -15,7 +15,6 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import eventlet
 import fixtures
 
 from nova import context
@@ -73,14 +72,16 @@ class MemcachedServiceGroupTestCase(test.TestCase):
                                              time=self.down_time)
 
         self.assertTrue(self.servicegroup_api.service_is_up(service_ref))
-        eventlet.sleep(self.down_time + 1)
+        self.useFixture(test.TimeOverride())
+        timeutils.advance_time_seconds(self.down_time + 1)
+        self.servicegroup_api._driver._report_state(serv)
         service_ref = db.service_get_by_args(self._ctx,
                                              self._host,
                                              self._binary)
 
         self.assertTrue(self.servicegroup_api.service_is_up(service_ref))
         serv.stop()
-        eventlet.sleep(self.down_time + 1)
+        timeutils.advance_time_seconds(self.down_time + 1)
         service_ref = db.service_get_by_args(self._ctx,
                                              self._host,
                                              self._binary)
@@ -103,15 +104,9 @@ class MemcachedServiceGroupTestCase(test.TestCase):
             ServiceFixture(host3, self._binary, self._topic)).serv
         serv3.start()
 
-        service_ref1 = db.service_get_by_args(self._ctx,
-                                              host1,
-                                              self._binary)
-        service_ref2 = db.service_get_by_args(self._ctx,
-                                              host2,
-                                              self._binary)
-        service_ref3 = db.service_get_by_args(self._ctx,
-                                              host3,
-                                              self._binary)
+        db.service_get_by_args(self._ctx, host1, self._binary)
+        db.service_get_by_args(self._ctx, host2, self._binary)
+        db.service_get_by_args(self._ctx, host3, self._binary)
 
         host1key = str("%s:%s" % (self._topic, host1))
         host2key = str("%s:%s" % (self._topic, host2))
@@ -128,12 +123,12 @@ class MemcachedServiceGroupTestCase(test.TestCase):
 
         services = self.servicegroup_api.get_all(self._topic)
 
-        self.assertTrue(host1 in services)
-        self.assertTrue(host2 in services)
-        self.assertFalse(host3 in services)
+        self.assertIn(host1, services)
+        self.assertIn(host2, services)
+        self.assertNotIn(host3, services)
 
         service_id = self.servicegroup_api.get_one(self._topic)
-        self.assertTrue(service_id in services)
+        self.assertIn(service_id, services)
 
     def test_service_is_up(self):
         serv = self.useFixture(
@@ -198,9 +193,7 @@ class MemcachedServiceGroupTestCase(test.TestCase):
         serv = self.useFixture(
             ServiceFixture(self._host, self._binary, self._topic)).serv
         serv.start()
-        service_ref = db.service_get_by_args(self._ctx,
-                                             self._host,
-                                             self._binary)
+        db.service_get_by_args(self._ctx, self._host, self._binary)
         self.servicegroup_api = servicegroup.API()
 
         # updating model_disconnected

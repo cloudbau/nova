@@ -12,7 +12,7 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License
+#    under the License.
 
 import webob
 
@@ -20,6 +20,8 @@ from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import compute
 from nova import exception
+from nova.objects import instance as instance_obj
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 
 
@@ -33,7 +35,9 @@ class ServerStartStopActionController(wsgi.Controller):
 
     def _get_instance(self, context, instance_uuid):
         try:
-            return self.compute_api.get(context, instance_uuid)
+            attrs = ['system_metadata', 'metadata']
+            return instance_obj.Instance.get_by_uuid(context, instance_uuid,
+                                                     expected_attrs=attrs)
         except exception.NotFound:
             msg = _("Instance not found")
             raise webob.exc.HTTPNotFound(explanation=msg)
@@ -46,7 +50,7 @@ class ServerStartStopActionController(wsgi.Controller):
         LOG.debug(_('start instance'), instance=instance)
         try:
             self.compute_api.start(context, instance)
-        except exception.InstanceNotReady as e:
+        except (exception.InstanceNotReady, exception.InstanceIsLocked) as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())
         return webob.Response(status_int=202)
 
@@ -58,7 +62,7 @@ class ServerStartStopActionController(wsgi.Controller):
         LOG.debug(_('stop instance'), instance=instance)
         try:
             self.compute_api.stop(context, instance)
-        except exception.InstanceNotReady as e:
+        except (exception.InstanceNotReady, exception.InstanceIsLocked) as e:
             raise webob.exc.HTTPConflict(explanation=e.format_message())
         return webob.Response(status_int=202)
 

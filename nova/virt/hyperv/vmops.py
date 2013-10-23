@@ -19,6 +19,7 @@
 """
 Management class for basic VM operations.
 """
+import functools
 import os
 
 from oslo.config import cfg
@@ -26,16 +27,16 @@ from oslo.config import cfg
 from nova.api.metadata import base as instance_metadata
 from nova import exception
 from nova.openstack.common import excutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
 from nova import utils
 from nova.virt import configdrive
 from nova.virt.hyperv import constants
-from nova.virt.hyperv import hostutils
 from nova.virt.hyperv import imagecache
-from nova.virt.hyperv import pathutils
-from nova.virt.hyperv import vhdutils
+from nova.virt.hyperv import utilsfactory
+from nova.virt.hyperv import vhdutilsv2
 from nova.virt.hyperv import vmutils
 from nova.virt.hyperv import volumeops
 
@@ -56,7 +57,21 @@ hyperv_opts = [
     cfg.BoolOpt('config_drive_cdrom',
                 default=False,
                 help='Attaches the Config Drive image as a cdrom drive '
-                     'instead of a disk drive')
+                     'instead of a disk drive'),
+    cfg.BoolOpt('enable_instance_metrics_collection',
+                default=False,
+                help='Enables metrics collections for an instance by using '
+                     'Hyper-V\'s metric APIs. Collected data can by retrieved '
+                     'by other apps and services, e.g.: Ceilometer. '
+                     'Requires Hyper-V / Windows Server 2012 and above'),
+    cfg.FloatOpt('dynamic_memory_ratio',
+                 default=1.0,
+                 help='Enables dynamic memory allocation (ballooning) when '
+                      'set to a value greater than 1. The value expresses '
+                      'the ratio between the total RAM assigned to an '
+                      'instance and its startup RAM amount. For example a '
+                      'ratio of 2.0 for an instance with 1024MB of RAM '
+                      'implies 512MB of RAM allocated at startup')
 ]
 
 CONF = cfg.CONF
@@ -65,19 +80,28 @@ CONF.import_opt('use_cow_images', 'nova.virt.driver')
 CONF.import_opt('network_api_class', 'nova.network')
 
 
+def check_admin_permissions(function):
+    @functools.wraps(function)
+    def wrapper(self, *args, **kwds):
+
+        # Make sure the windows account has the required admin permissions.
+        self._vmutils.check_admin_permissions()
+        return function(self, *args, **kwds)
+    return wrapper
+
+
 class VMOps(object):
     _vif_driver_class_map = {
-        'nova.network.quantumv2.api.API':
-        'nova.virt.hyperv.vif.HyperVQuantumVIFDriver',
+        'nova.network.neutronv2.api.API':
+        'nova.virt.hyperv.vif.HyperVNeutronVIFDriver',
         'nova.network.api.API':
         'nova.virt.hyperv.vif.HyperVNovaNetworkVIFDriver',
     }
 
     def __init__(self):
-        self._hostutils = hostutils.HostUtils()
-        self._vmutils = vmutils.VMUtils()
-        self._vhdutils = vhdutils.VHDUtils()
-        self._pathutils = pathutils.PathUtils()
+        self._vmutils = utilsfactory.get_vmutils()
+        self._vhdutils = utilsfactory.get_vhdutils()
+        self._pathutils = utilsfactory.get_pathutils()
         self._volumeops = volumeops.VolumeOps()
         self._imagecache = imagecache.ImageCache()
         self._vif_driver = None
@@ -101,7 +125,7 @@ class VMOps(object):
 
         instance_name = instance['name']
         if not self._vmutils.vm_exists(instance_name):
-            raise exception.InstanceNotFound(instance=instance)
+            raise exception.InstanceNotFound(instance_id=instance['uuid'])
 
         info = self._vmutils.get_vm_summary_info(instance_name)
 
@@ -114,30 +138,46 @@ class VMOps(object):
 
     def _create_root_vhd(self, context, instance):
         base_vhd_path = self._imagecache.get_cached_image(context, instance)
-        root_vhd_path = self._pathutils.get_vhd_path(instance['name'])
+        format_ext = base_vhd_path.split('.')[-1]
+        root_vhd_path = self._pathutils.get_root_vhd_path(instance['name'],
+                                                          format_ext)
 
         try:
             if CONF.use_cow_images:
                 LOG.debug(_("Creating differencing VHD. Parent: "
-                            "%(base_vhd_path)s, Target: %(root_vhd_path)s")
-                          % locals())
+                            "%(base_vhd_path)s, Target: %(root_vhd_path)s"),
+                          {'base_vhd_path': base_vhd_path,
+                           'root_vhd_path': root_vhd_path})
                 self._vhdutils.create_differencing_vhd(root_vhd_path,
                                                        base_vhd_path)
             else:
                 LOG.debug(_("Copying VHD image %(base_vhd_path)s to target: "
-                            "%(root_vhd_path)s") % locals())
+                            "%(root_vhd_path)s"),
+                          {'base_vhd_path': base_vhd_path,
+                           'root_vhd_path': root_vhd_path})
                 self._pathutils.copyfile(base_vhd_path, root_vhd_path)
 
                 base_vhd_info = self._vhdutils.get_vhd_info(base_vhd_path)
                 base_vhd_size = base_vhd_info['MaxInternalSize']
                 root_vhd_size = instance['root_gb'] * 1024 ** 3
 
-                if root_vhd_size < base_vhd_size:
+                # NOTE(lpetrut): Checking the namespace is needed as the
+                # following method is not yet implemented in vhdutilsv2.
+                if not isinstance(self._vhdutils, vhdutilsv2.VHDUtilsV2):
+                    root_vhd_internal_size = (
+                        self._vhdutils.get_internal_vhd_size_by_file_size(
+                            root_vhd_path, root_vhd_size))
+                else:
+                    root_vhd_internal_size = root_vhd_size
+
+                if root_vhd_internal_size < base_vhd_size:
                     raise vmutils.HyperVException(_("Cannot resize a VHD to a "
                                                     "smaller size"))
-                elif root_vhd_size > base_vhd_size:
+                elif root_vhd_internal_size > base_vhd_size:
                     LOG.debug(_("Resizing VHD %(root_vhd_path)s to new "
-                                "size %(root_vhd_size)s") % locals())
+                                "size %(root_vhd_size)s"),
+                              {'base_vhd_path': base_vhd_path,
+                               'root_vhd_path': root_vhd_path})
                     self._vhdutils.resize_vhd(root_vhd_path, root_vhd_size)
         except Exception:
             with excutils.save_and_reraise_exception():
@@ -146,6 +186,18 @@ class VMOps(object):
 
         return root_vhd_path
 
+    def create_ephemeral_vhd(self, instance):
+        eph_vhd_size = instance.get('ephemeral_gb', 0) * 1024 ** 3
+        if eph_vhd_size:
+            vhd_format = self._vhdutils.get_best_supported_vhd_format()
+
+            eph_vhd_path = self._pathutils.get_ephemeral_vhd_path(
+                instance['name'], vhd_format)
+            self._vhdutils.create_dynamic_vhd(eph_vhd_path, eph_vhd_size,
+                                              vhd_format)
+            return eph_vhd_path
+
+    @check_admin_permissions
     def spawn(self, context, instance, image_meta, injected_files,
               admin_password, network_info, block_device_info=None):
         """Create a new VM and start it."""
@@ -163,9 +215,11 @@ class VMOps(object):
         else:
             root_vhd_path = self._create_root_vhd(context, instance)
 
+        eph_vhd_path = self.create_ephemeral_vhd(instance)
+
         try:
             self.create_instance(instance, network_info, block_device_info,
-                                 root_vhd_path)
+                                 root_vhd_path, eph_vhd_path)
 
             if configdrive.required_by(instance):
                 self._create_config_drive(instance, injected_files,
@@ -177,20 +231,30 @@ class VMOps(object):
             self.destroy(instance)
             raise vmutils.HyperVException(_('Spawn instance failed'))
 
-    def create_instance(self, instance, network_info,
-                        block_device_info, root_vhd_path):
+    def create_instance(self, instance, network_info, block_device_info,
+                        root_vhd_path, eph_vhd_path):
         instance_name = instance['name']
 
         self._vmutils.create_vm(instance_name,
                                 instance['memory_mb'],
                                 instance['vcpus'],
-                                CONF.hyperv.limit_cpu_features)
+                                CONF.hyperv.limit_cpu_features,
+                                CONF.hyperv.dynamic_memory_ratio)
 
+        ctrl_disk_addr = 0
         if root_vhd_path:
             self._vmutils.attach_ide_drive(instance_name,
                                            root_vhd_path,
                                            0,
+                                           ctrl_disk_addr,
+                                           constants.IDE_DISK)
+            ctrl_disk_addr += 1
+
+        if eph_vhd_path:
+            self._vmutils.attach_ide_drive(instance_name,
+                                           eph_vhd_path,
                                            0,
+                                           ctrl_disk_addr,
                                            constants.IDE_DISK)
 
         self._vmutils.create_scsi_controller(instance_name)
@@ -205,6 +269,9 @@ class VMOps(object):
                                      vif['id'],
                                      vif['address'])
             self._vif_driver.plug(instance, vif)
+
+        if CONF.hyperv.enable_instance_metrics_collection:
+            self._vmutils.enable_vm_metrics_collection(instance_name)
 
     def _create_config_drive(self, instance, injected_files, admin_password):
         if CONF.config_drive_format != 'iso9660':
@@ -336,9 +403,11 @@ class VMOps(object):
         try:
             self._vmutils.set_vm_state(vm_name, req_state)
             LOG.debug(_("Successfully changed state of VM %(vm_name)s"
-                        " to: %(req_state)s") % locals())
+                        " to: %(req_state)s"),
+                      {'vm_name': vm_name, 'req_state': req_state})
         except Exception as ex:
             LOG.exception(ex)
-            msg = _("Failed to change vm state of %(vm_name)s"
-                    " to %(req_state)s") % locals()
+            msg = (_("Failed to change vm state of %(vm_name)s"
+                     " to %(req_state)s") %
+                   {'vm_name': vm_name, 'req_state': req_state})
             raise vmutils.HyperVException(msg)

@@ -2,6 +2,7 @@
 
 # Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
+# Copyright 2013 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -17,6 +18,7 @@
 
 """Tests For miscellaneous util methods used with compute."""
 
+import copy
 import string
 
 from oslo.config import cfg
@@ -28,13 +30,18 @@ from nova import db
 from nova import exception
 from nova.image import glance
 from nova.network import api as network_api
+from nova import notifier as notify
+from nova.objects import instance as instance_obj
 from nova.openstack.common import importutils
-from nova.openstack.common.notifier import api as notifier_api
-from nova.openstack.common.notifier import test_notifier
+from nova.openstack.common import jsonutils
 from nova import test
+from nova.tests import fake_instance
 from nova.tests import fake_instance_actions
 from nova.tests import fake_network
+from nova.tests import fake_notifier
 import nova.tests.image.fake
+from nova.tests import matchers
+from nova.virt import driver
 
 CONF = cfg.CONF
 CONF.import_opt('compute_manager', 'nova.service')
@@ -185,7 +192,7 @@ class ComputeValidateDeviceTestCase(test.TestCase):
                 'ephemeral_gb': 10,
                 'swap': 0,
                 })
-        self.stubs.Set(flavors, 'get_instance_type',
+        self.stubs.Set(flavors, 'get_flavor',
                        lambda instance_type_id, ctxt=None: self.instance_type)
         device = self._validate_device()
         self.assertEqual(device, '/dev/xvdc')
@@ -195,7 +202,7 @@ class ComputeValidateDeviceTestCase(test.TestCase):
                 'ephemeral_gb': 0,
                 'swap': 10,
                 })
-        self.stubs.Set(flavors, 'get_instance_type',
+        self.stubs.Set(flavors, 'get_flavor',
                        lambda instance_type_id, ctxt=None: self.instance_type)
         device = self._validate_device()
         self.assertEqual(device, '/dev/xvdb')
@@ -205,7 +212,7 @@ class ComputeValidateDeviceTestCase(test.TestCase):
                 'ephemeral_gb': 10,
                 'swap': 10,
                 })
-        self.stubs.Set(flavors, 'get_instance_type',
+        self.stubs.Set(flavors, 'get_flavor',
                        lambda instance_type_id, ctxt=None: self.instance_type)
         device = self._validate_device()
         self.assertEqual(device, '/dev/xvdd')
@@ -215,7 +222,7 @@ class ComputeValidateDeviceTestCase(test.TestCase):
                 'ephemeral_gb': 0,
                 'swap': 10,
                 })
-        self.stubs.Set(flavors, 'get_instance_type',
+        self.stubs.Set(flavors, 'get_flavor',
                        lambda instance_type_id, ctxt=None: self.instance_type)
         device = self._validate_device()
         self.assertEqual(device, '/dev/xvdb')
@@ -224,29 +231,165 @@ class ComputeValidateDeviceTestCase(test.TestCase):
         self.assertEqual(device, '/dev/xvdd')
 
 
+class DefaultDeviceNamesForInstanceTestCase(test.TestCase):
+
+    def setUp(self):
+        super(DefaultDeviceNamesForInstanceTestCase, self).setUp()
+        self.ephemerals = [
+                {'id': 1, 'instance_uuid': 'fake-instance',
+                 'device_name': '/dev/vdb',
+                 'source_type': 'blank',
+                 'destination_type': 'local',
+                 'delete_on_termination': True,
+                 'guest_format': None,
+                 'boot_index': -1}]
+
+        self.swap = [
+                {'id': 2, 'instance_uuid': 'fake-instance',
+                 'device_name': '/dev/vdc',
+                 'source_type': 'blank',
+                 'destination_type': 'local',
+                 'delete_on_termination': True,
+                 'guest_format': 'swap',
+                 'boot_index': -1}]
+
+        self.block_device_mapping = [
+                {'id': 3, 'instance_uuid': 'fake-instance',
+                 'device_name': '/dev/vda',
+                 'source_type': 'volume',
+                 'destination_type': 'volume',
+                 'volume_id': 'fake-volume-id-1',
+                 'boot_index': 0},
+                {'id': 4, 'instance_uuid': 'fake-instance',
+                 'device_name': '/dev/vdd',
+                 'source_type': 'snapshot',
+                 'destination_type': 'volume',
+                 'snapshot_id': 'fake-snapshot-id-1',
+                 'boot_index': -1}]
+        self.instance_type = {'swap': 4}
+        self.instance = {'uuid': 'fake_instance', 'ephemeral_gb': 2}
+        self.is_libvirt = False
+        self.root_device_name = '/dev/vda'
+        self.update_called = False
+
+        def fake_extract_flavor(instance):
+            return self.instance_type
+
+        def fake_driver_matches(driver_string):
+            if driver_string == 'libvirt.LibvirtDriver':
+                return self.is_libvirt
+            return False
+
+        self.stubs.Set(flavors, 'extract_flavor', fake_extract_flavor)
+        self.stubs.Set(driver, 'compute_driver_matches', fake_driver_matches)
+
+    def _test_default_device_names(self, update_function, *block_device_lists):
+        compute_utils.default_device_names_for_instance(self.instance,
+                                                        self.root_device_name,
+                                                        update_function,
+                                                        *block_device_lists)
+
+    def test_only_block_device_mapping(self):
+        # Test no-op
+        original_bdm = copy.deepcopy(self.block_device_mapping)
+        self._test_default_device_names(None, [], [],
+                                        self.block_device_mapping)
+        self.assertThat(original_bdm,
+                        matchers.DictListMatches(self.block_device_mapping))
+
+        # Asser it defaults the missing one as expected
+        self.block_device_mapping[1]['device_name'] = None
+        self._test_default_device_names(None, [], [],
+                                        self.block_device_mapping)
+        self.assertEquals(self.block_device_mapping[1]['device_name'],
+                          '/dev/vdb')
+
+    def test_with_ephemerals(self):
+        # Test ephemeral gets assigned
+        self.ephemerals[0]['device_name'] = None
+        self._test_default_device_names(None, self.ephemerals, [],
+                                        self.block_device_mapping)
+        self.assertEquals(self.ephemerals[0]['device_name'], '/dev/vdb')
+
+        self.block_device_mapping[1]['device_name'] = None
+        self._test_default_device_names(None, self.ephemerals, [],
+                                        self.block_device_mapping)
+        self.assertEquals(self.block_device_mapping[1]['device_name'],
+                          '/dev/vdc')
+
+    def test_with_swap(self):
+        # Test swap only
+        self.swap[0]['device_name'] = None
+        self._test_default_device_names(None, [], self.swap, [])
+        self.assertEquals(self.swap[0]['device_name'], '/dev/vdb')
+
+        # Test swap and block_device_mapping
+        self.swap[0]['device_name'] = None
+        self.block_device_mapping[1]['device_name'] = None
+        self._test_default_device_names(None, [], self.swap,
+                                        self.block_device_mapping)
+        self.assertEquals(self.swap[0]['device_name'], '/dev/vdb')
+        self.assertEquals(self.block_device_mapping[1]['device_name'],
+                          '/dev/vdc')
+
+    def test_all_together(self):
+        # Test swap missing
+        self.swap[0]['device_name'] = None
+        self._test_default_device_names(None, self.ephemerals,
+                                        self.swap, self.block_device_mapping)
+        self.assertEquals(self.swap[0]['device_name'], '/dev/vdc')
+
+        # Test swap and eph missing
+        self.swap[0]['device_name'] = None
+        self.ephemerals[0]['device_name'] = None
+        self._test_default_device_names(None, self.ephemerals,
+                                        self.swap, self.block_device_mapping)
+        self.assertEquals(self.ephemerals[0]['device_name'], '/dev/vdb')
+        self.assertEquals(self.swap[0]['device_name'], '/dev/vdc')
+
+        # Test all missing
+        self.swap[0]['device_name'] = None
+        self.ephemerals[0]['device_name'] = None
+        self.block_device_mapping[1]['device_name'] = None
+        self._test_default_device_names(None, self.ephemerals,
+                                        self.swap, self.block_device_mapping)
+        self.assertEquals(self.ephemerals[0]['device_name'], '/dev/vdb')
+        self.assertEquals(self.swap[0]['device_name'], '/dev/vdc')
+        self.assertEquals(self.block_device_mapping[1]['device_name'],
+                          '/dev/vdd')
+
+    def test_update_fn_gets_called(self):
+        def _update(bdm):
+            self.update_called = True
+
+        self.block_device_mapping[1]['device_name'] = None
+        compute_utils.default_device_names_for_instance(
+            self.instance, self.root_device_name, _update, [], [],
+            self.block_device_mapping)
+        self.assertTrue(self.update_called)
+
+
 class UsageInfoTestCase(test.TestCase):
 
     def setUp(self):
         def fake_get_nw_info(cls, ctxt, instance):
             self.assertTrue(ctxt.is_admin)
-            return fake_network.fake_get_instance_nw_info(self.stubs, 1, 1,
-                                                          spectacular=True)
+            return fake_network.fake_get_instance_nw_info(self.stubs, 1, 1)
 
         super(UsageInfoTestCase, self).setUp()
         self.stubs.Set(network_api.API, 'get_instance_nw_info',
                        fake_get_nw_info)
 
-        notifier_api._reset_drivers()
-        self.addCleanup(notifier_api._reset_drivers)
+        fake_notifier.stub_notifier(self.stubs)
+        self.addCleanup(fake_notifier.reset)
+
         self.flags(use_local=True, group='conductor')
         self.flags(compute_driver='nova.virt.fake.FakeDriver',
-                   notification_driver=[test_notifier.__name__],
                    network_manager='nova.network.manager.FlatManager')
         self.compute = importutils.import_object(CONF.compute_manager)
         self.user_id = 'fake'
         self.project_id = 'fake'
         self.context = context.RequestContext(self.user_id, self.project_id)
-        test_notifier.NOTIFICATIONS = []
 
         def fake_show(meh, context, id):
             return {'id': 1, 'properties': {'kernel_id': 1, 'ramdisk_id': 1}}
@@ -258,12 +401,11 @@ class UsageInfoTestCase(test.TestCase):
 
     def _create_instance(self, params={}):
         """Create a test instance."""
-        instance_type = flavors.get_instance_type_by_name('m1.tiny')
-        sys_meta = flavors.save_instance_type_info({}, instance_type)
+        instance_type = flavors.get_flavor_by_name('m1.tiny')
+        sys_meta = flavors.save_flavor_info({}, instance_type)
         inst = {}
         inst['image_ref'] = 1
         inst['reservation_id'] = 'r-fakeres'
-        inst['launch_time'] = '10'
         inst['user_id'] = self.user_id
         inst['project_id'] = self.project_id
         inst['instance_type_id'] = instance_type['id']
@@ -285,18 +427,21 @@ class UsageInfoTestCase(test.TestCase):
         db.instance_system_metadata_update(self.context, instance['uuid'],
                 sys_metadata, False)
         instance = db.instance_get(self.context, instance_id)
-        compute_utils.notify_usage_exists(self.context, instance)
-        self.assertEquals(len(test_notifier.NOTIFICATIONS), 1)
-        msg = test_notifier.NOTIFICATIONS[0]
-        self.assertEquals(msg['priority'], 'INFO')
-        self.assertEquals(msg['event_type'], 'compute.instance.exists')
-        payload = msg['payload']
+        compute_utils.notify_usage_exists(
+            notify.get_notifier('compute'), self.context, instance)
+        self.assertEquals(len(fake_notifier.NOTIFICATIONS), 1)
+        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'compute.instance.exists')
+        payload = msg.payload
         self.assertEquals(payload['tenant_id'], self.project_id)
         self.assertEquals(payload['user_id'], self.user_id)
         self.assertEquals(payload['instance_id'], instance['uuid'])
         self.assertEquals(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_instance_type_by_name('m1.tiny')['id']
+        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
         self.assertEquals(str(payload['instance_type_id']), str(type_id))
+        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        self.assertEquals(str(payload['instance_flavor_id']), str(flavor_id))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description',
                      'bandwidth', 'audit_period_beginning',
@@ -307,11 +452,11 @@ class UsageInfoTestCase(test.TestCase):
                 {'md_key1': 'val1', 'md_key2': 'val2'})
         image_ref_url = "%s/images/1" % glance.generate_glance_url()
         self.assertEquals(payload['image_ref_url'], image_ref_url)
-        self.compute.terminate_instance(self.context, instance)
+        self.compute.terminate_instance(self.context,
+                                        jsonutils.to_primitive(instance))
 
-    def test_notify_usage_exists_fail_on_deleted_instance(self):
-        # notify_usage_exists should not work for a deleted VM. A
-        # notification should be done before the instance is deleted in the db.
+    def test_notify_usage_exists_deleted_instance(self):
+        # Ensure 'exists' notification generates appropriate usage data.
         instance_id = self._create_instance()
         instance = db.instance_get(self.context, instance_id)
         # Set some system metadata
@@ -320,28 +465,55 @@ class UsageInfoTestCase(test.TestCase):
                         'other_data': 'meow'}
         db.instance_system_metadata_update(self.context, instance['uuid'],
                 sys_metadata, False)
-        self.compute.terminate_instance(self.context, instance)
+        self.compute.terminate_instance(self.context,
+                                        jsonutils.to_primitive(instance))
         instance = db.instance_get(self.context.elevated(read_deleted='yes'),
                                    instance_id)
-        self.assertRaises(KeyError, compute_utils.notify_usage_exists,
-                self.context, instance)
+        compute_utils.notify_usage_exists(
+            notify.get_notifier('compute'), self.context, instance)
+        msg = fake_notifier.NOTIFICATIONS[-1]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'compute.instance.exists')
+        payload = msg.payload
+        self.assertEquals(payload['tenant_id'], self.project_id)
+        self.assertEquals(payload['user_id'], self.user_id)
+        self.assertEquals(payload['instance_id'], instance['uuid'])
+        self.assertEquals(payload['instance_type'], 'm1.tiny')
+        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
+        self.assertEquals(str(payload['instance_type_id']), str(type_id))
+        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        self.assertEquals(str(payload['instance_flavor_id']), str(flavor_id))
+        for attr in ('display_name', 'created_at', 'launched_at',
+                     'state', 'state_description',
+                     'bandwidth', 'audit_period_beginning',
+                     'audit_period_ending', 'image_meta'):
+            self.assertTrue(attr in payload,
+                            msg="Key %s not in payload" % attr)
+        self.assertEquals(payload['image_meta'],
+                {'md_key1': 'val1', 'md_key2': 'val2'})
+        image_ref_url = "%s/images/1" % glance.generate_glance_url()
+        self.assertEquals(payload['image_ref_url'], image_ref_url)
 
     def test_notify_usage_exists_instance_not_found(self):
         # Ensure 'exists' notification generates appropriate usage data.
         instance_id = self._create_instance()
         instance = db.instance_get(self.context, instance_id)
-        self.compute.terminate_instance(self.context, instance)
-        compute_utils.notify_usage_exists(self.context, instance)
-        msg = test_notifier.NOTIFICATIONS[-1]
-        self.assertEquals(msg['priority'], 'INFO')
-        self.assertEquals(msg['event_type'], 'compute.instance.exists')
-        payload = msg['payload']
+        self.compute.terminate_instance(self.context,
+                                        jsonutils.to_primitive(instance))
+        compute_utils.notify_usage_exists(
+            notify.get_notifier('compute'), self.context, instance)
+        msg = fake_notifier.NOTIFICATIONS[-1]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'compute.instance.exists')
+        payload = msg.payload
         self.assertEquals(payload['tenant_id'], self.project_id)
         self.assertEquals(payload['user_id'], self.user_id)
         self.assertEquals(payload['instance_id'], instance['uuid'])
         self.assertEquals(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_instance_type_by_name('m1.tiny')['id']
+        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
         self.assertEquals(str(payload['instance_type_id']), str(type_id))
+        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        self.assertEquals(str(payload['instance_flavor_id']), str(flavor_id))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description',
                      'bandwidth', 'audit_period_beginning',
@@ -365,19 +537,23 @@ class UsageInfoTestCase(test.TestCase):
         # NOTE(russellb) Make sure our instance has the latest system_metadata
         # in it.
         instance = db.instance_get(self.context, instance_id)
-        compute_utils.notify_about_instance_usage(self.context, instance,
-        'create.start', extra_usage_info=extra_usage_info)
-        self.assertEquals(len(test_notifier.NOTIFICATIONS), 1)
-        msg = test_notifier.NOTIFICATIONS[0]
-        self.assertEquals(msg['priority'], 'INFO')
-        self.assertEquals(msg['event_type'], 'compute.instance.create.start')
-        payload = msg['payload']
+        compute_utils.notify_about_instance_usage(
+            notify.get_notifier('compute'),
+            self.context, instance, 'create.start',
+            extra_usage_info=extra_usage_info)
+        self.assertEquals(len(fake_notifier.NOTIFICATIONS), 1)
+        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'compute.instance.create.start')
+        payload = msg.payload
         self.assertEquals(payload['tenant_id'], self.project_id)
         self.assertEquals(payload['user_id'], self.user_id)
         self.assertEquals(payload['instance_id'], instance['uuid'])
         self.assertEquals(payload['instance_type'], 'm1.tiny')
-        type_id = flavors.get_instance_type_by_name('m1.tiny')['id']
+        type_id = flavors.get_flavor_by_name('m1.tiny')['id']
         self.assertEquals(str(payload['instance_type_id']), str(type_id))
+        flavor_id = flavors.get_flavor_by_name('m1.tiny')['flavorid']
+        self.assertEquals(str(payload['instance_flavor_id']), str(flavor_id))
         for attr in ('display_name', 'created_at', 'launched_at',
                      'state', 'state_description', 'image_meta'):
             self.assertTrue(attr in payload,
@@ -387,4 +563,137 @@ class UsageInfoTestCase(test.TestCase):
         self.assertEquals(payload['image_name'], 'fake_name')
         image_ref_url = "%s/images/1" % glance.generate_glance_url()
         self.assertEquals(payload['image_ref_url'], image_ref_url)
-        self.compute.terminate_instance(self.context, instance)
+        self.compute.terminate_instance(self.context,
+                                        jsonutils.to_primitive(instance))
+
+    def test_notify_about_aggregate_update_with_id(self):
+        # Set aggregate payload
+        aggregate_payload = {'aggregate_id': 1}
+        compute_utils.notify_about_aggregate_update(self.context,
+                                                    "create.end",
+                                                    aggregate_payload)
+        self.assertEquals(len(fake_notifier.NOTIFICATIONS), 1)
+        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'aggregate.create.end')
+        payload = msg.payload
+        self.assertEquals(payload['aggregate_id'], 1)
+
+    def test_notify_about_aggregate_update_with_name(self):
+        # Set aggregate payload
+        aggregate_payload = {'name': 'fakegroup'}
+        compute_utils.notify_about_aggregate_update(self.context,
+                                                    "create.start",
+                                                    aggregate_payload)
+        self.assertEquals(len(fake_notifier.NOTIFICATIONS), 1)
+        msg = fake_notifier.NOTIFICATIONS[0]
+        self.assertEquals(msg.priority, 'INFO')
+        self.assertEquals(msg.event_type, 'aggregate.create.start')
+        payload = msg.payload
+        self.assertEquals(payload['name'], 'fakegroup')
+
+    def test_notify_about_aggregate_update_without_name_id(self):
+        # Set empty aggregate payload
+        aggregate_payload = {}
+        compute_utils.notify_about_aggregate_update(self.context,
+                                                    "create.start",
+                                                    aggregate_payload)
+        self.assertEquals(len(fake_notifier.NOTIFICATIONS), 0)
+
+
+class ComputeGetImageMetadataTestCase(test.TestCase):
+    def setUp(self):
+        super(ComputeGetImageMetadataTestCase, self).setUp()
+        self.context = context.RequestContext('fake', 'fake')
+
+        self.image = {
+            "min_ram": 10,
+            "min_disk": 1,
+            "disk_format": "raw",
+            "container_format": "bare",
+            "properties": {},
+        }
+
+        self.image_service = nova.tests.image.fake._FakeImageService()
+        self.stubs.Set(self.image_service, 'show', self._fake_show)
+
+        self.ctx = context.RequestContext('fake', 'fake')
+
+        sys_meta = {
+            'image_min_ram': 10,
+            'image_min_disk': 1,
+            'image_disk_format': 'raw',
+            'image_container_format': 'bare',
+            'instance_type_id': 0,
+            'instance_type_name': 'm1.fake',
+            'instance_type_memory_mb': 10,
+            'instance_type_vcpus': 1,
+            'instance_type_root_gb': 1,
+            'instance_type_ephemeral_gb': 1,
+            'instance_type_flavorid': '0',
+            'instance_type_swap': 1,
+            'instance_type_rxtx_factor': 0.0,
+            'instance_type_vcpu_weight': None,
+        }
+
+        self.instance = fake_instance.fake_db_instance(
+            memory_mb=0, root_gb=0,
+            system_metadata=sys_meta)
+
+    @property
+    def instance_obj(self):
+        return instance_obj.Instance._from_db_object(
+            self.ctx, instance_obj.Instance(), self.instance,
+            expected_attrs=instance_obj.INSTANCE_DEFAULT_FIELDS)
+
+    def _fake_show(self, ctx, image_id):
+        return self.image
+
+    def test_get_image_meta(self):
+        image_meta = compute_utils.get_image_metadata(
+            self.ctx, self.image_service, 'fake-image', self.instance_obj)
+
+        self.image['properties'] = 'DONTCARE'
+        self.assertThat(self.image, matchers.DictMatches(image_meta))
+
+    def test_get_image_meta_no_image(self):
+        def fake_show(ctx, image_id):
+            raise exception.ImageNotFound(image_id='fake-image')
+
+        self.stubs.Set(self.image_service, 'show', fake_show)
+
+        image_meta = compute_utils.get_image_metadata(
+            self.ctx, self.image_service, 'fake-image', self.instance_obj)
+
+        self.image['properties'] = 'DONTCARE'
+        # NOTE(danms): The trip through system_metadata will stringify things
+        for key in self.image:
+            self.image[key] = str(self.image[key])
+        self.assertThat(self.image, matchers.DictMatches(image_meta))
+
+    def test_get_image_meta_no_image_system_meta(self):
+        for k in self.instance['system_metadata'].keys():
+            if k.startswith('image_'):
+                del self.instance['system_metadata'][k]
+
+        image_meta = compute_utils.get_image_metadata(
+            self.ctx, self.image_service, 'fake-image', self.instance_obj)
+
+        self.image['properties'] = 'DONTCARE'
+        self.assertThat(self.image, matchers.DictMatches(image_meta))
+
+    def test_get_image_meta_no_image_no_image_system_meta(self):
+        def fake_show(ctx, image_id):
+            raise exception.ImageNotFound(image_id='fake-image')
+
+        self.stubs.Set(self.image_service, 'show', fake_show)
+
+        for k in self.instance['system_metadata'].keys():
+            if k.startswith('image_'):
+                del self.instance['system_metadata'][k]
+
+        image_meta = compute_utils.get_image_metadata(
+            self.ctx, self.image_service, 'fake-image', self.instance_obj)
+
+        expected = {'properties': 'DONTCARE'}
+        self.assertThat(expected, matchers.DictMatches(image_meta))

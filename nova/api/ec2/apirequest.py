@@ -21,11 +21,13 @@ APIRequest class
 """
 
 import datetime
+from lxml import etree
 # TODO(termie): replace minidom with etree
 from xml.dom import minidom
 
 from nova.api.ec2 import ec2utils
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 
 LOG = logging.getLogger(__name__)
@@ -95,6 +97,9 @@ class APIRequest(object):
         xml.appendChild(response_el)
 
         response = xml.toxml()
+        root = etree.fromstring(response)
+        response = etree.tostring(root, pretty_print=True)
+
         xml.unlink()
 
         # Don't write private key to log

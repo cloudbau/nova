@@ -21,6 +21,7 @@ from oslo.config import cfg
 
 from nova import context as nova_context
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
@@ -46,7 +47,6 @@ opts = [
                default='',
                help='password for virtual power host_user'),
     cfg.StrOpt('virtual_power_host_key',
-               default=None,
                help='ssh key for virtual power host_user'),
 
 ]
@@ -59,7 +59,6 @@ CONF.register_group(baremetal_vp)
 CONF.register_opts(opts, baremetal_vp)
 
 _conn = None
-_virtual_power_settings = None
 _vp_cmd = None
 _cmds = None
 
@@ -84,12 +83,11 @@ class VirtualPowerManager(base.PowerManager):
     """
     def __init__(self, **kwargs):
         global _conn
-        global _virtual_power_settings
         global _cmds
 
         if _cmds is None:
-            LOG.debug("Setting up %s commands." %
-                    CONF.baremetal.virtual_power_type)
+            LOG.debug(_("Setting up %s commands."),
+                      CONF.baremetal.virtual_power_type)
             _vpc = 'nova.virt.baremetal.virtual_power_driver_settings.%s' % \
                     CONF.baremetal.virtual_power_type
             _cmds = importutils.import_class(_vpc)
@@ -136,13 +134,14 @@ class VirtualPowerManager(base.PowerManager):
             self._connection = connection.ssh_connect(self.connection_data)
 
     def _get_full_node_list(self):
-        LOG.debug("Getting full node list.")
+        LOG.debug(_("Getting full node list."))
         cmd = self._vp_cmd.list_cmd
         full_list = self._run_command(cmd)
         return full_list
 
     def _check_for_node(self):
-        LOG.debug("Looking up Name for Mac address %s." % self._mac_addresses)
+        LOG.debug(_("Looking up Name for Mac address %s."),
+                  self._mac_addresses)
         self._matched_name = ''
         full_node_list = self._get_full_node_list()
 
@@ -157,7 +156,7 @@ class VirtualPowerManager(base.PowerManager):
         return self._matched_name
 
     def activate_node(self):
-        LOG.info("activate_node name %s" % self._node_name)
+        LOG.info(_("activate_node name %s"), self._node_name)
         if self._check_for_node():
             cmd = self._vp_cmd.start_cmd
             self._run_command(cmd)
@@ -169,7 +168,7 @@ class VirtualPowerManager(base.PowerManager):
         return self.state
 
     def reboot_node(self):
-        LOG.info("reset node: %s" % self._node_name)
+        LOG.info(_("reset node: %s"), self._node_name)
         if self._check_for_node():
             cmd = self._vp_cmd.reboot_cmd
             self._run_command(cmd)
@@ -180,7 +179,7 @@ class VirtualPowerManager(base.PowerManager):
         return self.state
 
     def deactivate_node(self):
-        LOG.info("deactivate_node name %s" % self._node_name)
+        LOG.info(_("deactivate_node name %s"), self._node_name)
         if self._check_for_node():
             if self.is_power_on():
                 cmd = self._vp_cmd.stop_cmd
@@ -193,10 +192,14 @@ class VirtualPowerManager(base.PowerManager):
         return self.state
 
     def is_power_on(self):
-        LOG.debug("Checking if %s is running" % self._node_name)
+        LOG.debug(_("Checking if %s is running"), self._node_name)
 
         if not self._check_for_node():
-            return False
+            err_msg = _('Node "%(name)s" with MAC address %(mac)s not found.')
+            LOG.error(err_msg, {'name': self._node_name,
+                                'mac': self._mac_addresses})
+            # in our case the _node_name is the the node_id
+            raise exception.NodeNotFound(node_id=self._node_name)
 
         cmd = self._vp_cmd.list_running_cmd
         running_node_list = self._run_command(cmd)
@@ -205,12 +208,6 @@ class VirtualPowerManager(base.PowerManager):
             if self._matched_name in node:
                 return True
         return False
-
-    def start_console(self):
-        pass
-
-    def stop_console(self):
-        pass
 
     def _run_command(self, cmd, check_exit_code=True):
         """Run a remote command using an active ssh connection.
@@ -232,8 +229,8 @@ class VirtualPowerManager(base.PowerManager):
             stdout, stderr = processutils.ssh_execute(
                 self._connection, cmd, check_exit_code=check_exit_code)
             result = stdout.strip().splitlines()
-            LOG.debug('Result for run_command: %s' % result)
+            LOG.debug(_('Result for run_command: %s'), result)
         except processutils.ProcessExecutionError:
             result = []
-            LOG.exception("Error running command: %s" % cmd)
+            LOG.exception(_("Error running command: %s"), cmd)
         return result

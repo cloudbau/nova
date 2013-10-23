@@ -32,7 +32,9 @@ rm -rf $RPM_BUILD_ROOT
 /etc/xapi.d/plugins/bandwidth
 /etc/xapi.d/plugins/bittorrent
 /etc/xapi.d/plugins/config_file
+/etc/xapi.d/plugins/console
 /etc/xapi.d/plugins/glance
+/etc/xapi.d/plugins/ipxe
 /etc/xapi.d/plugins/kernel
 /etc/xapi.d/plugins/migration
 /etc/xapi.d/plugins/pluginlib_nova.py
@@ -40,3 +42,4 @@ rm -rf $RPM_BUILD_ROOT
 /etc/xapi.d/plugins/xenhost
 /etc/xapi.d/plugins/xenstore.py
 /etc/xapi.d/plugins/utils.py
+/etc/xapi.d/plugins/nova_plugin_version

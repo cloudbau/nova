@@ -12,7 +12,7 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License
+#    under the License.
 
 from oslo.config import cfg
 
@@ -124,7 +124,7 @@ class AvailabilityZoneController(wsgi.Controller):
         result = []
         for zone in available_zones:
             hosts = {}
-            for host in zone_hosts[zone]:
+            for host in zone_hosts.get(zone, []):
                 hosts[host] = {}
                 for service in host_services[zone + host]:
                     alive = self.servicegroup_api.service_is_up(service)

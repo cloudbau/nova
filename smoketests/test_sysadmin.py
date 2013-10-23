@@ -161,16 +161,15 @@ class InstanceTests(base.UserSmokeTestCase):
         self.data['instance'] = reservation.instances[0]
 
     def test_003_instance_runs_within_60_seconds(self):
-        instance = self.data['instance']
         # allow 60 seconds to exit pending with IP
         if not self.wait_for_running(self.data['instance']):
             self.fail('instance failed to start')
         self.data['instance'].update()
         ip = self.data['instance'].private_ip_address
-        self.failIf(ip == '0.0.0.0')
+        self.assertFalse(ip == '0.0.0.0')
         if FLAGS.use_ipv6:
             ipv6 = self.data['instance'].dns_name_v6
-            self.failIf(ipv6 is None)
+            self.assertFalse(ipv6 is None)
 
     def test_004_can_ping_private_ip(self):
         if not self.wait_for_ping(self.data['instance'].private_ip_address):

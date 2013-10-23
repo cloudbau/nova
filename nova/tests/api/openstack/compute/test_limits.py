@@ -32,14 +32,18 @@ from nova.openstack.common import jsonutils
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.tests import matchers
+from nova import utils
 
 
 TEST_LIMITS = [
-    limits.Limit("GET", "/delayed", "^/delayed", 1, limits.PER_MINUTE),
-    limits.Limit("POST", "*", ".*", 7, limits.PER_MINUTE),
-    limits.Limit("POST", "/servers", "^/servers", 3, limits.PER_MINUTE),
-    limits.Limit("PUT", "*", "", 10, limits.PER_MINUTE),
-    limits.Limit("PUT", "/servers", "^/servers", 5, limits.PER_MINUTE),
+    limits.Limit("GET", "/delayed", "^/delayed", 1,
+                 utils.TIME_UNITS['MINUTE']),
+    limits.Limit("POST", "*", ".*", 7, utils.TIME_UNITS['MINUTE']),
+    limits.Limit("POST", "/servers", "^/servers", 3,
+                 utils.TIME_UNITS['MINUTE']),
+    limits.Limit("PUT", "*", "", 10, utils.TIME_UNITS['MINUTE']),
+    limits.Limit("PUT", "/servers", "^/servers", 5,
+                 utils.TIME_UNITS['MINUTE']),
 ]
 NS = {
     'atom': 'http://www.w3.org/2005/Atom',
@@ -47,7 +51,7 @@ NS = {
 }
 
 
-class BaseLimitTestSuite(test.TestCase):
+class BaseLimitTestSuite(test.NoDBTestCase):
     """Base test suite which provides relevant stubs and time abstraction."""
 
     def setUp(self):
@@ -312,7 +316,7 @@ class LimitsControllerTest(BaseLimitTestSuite):
                           req, 1, {})
 
 
-class TestLimiter(limits.Limiter):
+class MockLimiter(limits.Limiter):
     pass
 
 
@@ -331,12 +335,12 @@ class LimitMiddlewareTest(BaseLimitTestSuite):
         super(LimitMiddlewareTest, self).setUp()
         _limits = '(GET, *, .*, 1, MINUTE)'
         self.app = limits.RateLimitingMiddleware(self._empty_app, _limits,
-                                                 "%s.TestLimiter" %
+                                                 "%s.MockLimiter" %
                                                  self.__class__.__module__)
 
     def test_limit_class(self):
         # Test that middleware selected correct limiter class.
-        assert isinstance(self.app._limiter, TestLimiter)
+        self.assertIsInstance(self.app._limiter, MockLimiter)
 
     def test_good_request(self):
         # Test successful GET request through middleware.
@@ -345,16 +349,16 @@ class LimitMiddlewareTest(BaseLimitTestSuite):
         self.assertEqual(200, response.status_int)
 
     def test_limited_request_json(self):
-        # Test a rate-limited (413) GET request through middleware.
+        # Test a rate-limited (429) GET request through middleware.
         request = webob.Request.blank("/")
         response = request.get_response(self.app)
         self.assertEqual(200, response.status_int)
 
         request = webob.Request.blank("/")
         response = request.get_response(self.app)
-        self.assertEqual(response.status_int, 413)
+        self.assertEqual(response.status_int, 429)
 
-        self.assertTrue('Retry-After' in response.headers)
+        self.assertIn('Retry-After', response.headers)
         retry_after = int(response.headers['Retry-After'])
         self.assertAlmostEqual(retry_after, 60, 1)
 
@@ -363,12 +367,12 @@ class LimitMiddlewareTest(BaseLimitTestSuite):
         value = body["overLimit"]["details"].strip()
         self.assertEqual(value, expected)
 
-        self.assertTrue("retryAfter" in body["overLimit"])
+        self.assertIn("retryAfter", body["overLimit"])
         retryAfter = body["overLimit"]["retryAfter"]
         self.assertEqual(retryAfter, "60")
 
     def test_limited_request_xml(self):
-        # Test a rate-limited (413) response as XML.
+        # Test a rate-limited (429) response as XML.
         request = webob.Request.blank("/")
         response = request.get_response(self.app)
         self.assertEqual(200, response.status_int)
@@ -376,7 +380,7 @@ class LimitMiddlewareTest(BaseLimitTestSuite):
         request = webob.Request.blank("/")
         request.accept = "application/xml"
         response = request.get_response(self.app)
-        self.assertEqual(response.status_int, 413)
+        self.assertEqual(response.status_int, 429)
 
         root = minidom.parseString(response.body).childNodes[0]
         expected = "Only 1 GET request(s) can be made to * every minute."
@@ -462,7 +466,7 @@ class ParseLimitsTest(BaseLimitTestSuite):
                                             '(PUT, /foo*, /foo.*, 10, hour);'
                                             '(POST, /bar*, /bar.*, 5, second);'
                                             '(Say, /derp*, /derp.*, 1, day)')
-        except ValueError, e:
+        except ValueError as e:
             assert False, str(e)
 
         # Make sure the number of returned limits are correct
@@ -485,8 +489,8 @@ class ParseLimitsTest(BaseLimitTestSuite):
         self.assertEqual([t.value for t in l], expected)
 
         # ...and the units...
-        expected = [limits.PER_MINUTE, limits.PER_HOUR,
-                    limits.PER_SECOND, limits.PER_DAY]
+        expected = [utils.TIME_UNITS['MINUTE'], utils.TIME_UNITS['HOUR'],
+                    utils.TIME_UNITS['SECOND'], utils.TIME_UNITS['DAY']]
         self.assertEqual([t.unit for t in l], expected)
 
 
@@ -498,7 +502,9 @@ class LimiterTest(BaseLimitTestSuite):
     def setUp(self):
         """Run before each test."""
         super(LimiterTest, self).setUp()
-        userlimits = {'user:user3': ''}
+        userlimits = {'limits.user3': '',
+                      'limits.user0': '(get, *, .*, 4, minute);'
+                                      '(put, *, .*, 2, minute)'}
         self.limiter = limits.Limiter(TEST_LIMITS, **userlimits)
 
     def _check(self, num, verb, url, username=None):
@@ -545,13 +551,16 @@ class LimiterTest(BaseLimitTestSuite):
 
         expected = 60.0 / 7.0
         results = self._check_sum(1, "POST", "/anything")
-        self.failUnlessAlmostEqual(expected, results, 8)
+        self.assertAlmostEqual(expected, results, 8)
 
     def test_delay_GET(self):
         # Ensure the 11th GET will result in NO delay.
         expected = [None] * 11
         results = list(self._check(11, "GET", "/anything"))
+        self.assertEqual(expected, results)
 
+        expected = [None] * 4 + [15.0]
+        results = list(self._check(5, "GET", "/foo", "user0"))
         self.assertEqual(expected, results)
 
     def test_delay_PUT_servers(self):
@@ -598,12 +607,22 @@ class LimiterTest(BaseLimitTestSuite):
         results = list(self._check(10, "PUT", "/anything"))
         self.assertEqual(expected, results)
 
+        expected = [None] * 2 + [30.0] * 8
+        results = list(self._check(10, "PUT", "/anything", "user0"))
+        self.assertEqual(expected, results)
+
     def test_user_limit(self):
         # Test user-specific limits.
         self.assertEqual(self.limiter.levels['user3'], [])
+        self.assertEqual(len(self.limiter.levels['user0']), 2)
 
     def test_multiple_users(self):
         # Tests involving multiple users.
+        # User0
+        expected = [None] * 2 + [30.0] * 8
+        results = list(self._check(10, "PUT", "/anything", "user0"))
+        self.assertEqual(expected, results)
+
         # User1
         expected = [None] * 10 + [6.0] * 10
         results = list(self._check(20, "PUT", "/anything", "user1"))
@@ -631,6 +650,17 @@ class LimiterTest(BaseLimitTestSuite):
         # User1 again
         expected = [4.0] * 5
         results = list(self._check(5, "PUT", "/anything", "user2"))
+        self.assertEqual(expected, results)
+
+        # User0 again
+        expected = [28.0]
+        results = list(self._check(1, "PUT", "/anything", "user0"))
+        self.assertEqual(expected, results)
+
+        self.time += 28.0
+
+        expected = [None, 30.0]
+        results = list(self._check(2, "PUT", "/anything", "user0"))
         self.assertEqual(expected, results)
 
 
@@ -778,7 +808,8 @@ def wire_HTTPConnection_to_WSGI(host, app):
     """
     class HTTPConnectionDecorator(object):
         """Wraps the real HTTPConnection class so that when you instantiate
-        the class you might instead get a fake instance."""
+        the class you might instead get a fake instance.
+        """
 
         def __init__(self, wrapped):
             self.wrapped = wrapped
@@ -834,7 +865,7 @@ class WsgiLimiterProxyTest(BaseLimitTestSuite):
         super(WsgiLimiterProxyTest, self).tearDown()
 
 
-class LimitsViewBuilderTest(test.TestCase):
+class LimitsViewBuilderTest(test.NoDBTestCase):
     def setUp(self):
         super(LimitsViewBuilderTest, self).setUp()
         self.view_builder = views.limits.ViewBuilder()
@@ -892,7 +923,7 @@ class LimitsViewBuilderTest(test.TestCase):
         self.assertThat(output, matchers.DictMatches(expected_limits))
 
 
-class LimitsXMLSerializationTest(test.TestCase):
+class LimitsXMLSerializationTest(test.NoDBTestCase):
     def test_xml_declaration(self):
         serializer = limits.LimitsTemplate()
 

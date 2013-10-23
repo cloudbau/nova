@@ -23,7 +23,7 @@ from nova import db
 from nova import test
 
 
-class CellsUtilsTestCase(test.TestCase):
+class CellsUtilsTestCase(test.NoDBTestCase):
     """Test case for Cells utility methods."""
     def test_get_instances_to_sync(self):
         fake_context = 'fake_context'
@@ -48,7 +48,7 @@ class CellsUtilsTestCase(test.TestCase):
 
         instances = cells_utils.get_instances_to_sync(fake_context)
         self.assertTrue(inspect.isgenerator(instances))
-        self.assertTrue(len([x for x in instances]), 3)
+        self.assertEqual(len([x for x in instances]), 3)
         self.assertEqual(call_info['get_all'], 1)
         self.assertEqual(call_info['got_filters'], {})
         self.assertEqual(call_info['shuffle'], 0)
@@ -56,7 +56,7 @@ class CellsUtilsTestCase(test.TestCase):
         instances = cells_utils.get_instances_to_sync(fake_context,
                                                       shuffle=True)
         self.assertTrue(inspect.isgenerator(instances))
-        self.assertTrue(len([x for x in instances]), 3)
+        self.assertEqual(len([x for x in instances]), 3)
         self.assertEqual(call_info['get_all'], 2)
         self.assertEqual(call_info['got_filters'], {})
         self.assertEqual(call_info['shuffle'], 1)
@@ -64,7 +64,7 @@ class CellsUtilsTestCase(test.TestCase):
         instances = cells_utils.get_instances_to_sync(fake_context,
                 updated_since='fake-updated-since')
         self.assertTrue(inspect.isgenerator(instances))
-        self.assertTrue(len([x for x in instances]), 3)
+        self.assertEqual(len([x for x in instances]), 3)
         self.assertEqual(call_info['get_all'], 3)
         self.assertEqual(call_info['got_filters'],
                 {'changes-since': 'fake-updated-since'})
@@ -74,7 +74,7 @@ class CellsUtilsTestCase(test.TestCase):
                 project_id='fake-project',
                 updated_since='fake-updated-since', shuffle=True)
         self.assertTrue(inspect.isgenerator(instances))
-        self.assertTrue(len([x for x in instances]), 3)
+        self.assertEqual(len([x for x in instances]), 3)
         self.assertEqual(call_info['get_all'], 4)
         self.assertEqual(call_info['got_filters'],
                 {'changes-since': 'fake-updated-since',
@@ -83,7 +83,7 @@ class CellsUtilsTestCase(test.TestCase):
 
     def test_split_cell_and_item(self):
         path = 'australia', 'queensland', 'gold_coast'
-        cell = cells_utils._PATH_CELL_SEP.join(path)
+        cell = cells_utils.PATH_CELL_SEP.join(path)
         item = 'host_5'
         together = cells_utils.cell_with_item(cell, item)
         self.assertEqual(cells_utils._CELL_ITEM_SEP.join([cell, item]),

@@ -1,4 +1,3 @@
-# vim: tabstop=4 shiftwidth=4 softtabstop=4
 
 # Copyright (c) 2010 Citrix Systems, Inc.
 # Copyright 2010 OpenStack Foundation
@@ -39,6 +38,8 @@ A driver for XenServer or Xen Cloud Platform.
 
 import contextlib
 import cPickle as pickle
+import math
+import time
 import urlparse
 import xmlrpclib
 
@@ -48,7 +49,12 @@ from oslo.config import cfg
 
 from nova import context
 from nova import exception
+from nova.objects import aggregate as aggregate_obj
+from nova.openstack.common.gettextutils import _
+from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
+from nova.openstack.common import versionutils
+from nova import utils
 from nova.virt import driver
 from nova.virt.xenapi import host
 from nova.virt.xenapi import pool
@@ -61,15 +67,15 @@ LOG = logging.getLogger(__name__)
 
 xenapi_opts = [
     cfg.StrOpt('xenapi_connection_url',
-               default=None,
                help='URL for connection to XenServer/Xen Cloud Platform. '
+                    'A special value of unix://local can be used to connect '
+                    'to the local unix socket.  '
                     'Required if compute_driver=xenapi.XenAPIDriver'),
     cfg.StrOpt('xenapi_connection_username',
                default='root',
                help='Username for connection to XenServer/Xen Cloud Platform. '
                     'Used only if compute_driver=xenapi.XenAPIDriver'),
     cfg.StrOpt('xenapi_connection_password',
-               default=None,
                help='Password for connection to XenServer/Xen Cloud Platform. '
                     'Used only if compute_driver=xenapi.XenAPIDriver',
                secret=True),
@@ -93,7 +99,6 @@ xenapi_opts = [
                default='/var/run/sr-mount',
                help='Base path to the storage repository'),
     cfg.StrOpt('target_host',
-               default=None,
                help='iSCSI Target Host'),
     cfg.StrOpt('target_port',
                default='3260',
@@ -160,6 +165,42 @@ class XenAPIDriver(driver.ComputeDriver):
         except Exception:
             LOG.exception(_('Failure while cleaning up attached VDIs'))
 
+    def instance_exists(self, instance_name):
+        """Checks existence of an instance on the host.
+
+        :param instance_name: The name of the instance to lookup
+
+        Returns True if an instance with the supplied name exists on
+        the host, False otherwise.
+
+        NOTE(belliott): This is an override of the base method for
+        efficiency.
+        """
+        return self._vmops.instance_exists(instance_name)
+
+    def estimate_instance_overhead(self, instance_info):
+        """Get virtualization overhead required to build an instance of the
+        given flavor.
+
+        :param instance_info: Instance/flavor to calculate overhead for.
+        :returns: Overhead memory in MB.
+        """
+
+        # XenServer memory overhead is proportional to the size of the
+        # VM.  Larger flavor VMs become more efficient with respect to
+        # overhead.
+
+        # interpolated formula to predict overhead required per vm.
+        # based on data from:
+        # https://wiki.openstack.org/wiki/XenServer/Overhead
+        base = 3  # MB
+        per_mb = 0.0081  # MB
+
+        memory_mb = instance_info['memory_mb']
+        overhead = memory_mb * per_mb + base
+        overhead = math.ceil(overhead)
+        return {'memory_mb': overhead}
+
     def list_instances(self):
         """List VM instances."""
         return self._vmops.list_instances()
@@ -182,18 +223,19 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.confirm_migration(migration, instance, network_info)
 
     def finish_revert_migration(self, instance, network_info,
-                                block_device_info=None):
-        """Finish reverting a resize, powering back on the instance."""
+                                block_device_info=None, power_on=True):
+        """Finish reverting a resize."""
         # NOTE(vish): Xen currently does not use network info.
-        self._vmops.finish_revert_migration(instance, block_device_info)
+        self._vmops.finish_revert_migration(instance, block_device_info,
+                                            power_on)
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance=False,
-                         block_device_info=None):
+                         block_device_info=None, power_on=True):
         """Completes a resize, turning on the migrated instance."""
         self._vmops.finish_migration(context, migration, instance, disk_info,
                                      network_info, image_meta, resize_instance,
-                                     block_device_info)
+                                     block_device_info, power_on)
 
     def snapshot(self, context, instance, image_id, update_task_state):
         """Create snapshot from a running VM instance."""
@@ -220,7 +262,7 @@ class XenAPIDriver(driver.ComputeDriver):
         self._vmops.change_instance_metadata(instance, diff)
 
     def destroy(self, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, context=None):
         """Destroy VM instance."""
         self._vmops.destroy(instance, network_info, block_device_info,
                             destroy_disks)
@@ -237,7 +279,8 @@ class XenAPIDriver(driver.ComputeDriver):
                                    instance_type, network_info,
                                    block_device_info=None):
         """Transfers the VHD of a running instance to another host, then shuts
-        off the instance copies over the COW disk"""
+        off the instance copies over the COW disk
+        """
         # NOTE(vish): Xen currently does not use network info.
         return self._vmops.migrate_disk_and_power_off(context, instance,
                     dest, instance_type, block_device_info)
@@ -264,7 +307,8 @@ class XenAPIDriver(driver.ComputeDriver):
         """Power off the specified instance."""
         self._vmops.power_off(instance)
 
-    def power_on(self, instance):
+    def power_on(self, context, instance, network_info,
+                 block_device_info=None):
         """Power on the specified instance."""
         self._vmops.power_on(instance)
 
@@ -306,7 +350,8 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def get_all_bw_counters(self, instances):
         """Return bandwidth usage counters for each interface on each
-           running VM"""
+           running VM.
+        """
 
         # we only care about VMs that correspond to a nova-managed
         # instance:
@@ -356,13 +401,15 @@ class XenAPIDriver(driver.ComputeDriver):
         xs_url = urlparse.urlparse(CONF.xenapi_connection_url)
         return xs_url.netloc
 
-    def attach_volume(self, connection_info, instance, mountpoint):
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
         """Attach volume storage to VM instance."""
         return self._volumeops.attach_volume(connection_info,
                                              instance['name'],
                                              mountpoint)
 
-    def detach_volume(self, connection_info, instance, mountpoint):
+    def detach_volume(self, connection_info, instance, mountpoint,
+                      encryption=None):
         """Detach volume storage from VM instance."""
         return self._volumeops.detach_volume(connection_info,
                                              instance['name'],
@@ -375,10 +422,10 @@ class XenAPIDriver(driver.ComputeDriver):
                 'password': CONF.xenapi_connection_password}
 
     def get_available_resource(self, nodename):
-        """Retrieve resource info.
+        """Retrieve resource information.
 
         This method is called when nova-compute launches, and
-        as part of a periodic task.
+        as part of a periodic task that records the results in the DB.
 
         :param nodename: ignored in this driver
         :returns: dictionary describing resources
@@ -393,7 +440,7 @@ class XenAPIDriver(driver.ComputeDriver):
         free_ram_mb = host_stats['host_memory_free_computed'] / (1024 * 1024)
         total_disk_gb = host_stats['disk_total'] / (1024 * 1024 * 1024)
         used_disk_gb = host_stats['disk_used'] / (1024 * 1024 * 1024)
-
+        hyper_ver = utils.convert_version_to_int(self._session.product_version)
         dic = {'vcpus': 0,
                'memory_mb': total_ram_mb,
                'local_gb': total_disk_gb,
@@ -401,9 +448,11 @@ class XenAPIDriver(driver.ComputeDriver):
                'memory_mb_used': total_ram_mb - free_ram_mb,
                'local_gb_used': used_disk_gb,
                'hypervisor_type': 'xen',
-               'hypervisor_version': 0,
+               'hypervisor_version': hyper_ver,
                'hypervisor_hostname': host_stats['host_hostname'],
-               'cpu_info': host_stats['host_cpu_info']['cpu_count']}
+               'cpu_info': host_stats['host_cpu_info']['cpu_count'],
+               'supported_instances': jsonutils.dumps(
+                   host_stats['supported_instances'])}
 
         return dic
 
@@ -455,13 +504,8 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def get_instance_disk_info(self, instance_name):
         """Used by libvirt for live migration. We rely on xenapi
-        checks to do this for us."""
-        pass
-
-    def pre_block_migration(self, ctxt, instance_ref, disk_info_json):
-        """Used by libvirt for live migration. We rely on xenapi
-        checks to do this for us. May be used in the future to
-        populate the vdi/vif maps"""
+        checks to do this for us.
+        """
         pass
 
     def live_migration(self, ctxt, instance_ref, dest,
@@ -487,7 +531,7 @@ class XenAPIDriver(driver.ComputeDriver):
                                  recover_method, block_migration, migrate_data)
 
     def pre_live_migration(self, context, instance_ref, block_device_info,
-                           network_info, migrate_data=None):
+                           network_info, data, migrate_data=None):
         """Preparation live migration.
 
         :params block_device_info:
@@ -510,10 +554,10 @@ class XenAPIDriver(driver.ComputeDriver):
             nova.db.sqlalchemy.models.Instance object
             instance object that is migrated.
         :params network_info: instance network information
-        :params : block_migration: if true, post operation of block_migraiton.
+        :params : block_migration: if true, post operation of block_migration.
         """
-        # TODO(JohnGarbutt) look at moving/downloading ramdisk and kernel
-        pass
+        self._vmops.post_live_migration_at_destination(ctxt, instance_ref,
+                network_info, block_device_info, block_device_info)
 
     def unfilter_instance(self, instance_ref, network_info):
         """Removes security groups configured for an instance."""
@@ -523,29 +567,34 @@ class XenAPIDriver(driver.ComputeDriver):
         """Updates security group rules for all instances associated with a
         given security group.
 
-        Invoked when security group rules are updated."""
+        Invoked when security group rules are updated.
+        """
         return self._vmops.refresh_security_group_rules(security_group_id)
 
     def refresh_security_group_members(self, security_group_id):
         """Updates security group rules for all instances associated with a
         given security group.
 
-        Invoked when instances are added/removed to a security group."""
+        Invoked when instances are added/removed to a security group.
+        """
         return self._vmops.refresh_security_group_members(security_group_id)
 
     def refresh_instance_security_rules(self, instance):
         """Updates security group rules for specified instance.
 
         Invoked when instances are added/removed to a security group
-        or when a rule is added/removed to a security group."""
+        or when a rule is added/removed to a security group.
+        """
         return self._vmops.refresh_instance_security_rules(instance)
 
     def refresh_provider_fw_rules(self):
         return self._vmops.refresh_provider_fw_rules()
 
     def get_host_stats(self, refresh=False):
-        """Return the current state of the host. If 'refresh' is
-           True, run the update first."""
+        """Return the current state of the host.
+
+           If 'refresh' is True, run the update first.
+         """
         return self.host_state.get_host_stats(refresh=refresh)
 
     def host_power_action(self, host, action):
@@ -571,7 +620,8 @@ class XenAPIDriver(driver.ComputeDriver):
 
     def host_maintenance_mode(self, host, mode):
         """Start/Stop host maintenance window. On start, it triggers
-        guest VMs evacuation."""
+        guest VMs evacuation.
+        """
         return self._host.host_maintenance_mode(host, mode)
 
     def add_to_aggregate(self, context, aggregate, host, **kwargs):
@@ -588,13 +638,6 @@ class XenAPIDriver(driver.ComputeDriver):
         """Undo aggregate operation when pool error raised."""
         return self._pool.undo_aggregate_operation(context, op,
                 aggregate, host, set_error)
-
-    def legacy_nwinfo(self):
-        """
-        Indicate if the driver requires the legacy network_info format.
-        """
-        # TODO(tr3buchet): remove this function once all virts return false
-        return False
 
     def resume_state_on_host_boot(self, context, instance, network_info,
                                   block_device_info=None):
@@ -613,6 +656,12 @@ class XenAPIDriver(driver.ComputeDriver):
 class XenAPISession(object):
     """The session to invoke XenAPI SDK calls."""
 
+    # This is not a config option as it should only ever be
+    # changed in development environments.
+    # MAJOR VERSION: Incompatible changes with the plugins
+    # MINOR VERSION: Compatible changes, new plguins, etc
+    PLUGIN_REQUIRED_VERSION = '1.0'
+
     def __init__(self, url, user, pw, virtapi):
         import XenAPI
         self.XenAPI = XenAPI
@@ -626,6 +675,18 @@ class XenAPISession(object):
         self.product_version, self.product_brand = \
             self._get_product_version_and_brand()
         self._virtapi = virtapi
+
+        self._verify_plugin_version()
+
+    def _verify_plugin_version(self):
+        requested_version = self.PLUGIN_REQUIRED_VERSION
+        current_version = self.call_plugin_serialized(
+            'nova_plugin_version', 'get_version')
+
+        if not versionutils.is_compatible(requested_version, current_version):
+            raise self.XenAPI.Failure(
+                _("Plugin version mismatch (Expected %(exp)s, got %(got)s)") %
+                {'exp': requested_version, 'got': current_version})
 
     def _create_first_session(self, url, user, pw, exception):
         try:
@@ -654,7 +715,7 @@ class XenAPISession(object):
 
     def _get_host_uuid(self):
         if self.is_slave:
-            aggr = self._virtapi.aggregate_get_by_host(
+            aggr = aggregate_obj.AggregateList.get_by_host(
                 context.get_admin_context(),
                 CONF.host, key=pool_states.POOL_FLAG)[0]
             if not aggr:
@@ -669,14 +730,18 @@ class XenAPISession(object):
 
     def _get_product_version_and_brand(self):
         """Return a tuple of (major, minor, rev) for the host version and
-        a string of the product brand"""
+        a string of the product brand.
+        """
         software_version = self._get_software_version()
 
         product_version_str = software_version.get('product_version')
+        # Product version is only set in some cases (e.g. XCP, XenServer) and
+        # not in others (e.g. xenserver-core, XAPI-XCP).
+        # In these cases, the platform version is the best number to use.
+        if product_version_str is None:
+            product_version_str = software_version.get('platform_version',
+                                                       '0.0.0')
         product_brand = software_version.get('product_brand')
-
-        if None in (product_version_str, product_brand):
-            return (None, None)
 
         product_version = tuple(int(part) for part in
                                 product_version_str.split('.'))
@@ -733,8 +798,51 @@ class XenAPISession(object):
         rv = self.call_plugin(plugin, fn, params)
         return pickle.loads(rv)
 
+    def call_plugin_serialized_with_retry(self, plugin, fn, num_retries,
+                                          callback, *args, **kwargs):
+        """Allows a plugin to raise RetryableError so we can try again."""
+        attempts = num_retries + 1
+        sleep_time = 0.5
+        for attempt in xrange(1, attempts + 1):
+            LOG.info(_('%(plugin)s.%(fn)s attempt %(attempt)d/%(attempts)d'),
+                     {'plugin': plugin, 'fn': fn, 'attempt': attempt,
+                      'attempts': attempts})
+            try:
+                if attempt > 1:
+                    time.sleep(sleep_time)
+                    sleep_time = min(2 * sleep_time, 15)
+
+                if callback:
+                    callback(kwargs)
+
+                return self.call_plugin_serialized(plugin, fn, *args, **kwargs)
+            except self.XenAPI.Failure as exc:
+                if self._is_retryable_exception(exc):
+                    LOG.warn(_('%(plugin)s.%(fn)s failed. Retrying call.')
+                             % {'plugin': plugin, 'fn': fn})
+                else:
+                    raise
+
+        raise exception.PluginRetriesExceeded(num_retries=num_retries)
+
+    def _is_retryable_exception(self, exc):
+        _type, method, error = exc.details[:3]
+        if error == 'RetryableError':
+            LOG.debug(_("RetryableError, so retrying upload_vhd"),
+                      exc_info=True)
+            return True
+        elif "signal" in method:
+            LOG.debug(_("Error due to a signal, retrying upload_vhd"),
+                      exc_info=True)
+            return True
+        else:
+            return False
+
     def _create_session(self, url):
         """Stubout point. This can be replaced with a mock session."""
+        self.is_local_connection = url == "unix://local"
+        if self.is_local_connection:
+            return self.XenAPI.xapi_local()
         return self.XenAPI.Session(url)
 
     def _unwrap_plugin_exceptions(self, func, *args, **kwargs):
@@ -745,7 +853,7 @@ class XenAPISession(object):
             LOG.debug(_("Got exception: %s"), exc)
             if (len(exc.details) == 4 and
                 exc.details[0] == 'XENAPI_PLUGIN_EXCEPTION' and
-                exc.details[2] == 'Failure'):
+                    exc.details[2] == 'Failure'):
                 params = None
                 try:
                     # FIXME(comstud): eval is evil.

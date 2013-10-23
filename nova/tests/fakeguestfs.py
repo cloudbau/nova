@@ -24,7 +24,7 @@ class GuestFS(object):
         self.mounts = []
         self.files = {}
         self.auginit = False
-        self.attach_method = 'libvirt'
+        self.root_mounted = False
 
     def launch(self):
         self.running = True
@@ -40,20 +40,21 @@ class GuestFS(object):
     def add_drive_opts(self, file, *args, **kwargs):
         self.drives.append((file, kwargs['format']))
 
-    def get_attach_method(self):
-        return self.attach_method
-
-    def set_attach_method(self, attach_method):
-        self.attach_method = attach_method
-
     def inspect_os(self):
         return ["/dev/guestvgf/lv_root"]
 
     def inspect_get_mountpoints(self, dev):
-        return [["/", "/dev/mapper/guestvgf-lv_root"],
+        return [["/home", "/dev/mapper/guestvgf-lv_home"],
+                ["/", "/dev/mapper/guestvgf-lv_root"],
                 ["/boot", "/dev/vda1"]]
 
     def mount_options(self, options, device, mntpoint):
+        if mntpoint == "/":
+            self.root_mounted = True
+        else:
+            if not self.root_mounted:
+                raise RuntimeError(
+                    "mount: %s: No such file or directory" % mntpoint)
         self.mounts.append((options, device, mntpoint))
 
     def mkdir_p(self, path):
@@ -62,7 +63,7 @@ class GuestFS(object):
                 "isdir": True,
                 "gid": 100,
                 "uid": 100,
-                "mode": 0700
+                "mode": 0o700
                 }
 
     def read_file(self, path):
@@ -72,7 +73,7 @@ class GuestFS(object):
                 "content": "Hello World",
                 "gid": 100,
                 "uid": 100,
-                "mode": 0700
+                "mode": 0o700
                 }
 
         return self.files[path]["content"]
@@ -84,7 +85,7 @@ class GuestFS(object):
                 "content": "Hello World",
                 "gid": 100,
                 "uid": 100,
-                "mode": 0700
+                "mode": 0o700
                 }
 
         self.files[path]["content"] = content
@@ -96,7 +97,7 @@ class GuestFS(object):
                 "content": "Hello World",
                 "gid": 100,
                 "uid": 100,
-                "mode": 0700
+                "mode": 0o700
                 }
 
         self.files[path]["content"] = self.files[path]["content"] + content

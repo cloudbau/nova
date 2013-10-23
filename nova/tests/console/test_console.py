@@ -20,13 +20,13 @@
 
 from oslo.config import cfg
 
+from nova.compute import rpcapi as compute_rpcapi
 from nova.console import api as console_api
 from nova.console import rpcapi as console_rpcapi
 from nova import context
 from nova import db
 from nova import exception
 from nova.openstack.common import importutils
-from nova.openstack.common import rpc
 from nova import test
 
 CONF = cfg.CONF
@@ -53,7 +53,6 @@ class ConsoleTestCase(test.TestCase):
         #inst['name'] = 'instance-1234'
         inst['image_id'] = 1
         inst['reservation_id'] = 'r-fakeres'
-        inst['launch_time'] = '10'
         inst['user_id'] = self.user_id
         inst['project_id'] = self.project_id
         inst['instance_type_id'] = 1
@@ -101,7 +100,7 @@ class ConsoleTestCase(test.TestCase):
                 self.console.driver.console_type)
 
         console_instances = [con['instance_uuid'] for con in pool['consoles']]
-        self.assert_(instance['uuid'] in console_instances)
+        self.assertIn(instance['uuid'], console_instances)
         db.instance_destroy(self.context, instance['uuid'])
 
     def test_add_console_does_not_duplicate(self):
@@ -141,15 +140,12 @@ class ConsoleAPITestCase(test.TestCase):
             'id': 'fake_id'
         }
 
-        def _fake_cast(_ctxt, _topic, _msg):
-            pass
-        self.stubs.Set(rpc, 'cast', _fake_cast)
-
         def _fake_db_console_get(_ctxt, _console_uuid, _instance_uuid):
             return self.fake_console
         self.stubs.Set(db, 'console_get', _fake_db_console_get)
 
-        def _fake_db_console_get_all_by_instance(_ctxt, _instance_uuid):
+        def _fake_db_console_get_all_by_instance(_ctxt, _instance_uuid,
+                                                 columns_to_join):
             return [self.fake_console]
         self.stubs.Set(db, 'console_get_all_by_instance',
                        _fake_db_console_get_all_by_instance)
@@ -178,10 +174,16 @@ class ConsoleAPITestCase(test.TestCase):
                                         'fake_id')
 
     def test_create_console(self):
-        self.mox.StubOutWithMock(console_rpcapi.ConsoleAPI, 'add_console')
+        self.mox.StubOutWithMock(compute_rpcapi.ComputeAPI,
+                                 'get_console_topic')
 
-        console_rpcapi.ConsoleAPI.add_console(self.context,
-                                              self.fake_instance['id'])
+        compute_rpcapi.ComputeAPI.get_console_topic(
+            self.context, 'fake_host').AndReturn('compute.fake_host')
+        self.mox.StubOutClassWithMocks(console_rpcapi, 'ConsoleAPI')
+        console_api_mock = console_rpcapi.ConsoleAPI(
+            topic='compute.fake_host')
+        console_api_mock.add_console(self.context,
+                                     self.fake_instance['id'])
 
         self.mox.ReplayAll()
 

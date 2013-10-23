@@ -27,6 +27,7 @@ from nova import exception
 from nova.openstack.common import policy
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 from nova.tests import fake_instance_actions
 
 FAKE_UUID = fake_instance_actions.FAKE_UUID
@@ -35,21 +36,36 @@ FAKE_REQUEST_ID = fake_instance_actions.FAKE_REQUEST_ID1
 
 def format_action(action):
     '''Remove keys that aren't serialized.'''
-    if 'id' in action:
-        del(action['id'])
-    if 'finish_time' in action:
-        del(action['finish_time'])
+    to_delete = ('id', 'finish_time', 'created_at', 'updated_at', 'deleted_at',
+                 'deleted')
+    for key in to_delete:
+        if key in action:
+            del(action[key])
+    if 'start_time' in action:
+        # NOTE(danms): Without WSGI above us, these will be just stringified
+        action['start_time'] = str(action['start_time'].replace(tzinfo=None))
+    for event in action.get('events', []):
+        format_event(event)
     return action
 
 
 def format_event(event):
     '''Remove keys that aren't serialized.'''
-    if 'id' in event:
-        del(event['id'])
+    to_delete = ('id', 'created_at', 'updated_at', 'deleted_at', 'deleted',
+                 'action_id')
+    for key in to_delete:
+        if key in event:
+            del(event[key])
+    if 'start_time' in event:
+        # NOTE(danms): Without WSGI above us, these will be just stringified
+        event['start_time'] = str(event['start_time'].replace(tzinfo=None))
+    if 'finish_time' in event:
+        # NOTE(danms): Without WSGI above us, these will be just stringified
+        event['finish_time'] = str(event['finish_time'].replace(tzinfo=None))
     return event
 
 
-class InstanceActionsPolicyTest(test.TestCase):
+class InstanceActionsPolicyTest(test.NoDBTestCase):
     def setUp(self):
         super(InstanceActionsPolicyTest, self).setUp()
         self.controller = instance_actions.InstanceActionsController()
@@ -60,9 +76,11 @@ class InstanceActionsPolicyTest(test.TestCase):
                                policy.parse_rule('project_id:%(project_id)s')})
         policy.set_rules(rules)
 
-        def fake_instance_get_by_uuid(context, instance_id):
-            return {'name': 'fake', 'project_id': '%s_unequal' %
-                                                            context.project_id}
+        def fake_instance_get_by_uuid(context, instance_id,
+                                      columns_to_join=None):
+            return fake_instance.fake_db_instance(
+                **{'name': 'fake', 'project_id': '%s_unequal' %
+                       context.project_id})
 
         self.stubs.Set(db, 'instance_get_by_uuid', fake_instance_get_by_uuid)
         req = fakes.HTTPRequest.blank('/v2/123/servers/12/os-instance-actions')
@@ -75,9 +93,11 @@ class InstanceActionsPolicyTest(test.TestCase):
                                policy.parse_rule('project_id:%(project_id)s')})
         policy.set_rules(rules)
 
-        def fake_instance_get_by_uuid(context, instance_id):
-            return {'name': 'fake', 'project_id': '%s_unequal' %
-                                                            context.project_id}
+        def fake_instance_get_by_uuid(context, instance_id,
+                                      columns_to_join=None):
+            return fake_instance.fake_db_instance(
+                **{'name': 'fake', 'project_id': '%s_unequal' %
+                       context.project_id})
 
         self.stubs.Set(db, 'instance_get_by_uuid', fake_instance_get_by_uuid)
         req = fakes.HTTPRequest.blank(
@@ -86,7 +106,7 @@ class InstanceActionsPolicyTest(test.TestCase):
                           str(uuid.uuid4()), '1')
 
 
-class InstanceActionsTest(test.TestCase):
+class InstanceActionsTest(test.NoDBTestCase):
     def setUp(self):
         super(InstanceActionsTest, self).setUp()
         self.controller = instance_actions.InstanceActionsController()
@@ -116,8 +136,7 @@ class InstanceActionsTest(test.TestCase):
         res_dict = self.controller.index(req, FAKE_UUID)
         for res in res_dict['instanceActions']:
             fake_action = self.fake_actions[FAKE_UUID][res['request_id']]
-            fake_action = format_action(fake_action)
-            self.assertEqual(fake_action, res)
+            self.assertEqual(format_action(fake_action), format_action(res))
 
     def test_get_action_with_events_allowed(self):
         def fake_get_action(context, uuid, request_id):
@@ -141,10 +160,9 @@ class InstanceActionsTest(test.TestCase):
         res_dict = self.controller.show(req, FAKE_UUID, FAKE_REQUEST_ID)
         fake_action = self.fake_actions[FAKE_UUID][FAKE_REQUEST_ID]
         fake_events = self.fake_events[fake_action['id']]
-        fake_events = [format_event(event) for event in fake_events]
-        fake_action = format_action(fake_action)
         fake_action['events'] = fake_events
-        self.assertEqual(fake_action, res_dict['instanceAction'])
+        self.assertEqual(format_action(fake_action),
+                         format_action(res_dict['instanceAction']))
 
     def test_get_action_with_events_not_allowed(self):
         def fake_get_action(context, uuid, request_id):
@@ -165,8 +183,8 @@ class InstanceActionsTest(test.TestCase):
                                 '/v2/123/servers/12/os-instance-actions/1')
         res_dict = self.controller.show(req, FAKE_UUID, FAKE_REQUEST_ID)
         fake_action = self.fake_actions[FAKE_UUID][FAKE_REQUEST_ID]
-        fake_action = format_action(fake_action)
-        self.assertEqual(fake_action, res_dict['instanceAction'])
+        self.assertEqual(format_action(fake_action),
+                         format_action(res_dict['instanceAction']))
 
     def test_action_not_found(self):
         def fake_no_action(context, uuid, action_id):
@@ -178,8 +196,16 @@ class InstanceActionsTest(test.TestCase):
         self.assertRaises(exc.HTTPNotFound, self.controller.show, req,
                           FAKE_UUID, FAKE_REQUEST_ID)
 
+    def test_instance_not_found(self):
+        def fake_get(self, context, instance_uuid):
+            raise exception.InstanceNotFound(instance_id=instance_uuid)
+        self.stubs.Set(compute_api.API, 'get', fake_get)
+        req = fakes.HTTPRequest.blank('/v2/123/servers/12/os-instance-actions')
+        self.assertRaises(exc.HTTPNotFound, self.controller.index, req,
+                          FAKE_UUID)
 
-class InstanceActionsSerializerTest(test.TestCase):
+
+class InstanceActionsSerializerTest(test.NoDBTestCase):
     def setUp(self):
         super(InstanceActionsSerializerTest, self).setUp()
         self.fake_actions = copy.deepcopy(fake_instance_actions.FAKE_ACTIONS)
@@ -215,7 +241,7 @@ class InstanceActionsSerializerTest(test.TestCase):
         serializer = instance_actions.InstanceActionTemplate()
         action = self.fake_actions[FAKE_UUID][FAKE_REQUEST_ID]
         event = self.fake_events[action['id']][0]
-        action['events'] = [event, event]
+        action['events'] = [dict(event), dict(event)]
         text = serializer.serialize({'instanceAction': action})
         tree = etree.fromstring(text)
 

@@ -24,11 +24,12 @@ from nova import context
 from nova.network import rpcapi as network_rpcapi
 from nova.openstack.common import rpc
 from nova import test
+from nova.tests import matchers
 
 CONF = cfg.CONF
 
 
-class NetworkRpcAPITestCase(test.TestCase):
+class NetworkRpcAPITestCase(test.NoDBTestCase):
     def setUp(self):
         super(NetworkRpcAPITestCase, self).setUp()
         self.flags(multi_host=True)
@@ -78,9 +79,24 @@ class NetworkRpcAPITestCase(test.TestCase):
         retval = getattr(rpcapi, method)(ctxt, **kwargs)
 
         self.assertEqual(retval, expected_retval)
+        self.assertIsNotNone(self.fake_args)
+        self.assertIsNotNone(self.fake_kwargs)
         expected_args = [ctxt, expected_topic, expected_msg]
         for arg, expected_arg in zip(self.fake_args, expected_args):
-            self.assertEqual(arg, expected_arg)
+            try:
+                self.assertEqual(arg, expected_arg)
+            except AssertionError:
+                # actual_args may contain optional args, like the one that
+                # have default values; therefore if arg and excepted_arg
+                # do not match verify at least that the required ones do
+                if isinstance(arg, dict) and isinstance(expected_arg, dict):
+                    actual_args = arg.get('args')
+                    required_args = expected_arg.get('args')
+                    if actual_args and required_args:
+                        self.assertThat(required_args,
+                                        matchers.IsSubDictOf(actual_args))
+                else:
+                    raise
 
     def test_get_all_networks(self):
         self._test_network_api('get_all_networks', rpc_method='call')
@@ -182,6 +198,11 @@ class NetworkRpcAPITestCase(test.TestCase):
     def test_deallocate_for_instance(self):
         self._test_network_api('deallocate_for_instance', rpc_method='call',
                 instance_id='fake_id', project_id='fake_id', host='fake_host')
+
+    def test_deallocate_for_instance_with_expected_networks(self):
+        self._test_network_api('deallocate_for_instance', rpc_method='call',
+                instance_id='fake_id', project_id='fake_id',
+                host='fake_host', requested_networks={})
 
     def test_add_fixed_ip_to_instance(self):
         self._test_network_api('add_fixed_ip_to_instance', rpc_method='call',

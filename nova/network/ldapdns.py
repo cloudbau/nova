@@ -12,13 +12,19 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import ldap
+try:
+    import ldap
+except ImportError:
+    # This module needs to be importable despite ldap not being a requirement
+    ldap = None
+
 import time
 
 from oslo.config import cfg
 
 from nova import exception
 from nova.network import dns_driver
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova import utils
 
@@ -84,8 +90,10 @@ class DNSEntry(object):
 
     def __init__(self, ldap_object):
         """ldap_object is an instance of ldap.LDAPObject.
+
            It should already be initialized and bound before
-           getting passed in here."""
+           getting passed in here.
+        """
         self.lobj = ldap_object
         self.ldap_tuple = None
         self.qualified_domain = None
@@ -240,7 +248,6 @@ class DomainEntry(DNSEntry):
                      'dc': [name]}
             self.lobj.add_s(newdn, create_modlist(attrs))
             return self.subentry_with_name(name)
-        self.update_soa()
 
     def remove_entry(self, name):
         entry = self.subentry_with_name(name)
@@ -307,9 +314,13 @@ class LdapDNS(dns_driver.DNSDriver):
     """Driver for PowerDNS using ldap as a back end.
 
        This driver assumes ldap-method=strict, with all domains
-       in the top-level, aRecords only."""
+       in the top-level, aRecords only.
+    """
 
     def __init__(self):
+        if not ldap:
+            raise ImportError(_('ldap not installed'))
+
         self.lobj = ldap.initialize(CONF.ldap_dns_url)
         self.lobj.simple_bind_s(CONF.ldap_dns_user,
                                 CONF.ldap_dns_password)

@@ -20,7 +20,10 @@
 """IPv6 address generation with account identifier embedded."""
 
 import hashlib
+
 import netaddr
+
+from nova.openstack.common.gettextutils import _
 
 
 def to_global(prefix, mac, project_id):

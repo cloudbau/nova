@@ -68,7 +68,8 @@ On Ubuntu Precise (12.04) you may also need to add the following packages::
 
 On Fedora-based distributions (e.g., Fedora/RHEL/CentOS/Scientific Linux)::
 
-  sudo yum install python-devel openssl-devel python-pip git gcc libxslt-devel mysql-devel
+  sudo yum install python-devel openssl-devel python-pip git gcc libxslt-devel mysql-devel python-pip postgresql-devel
+  sudo pip-python install tox
 
 
 Mac OS X Systems
@@ -123,8 +124,8 @@ You can manually install the virtual environment instead of having
   python tools/install_venv.py
 
 This will install all of the Python packages listed in the
-``tools/pip-requires`` file into your virtualenv. There will also be some
-additional packages (pip, distribute, greenlet) that are installed
+``requirements.txt`` file into your virtualenv. There will also be some
+additional packages (pip, setuptools, greenlet) that are installed
 by the ``tools/install_venv.py`` file into the virutalenv.
 
 If all goes well, you should get a message something like this::

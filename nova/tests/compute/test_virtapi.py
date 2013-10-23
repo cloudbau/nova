@@ -24,7 +24,7 @@ from nova.virt import fake
 from nova.virt import virtapi
 
 
-class VirtAPIBaseTest(test.TestCase, test.APICoverage):
+class VirtAPIBaseTest(test.NoDBTestCase, test.APICoverage):
 
     cover_api = virtapi.VirtAPI
 
@@ -45,26 +45,9 @@ class VirtAPIBaseTest(test.TestCase, test.APICoverage):
         self.assertExpected('instance_update', 'fake-uuid',
                             dict(host='foohost'))
 
-    def test_instance_get_by_uuid(self):
-        self.assertExpected('instance_get_by_uuid', 'fake-uuid')
-
-    def test_instance_get_all_by_host(self):
-        self.assertExpected('instance_get_all_by_host', 'fake-host')
-
-    def test_aggregate_get_by_host(self):
-        self.assertExpected('aggregate_get_by_host', 'fake-host', key=None)
-
-    def test_aggregate_metadata_add(self):
-        self.assertExpected('aggregate_metadata_add', {'id': 'fake'},
-                            {'foo': 'bar'}, set_delete=False)
-
-    def test_aggregate_metadata_delete(self):
-        self.assertExpected('aggregate_metadata_delete', {'id': 'fake'},
-                            'foo')
-
     def test_security_group_get_by_instance(self):
         self.assertExpected('security_group_get_by_instance',
-                            {'id': 'fake-id'})
+                            {'uuid': 'fake-id'})
 
     def test_security_group_rule_get_by_security_group(self):
         self.assertExpected('security_group_rule_get_by_security_group',
@@ -80,6 +63,14 @@ class VirtAPIBaseTest(test.TestCase, test.APICoverage):
     def test_instance_type_get(self):
         self.assertExpected('instance_type_get',
                             'fake-instance-type')
+
+    def test_block_device_mapping_get_all_by_instance(self):
+        self.assertExpected('block_device_mapping_get_all_by_instance',
+                            {'uuid': 'fake_uuid'}, legacy=False)
+
+    def test_block_device_mapping_update(self):
+        self.assertExpected('block_device_mapping_update',
+                            'fake_bdm', 'fake_values')
 
 
 class FakeVirtAPITest(VirtAPIBaseTest):
@@ -99,16 +90,23 @@ class FakeVirtAPITest(VirtAPIBaseTest):
         self.mox.StubOutWithMock(db, db_method)
 
         if method in ('aggregate_metadata_add', 'aggregate_metadata_delete',
-                      'security_group_rule_get_by_security_group',
-                      'security_group_get_by_instance'):
+                      'security_group_rule_get_by_security_group'):
             # NOTE(danms): FakeVirtAPI will convert the first argument to
             # argument['id'], so expect that in the actual db call
             e_args = tuple([args[0]['id']] + list(args[1:]))
+        elif method in ('security_group_get_by_instance',
+                        'block_device_mapping_get_all_by_instance'):
+            e_args = tuple([args[0]['uuid']] + list(args[1:]))
         else:
             e_args = args
 
-        getattr(db, db_method)(self.context, *e_args, **kwargs).AndReturn(
-            'it worked')
+        if method in ('block_device_mapping_get_all_by_instance'):
+            e_kwargs = {}
+        else:
+            e_kwargs = kwargs
+
+        getattr(db, db_method)(self.context, *e_args, **e_kwargs).AndReturn(
+                'it worked')
         self.mox.ReplayAll()
         result = getattr(self.virtapi, method)(self.context, *args, **kwargs)
         self.assertEqual(result, 'it worked')

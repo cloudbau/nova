@@ -19,6 +19,7 @@ import errno
 import os
 import shutil
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.disk import api as disk_api
 from nova.virt.libvirt import utils as libvirt_utils
@@ -39,7 +40,7 @@ def inject_into_image(image, key, net, metadata, admin_password,
                 files, partition, use_cow)
     except Exception as e:
         LOG.warn(_("Failed to inject data into image %(image)s. "
-                   "Error: %(e)s") % locals())
+                   "Error: %(e)s"), {'image': image, 'e': e})
 
 
 def unlink_without_raise(path):
@@ -49,7 +50,8 @@ def unlink_without_raise(path):
         if e.errno == errno.ENOENT:
             return
         else:
-            LOG.warn(_("Failed to unlink %(path)s, error: %(e)s") % locals())
+            LOG.warn(_("Failed to unlink %(path)s, error: %(e)s"),
+                     {'path': path, 'e': e})
 
 
 def rmtree_without_raise(path):
@@ -57,7 +59,8 @@ def rmtree_without_raise(path):
         if os.path.isdir(path):
             shutil.rmtree(path)
     except OSError as e:
-        LOG.warn(_("Failed to remove dir %(path)s, error: %(e)s") % locals())
+        LOG.warn(_("Failed to remove dir %(path)s, error: %(e)s"),
+                 {'path': path, 'e': e})
 
 
 def write_to_file(path, contents):
@@ -73,7 +76,8 @@ def create_link_without_raise(source, link):
             return
         else:
             LOG.warn(_("Failed to create symlink from %(source)s to %(link)s"
-                       ", error: %(e)s") % locals())
+                       ", error: %(e)s"),
+                     {'source': source, 'link': link, 'e': e})
 
 
 def random_alnum(count):
@@ -81,3 +85,44 @@ def random_alnum(count):
     import string
     chars = string.ascii_uppercase + string.digits
     return "".join(random.choice(chars) for _ in range(count))
+
+
+def map_network_interfaces(network_info, use_ipv6=False):
+    # TODO(deva): fix assumption that device names begin with "eth"
+    #             and fix assumption about ordering
+    if not isinstance(network_info, list):
+        network_info = [network_info]
+
+    interfaces = []
+    for id, vif in enumerate(network_info):
+        address_v6 = gateway_v6 = netmask_v6 = None
+        address_v4 = gateway_v4 = netmask_v4 = dns_v4 = None
+
+        if use_ipv6:
+            subnets_v6 = [s for s in vif['network']['subnets']
+                if s['version'] == 6]
+            if len(subnets_v6):
+                address_v6 = subnets_v6[0]['ips'][0]['address']
+                netmask_v6 = subnets_v6[0].as_netaddr()._prefixlen
+                gateway_v6 = subnets_v6[0]['gateway']['address']
+
+        subnets_v4 = [s for s in vif['network']['subnets']
+                if s['version'] == 4]
+        if len(subnets_v4):
+            address_v4 = subnets_v4[0]['ips'][0]['address']
+            netmask_v4 = subnets_v4[0].as_netaddr().netmask
+            gateway_v4 = subnets_v4[0]['gateway']['address']
+            dns_v4 = ' '.join([x['address'] for x in subnets_v4[0]['dns']])
+
+        interface = {
+                'name': 'eth%d' % id,
+                'address': address_v4,
+                'gateway': gateway_v4,
+                'netmask': netmask_v4,
+                'dns': dns_v4,
+                'address_v6': address_v6,
+                'gateway_v6': gateway_v6,
+                'netmask_v6': netmask_v6,
+            }
+        interfaces.append(interface)
+    return interfaces

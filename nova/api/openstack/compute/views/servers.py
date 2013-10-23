@@ -23,8 +23,11 @@ from nova.api.openstack.compute.views import addresses as views_addresses
 from nova.api.openstack.compute.views import flavors as views_flavors
 from nova.api.openstack.compute.views import images as views_images
 from nova.compute import flavors
+from nova.objects import instance as instance_obj
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
+from nova import utils
 
 
 LOG = logging.getLogger(__name__)
@@ -54,14 +57,6 @@ class ViewBuilder(common.ViewBuilder):
         self._flavor_builder = views_flavors.ViewBuilder()
         self._image_builder = views_images.ViewBuilder()
 
-    def _skip_precooked(func):
-        def wrapped(self, request, instance):
-            if instance.get("_is_precooked"):
-                return dict(server=instance)
-            else:
-                return func(self, request, instance)
-        return wrapped
-
     def create(self, request, instance):
         """View that should be returned when an instance is created."""
         return {
@@ -73,7 +68,6 @@ class ViewBuilder(common.ViewBuilder):
             },
         }
 
-    @_skip_precooked
     def basic(self, request, instance):
         """Generic, non-detailed view of an instance."""
         return {
@@ -86,9 +80,10 @@ class ViewBuilder(common.ViewBuilder):
             },
         }
 
-    @_skip_precooked
     def show(self, request, instance):
         """Detailed view of a single instance."""
+        ip_v4 = instance.get('access_ip_v4')
+        ip_v6 = instance.get('access_ip_v6')
         server = {
             "server": {
                 "id": instance["uuid"],
@@ -103,16 +98,17 @@ class ViewBuilder(common.ViewBuilder):
                 "created": timeutils.isotime(instance["created_at"]),
                 "updated": timeutils.isotime(instance["updated_at"]),
                 "addresses": self._get_addresses(request, instance),
-                "accessIPv4": instance.get("access_ip_v4") or "",
-                "accessIPv6": instance.get("access_ip_v6") or "",
+                "accessIPv4": str(ip_v4) if ip_v4 is not None else '',
+                "accessIPv6": str(ip_v6) if ip_v6 is not None else '',
                 "links": self._get_links(request,
                                          instance["uuid"],
                                          self._collection_name),
             },
         }
-        _inst_fault = self._get_fault(request, instance)
-        if server["server"]["status"] in self._fault_statuses and _inst_fault:
-            server['server']['fault'] = _inst_fault
+        if server["server"]["status"] in self._fault_statuses:
+            _inst_fault = self._get_fault(request, instance)
+            if _inst_fault:
+                server['server']['fault'] = _inst_fault
 
         if server["server"]["status"] in self._progress_statuses:
             server["server"]["progress"] = instance.get("progress", 0)
@@ -142,8 +138,12 @@ class ViewBuilder(common.ViewBuilder):
 
     @staticmethod
     def _get_metadata(instance):
-        metadata = instance.get("metadata", [])
-        return dict((item['key'], item['value']) for item in metadata)
+        # FIXME(danms): Transitional support for objects
+        metadata = instance.get('metadata')
+        if isinstance(instance, instance_obj.Instance):
+            return metadata or {}
+        else:
+            return utils.instance_meta(instance)
 
     @staticmethod
     def _get_vm_state(instance):
@@ -181,7 +181,7 @@ class ViewBuilder(common.ViewBuilder):
             return ""
 
     def _get_flavor(self, request, instance):
-        instance_type = flavors.extract_instance_type(instance)
+        instance_type = flavors.extract_flavor(instance)
         if not instance_type:
             LOG.warn(_("Instance has had its instance_type removed "
                     "from the DB"), instance=instance)
@@ -199,7 +199,8 @@ class ViewBuilder(common.ViewBuilder):
         }
 
     def _get_fault(self, request, instance):
-        fault = instance.get("fault", None)
+        # This can result in a lazy load of the fault information
+        fault = instance.fault
 
         if not fault:
             return None
@@ -220,3 +221,48 @@ class ViewBuilder(common.ViewBuilder):
                 fault_dict['details'] = fault["details"]
 
         return fault_dict
+
+
+class ViewBuilderV3(ViewBuilder):
+    """Model a server V3 API response as a python dictionary."""
+
+    def __init__(self):
+        """Initialize view builder."""
+        super(ViewBuilderV3, self).__init__()
+        self._address_builder = views_addresses.ViewBuilderV3()
+        self._image_builder = views_images.ViewBuilderV3()
+
+    def show(self, request, instance):
+        """Detailed view of a single instance."""
+        ip_v4 = instance.get('access_ip_v4')
+        ip_v6 = instance.get('access_ip_v6')
+        server = {
+            "server": {
+                "id": instance["uuid"],
+                "name": instance["display_name"],
+                "status": self._get_vm_state(instance),
+                "tenant_id": instance.get("project_id") or "",
+                "user_id": instance.get("user_id") or "",
+                "metadata": self._get_metadata(instance),
+                "host_id": self._get_host_id(instance) or "",
+                "image": self._get_image(request, instance),
+                "flavor": self._get_flavor(request, instance),
+                "created": timeutils.isotime(instance["created_at"]),
+                "updated": timeutils.isotime(instance["updated_at"]),
+                "addresses": self._get_addresses(request, instance),
+                "access_ip_v4": str(ip_v4) if ip_v4 is not None else '',
+                "access_ip_v6": str(ip_v6) if ip_v6 is not None else '',
+                "links": self._get_links(request,
+                                         instance["uuid"],
+                                         self._collection_name),
+            },
+        }
+        if server["server"]["status"] in self._fault_statuses:
+            _inst_fault = self._get_fault(request, instance)
+            if _inst_fault:
+                server['server']['fault'] = _inst_fault
+
+        if server["server"]["status"] in self._progress_statuses:
+            server["server"]["progress"] = instance.get("progress", 0)
+
+        return server

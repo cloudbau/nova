@@ -19,6 +19,7 @@
 A Hyper-V Nova Compute driver.
 """
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt import driver
 from nova.virt.hyperv import hostops
@@ -58,18 +59,20 @@ class HyperVDriver(driver.ComputeDriver):
         self._vmops.reboot(instance, network_info, reboot_type)
 
     def destroy(self, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, context=None):
         self._vmops.destroy(instance, network_info, block_device_info,
                             destroy_disks)
 
     def get_info(self, instance):
         return self._vmops.get_info(instance)
 
-    def attach_volume(self, connection_info, instance, mountpoint):
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
         return self._volumeops.attach_volume(connection_info,
                                              instance['name'])
 
-    def detach_volume(self, connection_info, instance, mountpoint):
+    def detach_volume(self, connection_info, instance, mountpoint,
+                      encryption=None):
         return self._volumeops.detach_volume(connection_info,
                                              instance['name'])
 
@@ -103,7 +106,8 @@ class HyperVDriver(driver.ComputeDriver):
     def power_off(self, instance):
         self._vmops.power_off(instance)
 
-    def power_on(self, instance):
+    def power_on(self, context, instance, network_info,
+                 block_device_info=None):
         self._vmops.power_on(instance)
 
     def live_migration(self, context, instance_ref, dest, post_method,
@@ -114,7 +118,7 @@ class HyperVDriver(driver.ComputeDriver):
                                               block_migration, migrate_data)
 
     def pre_live_migration(self, context, instance, block_device_info,
-                           network_info, migrate_data=None):
+                           network_info, disk, migrate_data=None):
         self._livemigrationops.pre_live_migration(context, instance,
                                                   block_device_info,
                                                   network_info)
@@ -147,10 +151,14 @@ class HyperVDriver(driver.ComputeDriver):
             ctxt, instance_ref, dest_check_data)
 
     def plug_vifs(self, instance, network_info):
-        LOG.debug(_("plug_vifs called"), instance=instance)
+        """Plug VIFs into networks."""
+        msg = _("VIF plugging is not supported by the Hyper-V driver.")
+        raise NotImplementedError(msg)
 
     def unplug_vifs(self, instance, network_info):
-        LOG.debug(_("unplug_vifs called"), instance=instance)
+        """Unplug VIFs from networks."""
+        msg = _("VIF unplugging is not supported by the Hyper-V driver.")
+        raise NotImplementedError(msg)
 
     def ensure_filtering_rules_for_instance(self, instance_ref, network_info):
         LOG.debug(_("ensure_filtering_rules_for_instance called"),
@@ -172,17 +180,17 @@ class HyperVDriver(driver.ComputeDriver):
         self._migrationops.confirm_migration(migration, instance, network_info)
 
     def finish_revert_migration(self, instance, network_info,
-                                block_device_info=None):
+                                block_device_info=None, power_on=True):
         self._migrationops.finish_revert_migration(instance, network_info,
-                                                   block_device_info)
+                                                   block_device_info, power_on)
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance=False,
-                         block_device_info=None):
+                         block_device_info=None, power_on=True):
         self._migrationops.finish_migration(context, migration, instance,
                                             disk_info, network_info,
                                             image_meta, resize_instance,
-                                            block_device_info)
+                                            block_device_info, power_on)
 
     def get_host_ip_addr(self):
         return self._hostops.get_host_ip_addr()
@@ -190,6 +198,3 @@ class HyperVDriver(driver.ComputeDriver):
     def get_console_output(self, instance):
         LOG.debug(_("get_console_output called"), instance=instance)
         return ''
-
-    def legacy_nwinfo(self):
-        return False

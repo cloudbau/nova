@@ -70,3 +70,15 @@ class ViewBuilder(common.ViewBuilder):
             flavors_dict["flavors_links"] = flavors_links
 
         return flavors_dict
+
+
+class V3ViewBuilder(ViewBuilder):
+    def show(self, request, flavor):
+        flavor_dict = super(V3ViewBuilder, self).show(request, flavor)
+        flavor_dict['flavor'].update({
+            "swap": flavor["swap"],
+            "ephemeral": flavor["ephemeral_gb"],
+            "disabled": flavor["disabled"],
+            "vcpus": flavor["vcpus"],
+        })
+        return flavor_dict

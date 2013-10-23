@@ -39,18 +39,21 @@ class ConfigDriveTest(test.TestCase):
     def test_show(self):
         self.stubs.Set(db, 'instance_get',
                         fakes.fake_instance_get())
+        self.stubs.Set(db, 'instance_get_by_uuid',
+                        fakes.fake_instance_get())
         req = webob.Request.blank('/v2/fake/servers/1')
         req.headers['Content-Type'] = 'application/json'
         response = req.get_response(fakes.wsgi_app(init_only=('servers',)))
         self.assertEquals(response.status_int, 200)
         res_dict = jsonutils.loads(response.body)
-        self.assertTrue('config_drive' in res_dict['server'])
+        self.assertIn('config_drive', res_dict['server'])
 
     def test_detail_servers(self):
-        self.stubs.Set(db, 'instance_get',
-                        fakes.fake_instance_get())
+        self.stubs.Set(db, 'instance_get_all_by_filters',
+                       fakes.fake_instance_get_all_by_filters())
         req = fakes.HTTPRequest.blank('/v2/fake/servers/detail')
         res = req.get_response(fakes.wsgi_app(init_only=('servers,')))
         server_dicts = jsonutils.loads(res.body)['servers']
+        self.assertNotEqual(len(server_dicts), 0)
         for server_dict in server_dicts:
-            self.asserTrue('config_drive' in server_dict)
+            self.assertIn('config_drive', server_dict)

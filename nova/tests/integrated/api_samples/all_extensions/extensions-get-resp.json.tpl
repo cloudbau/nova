@@ -65,6 +65,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-extended-volumes",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedVolumes",
+            "namespace": "http://docs.openstack.org/compute/ext/extended_volumes/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "OS-EXT-VIF-NET",
             "description": "%(text)s",
             "links": [],
@@ -86,6 +94,14 @@
             "links": [],
             "name": "FlavorExtraData",
             "namespace": "http://docs.openstack.org/compute/ext/flavor_extra_data/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "OS-SRV-USG",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ServerUsage",
+            "namespace": "http://docs.openstack.org/compute/ext/server_usage/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -121,6 +137,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-assisted-volume-snapshots",
+            "description": "%(text)s",
+            "links": [],
+            "name": "AssistedVolumeSnapshots",
+            "namespace": "http://docs.openstack.org/compute/ext/assisted-volume-snapshots/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-attach-interfaces",
             "description": "Attach interface support.",
             "links": [],
@@ -145,11 +169,27 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-block-device-mapping-v2-boot",
+            "description": "%(text)s",
+            "links": [],
+            "name": "BlockDeviceMappingV2Boot",
+            "namespace": "http://docs.openstack.org/compute/ext/block_device_mapping_v2_boot/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-cells",
             "description": "%(text)s",
             "links": [],
             "name": "Cells",
             "namespace": "http://docs.openstack.org/compute/ext/cells/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-cell-capacities",
+            "description": "%(text)s",
+            "links": [],
+            "name": "CellCapacities",
+            "namespace": "http://docs.openstack.org/compute/ext/cell_capacities/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -345,6 +385,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-extended-services",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedServices",
+            "namespace": "http://docs.openstack.org/compute/ext/extended_services/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-fping",
             "description": "%(text)s",
             "links": [],
@@ -417,11 +465,27 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-extended-quotas",
+            "description": "%(text)s",
+            "links": [],
+            "name": "ExtendedQuotas",
+            "namespace": "http://docs.openstack.org/compute/ext/extended_quotas/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-quota-sets",
             "description": "%(text)s",
             "links": [],
             "name": "Quotas",
             "namespace": "http://docs.openstack.org/compute/ext/quotas-sets/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-user-quotas",
+            "description": "%(text)s",
+            "links": [],
+            "name": "UserQuotas",
+            "namespace": "http://docs.openstack.org/compute/ext/user_quotas/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -473,6 +537,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-shelve",
+            "description": "%(text)s",
+            "links": [],
+            "name": "Shelve",
+            "namespace": "http://docs.openstack.org/compute/ext/shelve/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-simple-tenant-usage",
             "description": "%(text)s",
             "links": [],
@@ -486,6 +558,14 @@
             "links": [],
             "name": "UsedLimits",
             "namespace": "http://docs.openstack.org/compute/ext/used_limits/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-used-limits-for-admin",
+            "description": "%(text)s",
+            "links": [],
+            "name": "UsedLimitsForAdmin",
+            "namespace": "http://docs.openstack.org/compute/ext/used_limits_for_admin/api/v1.1",
             "updated": "%(timestamp)s"
         },
         {
@@ -505,6 +585,14 @@
             "updated": "%(timestamp)s"
         },
         {
+            "alias": "os-volume-attachment-update",
+            "description": "%(text)s",
+            "links": [],
+            "name": "VolumeAttachmentUpdate",
+            "namespace": "http://docs.openstack.org/compute/ext/os-volume-attachment-update/api/v2",
+            "updated": "%(timestamp)s"
+        },
+        {
             "alias": "os-volumes",
             "description": "%(text)s",
             "links": [],
@@ -518,6 +606,22 @@
             "links": [],
             "name": "InstanceActions",
             "namespace": "http://docs.openstack.org/compute/ext/instance-actions/api/v1.1",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-migrations",
+            "description": "%(text)s",
+            "links": [],
+            "name": "Migrations",
+            "namespace": "http://docs.openstack.org/compute/ext/migrations/api/v2.0",
+            "updated": "%(timestamp)s"
+        },
+        {
+            "alias": "os-baremetal-ext-status",
+            "description": "%(text)s",
+            "links": [],
+            "name": "BareMetalExtStatus",
+            "namespace": "http://docs.openstack.org/compute/ext/baremetal_ext_status/api/v2",
             "updated": "%(timestamp)s"
         }
     ]

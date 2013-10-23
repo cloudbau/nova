@@ -30,6 +30,7 @@ from nova.compute import task_states
 from nova.compute import utils as compute_utils
 from nova.compute import vm_states
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova import quota
 
@@ -39,11 +40,9 @@ osapi_opts = [
                help='the maximum number of items returned in a single '
                     'response from a collection resource'),
     cfg.StrOpt('osapi_compute_link_prefix',
-               default=None,
                help='Base URL that will be presented to users in links '
                     'to the OpenStack Compute API'),
     cfg.StrOpt('osapi_glance_link_prefix',
-               default=None,
                help='Base URL that will be presented to users in links '
                     'to glance resources'),
 ]
@@ -101,7 +100,13 @@ _STATE_MAP = {
         'default': 'DELETED',
     },
     vm_states.SOFT_DELETED: {
-        'default': 'DELETED',
+        'default': 'SOFT_DELETED',
+    },
+    vm_states.SHELVED: {
+        'default': 'SHELVED',
+    },
+    vm_states.SHELVED_OFFLOADED: {
+        'default': 'SHELVED_OFFLOADED',
     },
 }
 
@@ -118,12 +123,17 @@ def status_from_state(vm_state, task_state='default'):
     return status
 
 
-def vm_state_from_status(status):
-    """Map the server status string to a vm state."""
+def task_and_vm_state_from_status(status):
+    """Map the server status string to a vm state and list of task states."""
+    vm_state = ''
+    task_states = []
     for state, task_map in _STATE_MAP.iteritems():
-        status_string = task_map.get("default")
-        if status.lower() == status_string.lower():
-            return state
+        for task_state, mapped_state in task_map.iteritems():
+            status_string = mapped_state
+            if status.lower() == status_string.lower():
+                vm_state = state
+                task_states.append(task_state)
+    return vm_state, task_states
 
 
 def get_pagination_params(request):
@@ -140,23 +150,25 @@ def get_pagination_params(request):
     """
     params = {}
     if 'limit' in request.GET:
-        params['limit'] = _get_limit_param(request)
+        params['limit'] = _get_int_param(request, 'limit')
+    if 'page_size' in request.GET:
+        params['page_size'] = _get_int_param(request, 'page_size')
     if 'marker' in request.GET:
         params['marker'] = _get_marker_param(request)
     return params
 
 
-def _get_limit_param(request):
-    """Extract integer limit from request or fail."""
+def _get_int_param(request, param):
+    """Extract integer param from request or fail."""
     try:
-        limit = int(request.GET['limit'])
+        int_param = int(request.GET[param])
     except ValueError:
-        msg = _('limit param must be an integer')
+        msg = _('%s param must be an integer') % param
         raise webob.exc.HTTPBadRequest(explanation=msg)
-    if limit < 0:
-        msg = _('limit param must be positive')
+    if int_param < 0:
+        msg = _('%s param must be positive') % param
         raise webob.exc.HTTPBadRequest(explanation=msg)
-    return limit
+    return int_param
 
 
 def _get_marker_param(request):
@@ -278,7 +290,7 @@ def remove_version_from_href(href):
 
 
 def check_img_metadata_properties_quota(context, metadata):
-    if metadata is None:
+    if not metadata:
         return
     try:
         QUOTAS.limit_check(context, metadata_items=len(metadata))
@@ -358,9 +370,12 @@ def raise_http_conflict_for_instance_invalid_state(exc, action):
     """
     attr = exc.kwargs.get('attr')
     state = exc.kwargs.get('state')
+    not_launched = exc.kwargs.get('not_launched')
     if attr and state:
         msg = _("Cannot '%(action)s' while instance is in %(attr)s "
                 "%(state)s") % {'action': action, 'attr': attr, 'state': state}
+    elif not_launched:
+        msg = _("Cannot '%s' an instance which has never been active") % action
     else:
         # At least give some meaningful message
         msg = _("Instance is in an invalid state for '%s'") % action
@@ -454,6 +469,16 @@ def check_snapshots_enabled(f):
 class ViewBuilder(object):
     """Model API responses as dictionaries."""
 
+    def _get_project_id(self, request):
+        """
+        Get project id from request url if present or empty string
+        otherwise
+        """
+        project_id = request.environ["nova.context"].project_id
+        if project_id in request.url:
+            return project_id
+        return ''
+
     def _get_links(self, request, identifier, collection_name):
         return [{
             "rel": "self",
@@ -472,7 +497,7 @@ class ViewBuilder(object):
         params["marker"] = identifier
         prefix = self._update_compute_link_prefix(request.application_url)
         url = os.path.join(prefix,
-                           request.environ["nova.context"].project_id,
+                           self._get_project_id(request),
                            collection_name)
         return "%s?%s" % (url, dict_to_query_str(params))
 
@@ -480,7 +505,7 @@ class ViewBuilder(object):
         """Return an href string pointing to this object."""
         prefix = self._update_compute_link_prefix(request.application_url)
         return os.path.join(prefix,
-                            request.environ["nova.context"].project_id,
+                            self._get_project_id(request),
                             collection_name,
                             str(identifier))
 
@@ -489,7 +514,7 @@ class ViewBuilder(object):
         base_url = remove_version_from_href(request.application_url)
         base_url = self._update_compute_link_prefix(base_url)
         return os.path.join(base_url,
-                            request.environ["nova.context"].project_id,
+                            self._get_project_id(request),
                             collection_name,
                             str(identifier))
 

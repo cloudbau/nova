@@ -4,6 +4,7 @@
 # Copyright 2010 United States Government as represented by the
 # Administrator of the National Aeronautics and Space Administration.
 # All Rights Reserved.
+# Copyright 2013 Red Hat, Inc.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -31,16 +32,17 @@ from nova.compute import utils as compute_utils
 from nova import context
 from nova import db
 from nova import exception
-from nova.openstack.common import rpc
 from nova import test
+from nova.tests import cast_as_call
 from nova.tests import fake_network
+from nova.tests import fake_utils
 from nova.tests.image import fake
 from nova.tests import matchers
 from nova import volume
 
 CONF = cfg.CONF
 CONF.import_opt('compute_driver', 'nova.virt.driver')
-CONF.import_opt('default_instance_type', 'nova.compute.flavors')
+CONF.import_opt('default_flavor', 'nova.compute.flavors')
 CONF.import_opt('use_ipv6', 'nova.netconf')
 
 
@@ -88,6 +90,7 @@ class CinderCloudTestCase(test.TestCase):
         super(CinderCloudTestCase, self).setUp()
         ec2utils.reset_cache()
         vol_tmpdir = self.useFixture(fixtures.TempDir()).path
+        fake_utils.stub_out_utils_spawn_n(self.stubs)
         self.flags(compute_driver='nova.virt.fake.FakeDriver',
                    volume_api_class='nova.tests.fake_volume.API')
 
@@ -130,6 +133,7 @@ class CinderCloudTestCase(test.TestCase):
         self.compute = self.start_service('compute')
         self.scheduler = self.start_service('scheduler')
         self.network = self.start_service('network')
+        self.consoleauth = self.start_service('consoleauth')
 
         self.user_id = 'fake'
         self.project_id = 'fake'
@@ -139,14 +143,12 @@ class CinderCloudTestCase(test.TestCase):
         self.volume_api = volume.API()
         self.volume_api.reset_fake_api(self.context)
 
-        # NOTE(comstud): Make 'cast' behave like a 'call' which will
-        # ensure that operations complete
-        self.stubs.Set(rpc, 'cast', rpc.call)
+        self.useFixture(cast_as_call.CastAsCall(self.stubs))
 
         # make sure we can map ami-00000001/2 to a uuid in FakeImageService
-        db.api.s3_image_create(self.context,
+        db.s3_image_create(self.context,
                                'cedef40a-ed67-4d10-800e-17455edce175')
-        db.api.s3_image_create(self.context,
+        db.s3_image_create(self.context,
                                '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6')
 
     def tearDown(self):
@@ -413,8 +415,8 @@ class CinderCloudTestCase(test.TestCase):
 
     def _setUpBlockDeviceMapping(self):
         image_uuid = 'cedef40a-ed67-4d10-800e-17455edce175'
-        sys_meta = flavors.save_instance_type_info(
-            {}, flavors.get_instance_type(1))
+        sys_meta = flavors.save_flavor_info(
+            {}, flavors.get_flavor(1))
         inst1 = db.instance_create(self.context,
                                   {'image_ref': image_uuid,
                                    'instance_type_id': 1,
@@ -474,7 +476,7 @@ class CinderCloudTestCase(test.TestCase):
             self.volume_api.delete(self.context, vol['id'])
         for uuid in (inst1['uuid'], inst2['uuid']):
             for bdm in db.block_device_mapping_get_all_by_instance(
-                self.context, uuid):
+                    self.context, uuid):
                 db.block_device_mapping_destroy(self.context, bdm['id'])
         db.instance_destroy(self.context, inst2['uuid'])
         db.instance_destroy(self.context, inst1['uuid'])
@@ -584,6 +586,7 @@ class CinderCloudTestCase(test.TestCase):
         self._tearDownBlockDeviceMapping(inst1, inst2, volumes)
 
     def _setUpImageSet(self, create_volumes_and_snapshots=False):
+        self.flags(max_local_block_devices=-1)
         mappings1 = [
             {'device': '/dev/sda1', 'virtual': 'root'},
 
@@ -599,8 +602,8 @@ class CinderCloudTestCase(test.TestCase):
             {'device': 'sdc3', 'virtual': 'swap'},
             {'device': 'sdc4', 'virtual': 'swap'}]
         block_device_mapping1 = [
-            {'device_name': '/dev/sdb1', 'snapshot_id': 01234567},
-            {'device_name': '/dev/sdb2', 'volume_id': 01234567},
+            {'device_name': '/dev/sdb1', 'snapshot_id': 1234567},
+            {'device_name': '/dev/sdb2', 'volume_id': 1234567},
             {'device_name': '/dev/sdb3', 'virtual_name': 'ephemeral5'},
             {'device_name': '/dev/sdb4', 'no_device': True},
 
@@ -623,7 +626,7 @@ class CinderCloudTestCase(test.TestCase):
 
         mappings2 = [{'device': '/dev/sda1', 'virtual': 'root'}]
         block_device_mapping2 = [{'device_name': '/dev/sdb1',
-                                  'snapshot_id': 01234567}]
+                                  'snapshot_id': 1234567}]
         image2 = {
             'id': '76fa36fc-c930-4bf3-8c8a-ea2a2420deb6',
             'name': 'fake_name',
@@ -670,11 +673,11 @@ class CinderCloudTestCase(test.TestCase):
     def _assertImageSet(self, result, root_device_type, root_device_name):
         self.assertEqual(1, len(result['imagesSet']))
         result = result['imagesSet'][0]
-        self.assertTrue('rootDeviceType' in result)
+        self.assertIn('rootDeviceType', result)
         self.assertEqual(result['rootDeviceType'], root_device_type)
-        self.assertTrue('rootDeviceName' in result)
+        self.assertIn('rootDeviceName', result)
         self.assertEqual(result['rootDeviceName'], root_device_name)
-        self.assertTrue('blockDeviceMapping' in result)
+        self.assertIn('blockDeviceMapping', result)
 
         return result
 
@@ -756,7 +759,7 @@ class CinderCloudTestCase(test.TestCase):
         self._restart_compute_service(periodic_interval_max=0.3)
 
         kwargs = {'image_id': 'ami-1',
-                  'instance_type': CONF.default_instance_type,
+                  'instance_type': CONF.default_flavor,
                   'max_count': 1,
                   'block_device_mapping': [{'device_name': '/dev/sdb',
                                             'volume_id': vol1_uuid,
@@ -838,7 +841,7 @@ class CinderCloudTestCase(test.TestCase):
         # enforce periodic tasks run in short time to avoid wait for 60s.
         self._restart_compute_service(periodic_interval_max=0.3)
         kwargs = {'image_id': 'ami-1',
-                  'instance_type': CONF.default_instance_type,
+                  'instance_type': CONF.default_flavor,
                   'max_count': 1,
                   'block_device_mapping': [{'device_name': '/dev/sdb',
                                             'volume_id': vol1_uuid,
@@ -919,7 +922,7 @@ class CinderCloudTestCase(test.TestCase):
         snap2_uuid = ec2utils.ec2_snap_id_to_uuid(snap2['snapshotId'])
 
         kwargs = {'image_id': 'ami-1',
-                  'instance_type': CONF.default_instance_type,
+                  'instance_type': CONF.default_flavor,
                   'max_count': 1,
                   'block_device_mapping': [{'device_name': '/dev/vdb',
                                             'snapshot_id': snap1_uuid,
@@ -979,7 +982,7 @@ class CinderCloudTestCase(test.TestCase):
             create_volumes_and_snapshots=True)
 
         kwargs = {'image_id': 'ami-1',
-                  'instance_type': CONF.default_instance_type,
+                  'instance_type': CONF.default_flavor,
                   'max_count': 1}
         ec2_instance_id = self._run_instance(**kwargs)
 

@@ -21,6 +21,7 @@ Unit Tests for remote procedure calls using queue
 """
 
 import sys
+import testtools
 
 import mox
 from oslo.config import cfg
@@ -31,7 +32,10 @@ from nova import exception
 from nova import manager
 from nova import service
 from nova import test
+from nova.tests import utils
 from nova import wsgi
+
+from nova.openstack.common import service as _service
 
 test_service_opts = [
     cfg.StrOpt("fake_manager",
@@ -90,7 +94,7 @@ class ServiceFlagsTestCase(test.TestCase):
         app.stop()
         ref = db.service_get(context.get_admin_context(), app.service_id)
         db.service_destroy(context.get_admin_context(), app.service_id)
-        self.assert_(not ref['disabled'])
+        self.assertTrue(not ref['disabled'])
 
     def test_service_disabled_on_create_based_on_flag(self):
         self.flags(enable_new_services=False)
@@ -101,7 +105,7 @@ class ServiceFlagsTestCase(test.TestCase):
         app.stop()
         ref = db.service_get(context.get_admin_context(), app.service_id)
         db.service_destroy(context.get_admin_context(), app.service_id)
-        self.assert_(ref['disabled'])
+        self.assertTrue(ref['disabled'])
 
 
 class ServiceTestCase(test.TestCase):
@@ -123,7 +127,7 @@ class ServiceTestCase(test.TestCase):
         app = service.Service.create(host=self.host, binary=self.binary,
                 topic=self.topic)
 
-        self.assert_(app)
+        self.assertTrue(app)
 
     def _service_start_mocks(self):
         service_create = {'host': self.host,
@@ -158,7 +162,7 @@ class ServiceTestCase(test.TestCase):
         self._service_start_mocks()
         # pre_start_hook is called after service record is created,
         # but before RPC consumer is created
-        self.manager_mock.pre_start_hook(rpc_connection=mox.IgnoreArg())
+        self.manager_mock.pre_start_hook()
         self.manager_mock.create_rpc_dispatcher(None)
         # post_start_hook is called after RPC consumer is created.
         self.manager_mock.post_start_hook()
@@ -170,6 +174,41 @@ class ServiceTestCase(test.TestCase):
                                self.topic,
                                'nova.tests.test_service.FakeManager')
         serv.start()
+
+    def test_parent_graceful_shutdown(self):
+        self.manager_mock = self.mox.CreateMock(FakeManager)
+        self.mox.StubOutWithMock(sys.modules[__name__],
+                'FakeManager', use_mock_anything=True)
+        self.mox.StubOutWithMock(self.manager_mock, 'init_host')
+        self.mox.StubOutWithMock(self.manager_mock, 'pre_start_hook')
+        self.mox.StubOutWithMock(self.manager_mock, 'create_rpc_dispatcher')
+        self.mox.StubOutWithMock(self.manager_mock, 'post_start_hook')
+
+        self.mox.StubOutWithMock(_service.Service, 'stop')
+
+        FakeManager(host=self.host).AndReturn(self.manager_mock)
+
+        # init_host is called before any service record is created
+        self.manager_mock.init_host()
+        self._service_start_mocks()
+        # pre_start_hook is called after service record is created,
+        # but before RPC consumer is created
+        self.manager_mock.pre_start_hook()
+        self.manager_mock.create_rpc_dispatcher(None)
+        # post_start_hook is called after RPC consumer is created.
+        self.manager_mock.post_start_hook()
+
+        _service.Service.stop()
+
+        self.mox.ReplayAll()
+
+        serv = service.Service(self.host,
+                               self.binary,
+                               self.topic,
+                               'nova.tests.test_service.FakeManager')
+        serv.start()
+
+        serv.stop()
 
 
 class TestWSGIService(test.TestCase):
@@ -184,6 +223,7 @@ class TestWSGIService(test.TestCase):
         self.assertNotEqual(0, test_service.port)
         test_service.stop()
 
+    @testtools.skipIf(not utils.is_ipv6_supported(), "no ipv6 support")
     def test_service_random_port_with_ipv6(self):
         CONF.set_default("test_service_listen", "::1")
         test_service = service.WSGIService("test_service")
@@ -201,7 +241,6 @@ class TestLauncher(test.TestCase):
         self.service = service.WSGIService("test_service")
 
     def test_launch_app(self):
-        launcher = service.Launcher()
-        launcher.launch_server(self.service)
+        service.serve(self.service)
         self.assertNotEquals(0, self.service.port)
-        launcher.stop()
+        service._launcher.stop()

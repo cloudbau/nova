@@ -16,6 +16,7 @@
 
 """Generic linux scsi subsystem utilities."""
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common import loopingcall
 from nova.openstack.common import processutils
@@ -112,31 +113,36 @@ def find_multipath_device(device):
             # on /etc/multipath.conf settings.
             if info[1][:2] == "dm":
                 mdev = "/dev/%s" % info[1]
+                mdev_id = info[0]
             elif info[2][:2] == "dm":
                 mdev = "/dev/%s" % info[2]
+                mdev_id = info[1].replace('(', '')
+                mdev_id = mdev_id.replace(')', '')
 
             if mdev is None:
-                LOG.warn(_("Couldn't find multipath device %(line)s")
-                         % locals())
+                LOG.warn(_("Couldn't find multipath device %s"), line)
                 return None
 
-            LOG.debug(_("Found multipath device = %(mdev)s") % locals())
+            LOG.debug(_("Found multipath device = %s"), mdev)
             device_lines = lines[3:]
             for dev_line in device_lines:
-                dev_line = dev_line.strip()
-                dev_line = dev_line[3:]
-                dev_info = dev_line.split()
-                if dev_line.find("policy") == -1:
-                    address = dev_info[0].split(":")
+                if dev_line.find("policy") != -1:
+                    continue
 
-                    dev = {'device': '/dev/%s' % dev_info[1],
-                           'host': address[0], 'channel': address[1],
-                           'id': address[2], 'lun': address[3]
-                          }
-                    devices.append(dev)
+                dev_line = dev_line.lstrip(' |-`')
+                dev_info = dev_line.split()
+                address = dev_info[0].split(":")
+
+                dev = {'device': '/dev/%s' % dev_info[1],
+                       'host': address[0], 'channel': address[1],
+                       'id': address[2], 'lun': address[3]
+                      }
+
+                devices.append(dev)
 
     if mdev is not None:
         info = {"device": mdev,
+                "id": mdev_id,
                 "devices": devices}
         return info
     return None

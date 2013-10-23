@@ -27,6 +27,7 @@ import websockify
 
 from nova.consoleauth import rpcapi as consoleauth_rpcapi
 from nova import context
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 
 LOG = logging.getLogger(__name__)
@@ -42,6 +43,11 @@ class NovaWebSocketProxy(websockify.WebSocketProxy):
         """
         Called after a new WebSocket connection has been established.
         """
+        # Reopen the eventlet hub to make sure we don't share an epoll
+        # fd with parent and/or siblings, which would be bad
+        from eventlet import hubs
+        hubs.use_hub()
+
         cookie = Cookie.SimpleCookie()
         cookie.load(self.headers.getheader('cookie'))
         token = cookie['token'].value

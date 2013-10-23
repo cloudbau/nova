@@ -5,12 +5,13 @@ import webob
 
 from nova.api.openstack import wsgi
 from nova import exception
+from nova.openstack.common import gettextutils
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.tests import utils
 
 
-class RequestTest(test.TestCase):
+class RequestTest(test.NoDBTestCase):
     def test_content_type_missing(self):
         request = wsgi.Request.blank('/tests/123', method='POST')
         request.body = "<body />"
@@ -97,8 +98,64 @@ class RequestTest(test.TestCase):
                  'uuid1': instances[1],
                  'uuid2': instances[2]})
 
+    def test_from_request(self):
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
 
-class ActionDispatcherTest(test.TestCase):
+        request = wsgi.Request.blank('/')
+        accepted = 'bogus;q=1.1, en-gb;q=0.7,en-us,en;q=.5,*;q=.7'
+        request.headers = {'Accept-Language': accepted}
+        self.assertEqual(request.best_match_language(), 'en_US')
+
+    def test_asterisk(self):
+        # asterisk should match first available if there
+        # are not any other available matches
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
+
+        request = wsgi.Request.blank('/')
+        accepted = '*,es;q=.5'
+        request.headers = {'Accept-Language': accepted}
+        self.assertEqual(request.best_match_language(), 'en_GB')
+
+    def test_prefix(self):
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
+
+        request = wsgi.Request.blank('/')
+        accepted = 'zh'
+        request.headers = {'Accept-Language': accepted}
+        self.assertEqual(request.best_match_language(), 'zh_CN')
+
+    def test_secondary(self):
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
+
+        request = wsgi.Request.blank('/')
+        accepted = 'nn,en-gb;q=.5'
+        request.headers = {'Accept-Language': accepted}
+        self.assertEqual(request.best_match_language(), 'en_GB')
+
+    def test_none_found(self):
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
+
+        request = wsgi.Request.blank('/')
+        accepted = 'nb-no'
+        request.headers = {'Accept-Language': accepted}
+        self.assertIs(request.best_match_language(), None)
+
+    def test_no_lang_header(self):
+        self.stubs.Set(gettextutils, 'get_available_languages',
+                       fakes.fake_get_available_languages)
+
+        request = wsgi.Request.blank('/')
+        accepted = ''
+        request.headers = {'Accept-Language': accepted}
+        self.assertIs(request.best_match_language(), None)
+
+
+class ActionDispatcherTest(test.NoDBTestCase):
     def test_dispatch(self):
         serializer = wsgi.ActionDispatcher()
         serializer.create = lambda x: 'pants'
@@ -117,13 +174,13 @@ class ActionDispatcherTest(test.TestCase):
         self.assertEqual(serializer.dispatch({}, action='update'), 'trousers')
 
 
-class DictSerializerTest(test.TestCase):
+class DictSerializerTest(test.NoDBTestCase):
     def test_dispatch_default(self):
         serializer = wsgi.DictSerializer()
         self.assertEqual(serializer.serialize({}, 'update'), '')
 
 
-class XMLDictSerializerTest(test.TestCase):
+class XMLDictSerializerTest(test.NoDBTestCase):
     def test_xml(self):
         input_dict = dict(servers=dict(a=(2, 3)))
         expected_xml = '<serversxmlns="asdf"><a>(2,3)</a></servers>'
@@ -133,7 +190,7 @@ class XMLDictSerializerTest(test.TestCase):
         self.assertEqual(result, expected_xml)
 
 
-class JSONDictSerializerTest(test.TestCase):
+class JSONDictSerializerTest(test.NoDBTestCase):
     def test_json(self):
         input_dict = dict(servers=dict(a=(2, 3)))
         expected_json = '{"servers":{"a":[2,3]}}'
@@ -143,13 +200,13 @@ class JSONDictSerializerTest(test.TestCase):
         self.assertEqual(result, expected_json)
 
 
-class TextDeserializerTest(test.TestCase):
+class TextDeserializerTest(test.NoDBTestCase):
     def test_dispatch_default(self):
         deserializer = wsgi.TextDeserializer()
         self.assertEqual(deserializer.deserialize({}, 'update'), {})
 
 
-class JSONDeserializerTest(test.TestCase):
+class JSONDeserializerTest(test.NoDBTestCase):
     def test_json(self):
         data = """{"a": {
                 "a1": "1",
@@ -171,8 +228,37 @@ class JSONDeserializerTest(test.TestCase):
         deserializer = wsgi.JSONDeserializer()
         self.assertEqual(deserializer.deserialize(data), as_dict)
 
+    def test_json_valid_utf8(self):
+        data = """{"server": {"min_count": 1, "flavorRef": "1",
+                "name": "\xe6\xa6\x82\xe5\xbf\xb5",
+                "imageRef": "10bab10c-1304-47d",
+                "max_count": 1}} """
+        as_dict = {
+            'body': {
+                u'server': {
+                            u'min_count': 1, u'flavorRef': u'1',
+                            u'name': u'\u6982\u5ff5',
+                            u'imageRef': u'10bab10c-1304-47d',
+                            u'max_count': 1
+                           }
+                    }
+            }
+        deserializer = wsgi.JSONDeserializer()
+        self.assertEqual(deserializer.deserialize(data), as_dict)
 
-class XMLDeserializerTest(test.TestCase):
+    def test_json_invalid_utf8(self):
+        """ Send invalid utf-8 to JSONDeserializer"""
+        data = """{"server": {"min_count": 1, "flavorRef": "1",
+                "name": "\xf0\x28\x8c\x28",
+                "imageRef": "10bab10c-1304-47d",
+                "max_count": 1}} """
+
+        deserializer = wsgi.JSONDeserializer()
+        self.assertRaises(exception.MalformedRequestBody,
+                          deserializer.deserialize, data)
+
+
+class XMLDeserializerTest(test.NoDBTestCase):
     def test_xml(self):
         xml = """
             <a a1="1" a2="2">
@@ -202,8 +288,21 @@ class XMLDeserializerTest(test.TestCase):
         deserializer = wsgi.XMLDeserializer()
         self.assertEqual(deserializer.deserialize(xml), as_dict)
 
+    def test_xml_valid_utf8(self):
+        xml = """ <a><name>\xe6\xa6\x82\xe5\xbf\xb5</name></a> """
+        deserializer = wsgi.XMLDeserializer()
+        as_dict = {'body': {u'a': {u'name': u'\u6982\u5ff5'}}}
+        self.assertEqual(deserializer.deserialize(xml), as_dict)
 
-class ResourceTest(test.TestCase):
+    def test_xml_invalid_utf8(self):
+        """ Send invalid utf-8 to XMLDeserializer"""
+        xml = """ <a><name>\xf0\x28\x8c\x28</name></a> """
+        deserializer = wsgi.XMLDeserializer()
+        self.assertRaises(exception.MalformedRequestBody,
+                         deserializer.deserialize, xml)
+
+
+class ResourceTest(test.NoDBTestCase):
     def test_resource_call(self):
         class Controller(object):
             def index(self, req):
@@ -406,6 +505,49 @@ class ResourceTest(test.TestCase):
         content_type, body = resource.get_body(request)
         self.assertEqual(content_type, 'application/json')
         self.assertEqual(body, 'foo')
+
+    def test_get_request_id_with_dict_response_body(self):
+        class Controller(wsgi.Controller):
+            def index(self, req):
+                return {'foo': 'bar'}
+
+        req = fakes.HTTPRequest.blank('/tests')
+        context = req.environ['nova.context']
+        app = fakes.TestRouter(Controller())
+        response = req.get_response(app)
+        self.assertEqual(response.headers['x-compute-request-id'],
+                context.request_id)
+        self.assertEqual(response.body, '{"foo": "bar"}')
+        self.assertEqual(response.status_int, 200)
+
+    def test_no_request_id_with_str_response_body(self):
+        class Controller(wsgi.Controller):
+            def index(self, req):
+                return 'foo'
+
+        req = fakes.HTTPRequest.blank('/tests')
+        app = fakes.TestRouter(Controller())
+        response = req.get_response(app)
+        # NOTE(alaski): This test is really to ensure that a str response
+        # doesn't error.  Not having a request_id header is a side effect of
+        # our wsgi setup, ideally it would be there.
+        self.assertFalse(hasattr(response.headers, 'x-compute-request-id'))
+        self.assertEqual(response.body, 'foo')
+        self.assertEqual(response.status_int, 200)
+
+    def test_get_request_id_no_response_body(self):
+        class Controller(object):
+            def index(self, req):
+                pass
+
+        req = fakes.HTTPRequest.blank('/tests')
+        context = req.environ['nova.context']
+        app = fakes.TestRouter(Controller())
+        response = req.get_response(app)
+        self.assertEqual(response.headers['x-compute-request-id'],
+                context.request_id)
+        self.assertEqual(response.body, '')
+        self.assertEqual(response.status_int, 200)
 
     def test_deserialize_badtype(self):
         class Controller(object):
@@ -780,8 +922,35 @@ class ResourceTest(test.TestCase):
         except wsgi.Fault as fault:
             self.assertEqual(400, fault.status_int)
 
+    def test_resource_valid_utf8_body(self):
+        class Controller(object):
+            def index(self, req, body):
+                return body
 
-class ResponseObjectTest(test.TestCase):
+        req = webob.Request.blank('/tests')
+        body = """ {"name": "\xe6\xa6\x82\xe5\xbf\xb5" } """
+        expected_body = '{"name": "\\u6982\\u5ff5"}'
+        req.body = body
+        req.headers['Content-Type'] = 'application/json'
+        app = fakes.TestRouter(Controller())
+        response = req.get_response(app)
+        self.assertEqual(response.body, expected_body)
+        self.assertEqual(response.status_int, 200)
+
+    def test_resource_invalid_utf8(self):
+        class Controller(object):
+            def index(self, req, body):
+                return body
+
+        req = webob.Request.blank('/tests')
+        body = """ {"name": "\xf0\x28\x8c\x28" } """
+        req.body = body
+        req.headers['Content-Type'] = 'application/json'
+        app = fakes.TestRouter(Controller())
+        self.assertRaises(UnicodeDecodeError, req.get_response, app)
+
+
+class ResponseObjectTest(test.NoDBTestCase):
     def test_default_code(self):
         robj = wsgi.ResponseObject({})
         self.assertEqual(robj.code, 200)
@@ -814,7 +983,7 @@ class ResponseObjectTest(test.TestCase):
         robj = wsgi.ResponseObject({})
         robj['Header'] = 'foo'
         del robj['hEADER']
-        self.assertFalse('header' in robj.headers)
+        self.assertNotIn('header', robj.headers)
 
     def test_header_isolation(self):
         robj = wsgi.ResponseObject({})
@@ -881,7 +1050,7 @@ class ResponseObjectTest(test.TestCase):
             self.assertEqual(response.body, mtype)
 
 
-class ValidBodyTest(test.TestCase):
+class ValidBodyTest(test.NoDBTestCase):
 
     def setUp(self):
         super(ValidBodyTest, self).setUp()
@@ -908,3 +1077,99 @@ class ValidBodyTest(test.TestCase):
         resource = wsgi.Resource(controller=None)
         body = {'foo': 'bar'}
         self.assertFalse(self.controller.is_valid_body(body, 'foo'))
+
+
+class TestSanitize(test.NoDBTestCase):
+    def test_json(self):
+        payload = """{'adminPass':'mypassword'}"""
+        expected = """{'adminPass':'****'}"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """{ 'adminPass' : 'mypassword' }"""
+        expected = """{ 'adminPass' : '****' }"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """{'admin_pass':'mypassword'}"""
+        expected = """{'admin_pass':'****'}"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """{ 'admin_pass' : 'mypassword' }"""
+        expected = """{ 'admin_pass' : '****' }"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+
+    def test_xml(self):
+        payload = """<adminPass>mypassword</adminPass>"""
+        expected = """<adminPass>****</adminPass>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """<adminPass>
+                        mypassword
+                     </adminPass>"""
+        expected = """<adminPass>****</adminPass>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """<admin_pass>mypassword</admin_pass>"""
+        expected = """<admin_pass>****</admin_pass>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """<admin_pass>
+                        mypassword
+                     </admin_pass>"""
+        expected = """<admin_pass>****</admin_pass>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+
+    def test_xml_attribute(self):
+        payload = """adminPass='mypassword'"""
+        expected = """adminPass='****'"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """adminPass = 'mypassword'"""
+        expected = """adminPass = '****'"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """adminPass = "mypassword\""""
+        expected = """adminPass = "****\""""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """admin_pass='mypassword'"""
+        expected = """admin_pass='****'"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """admin_pass = 'mypassword'"""
+        expected = """admin_pass = '****'"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """admin_pass = "mypassword\""""
+        expected = """admin_pass = "****\""""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+
+    def test_json_message(self):
+        payload = """body: {"changePassword": {"adminPass": "1234567"}}"""
+        expected = """body: {"changePassword": {"adminPass": "****"}}"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """body: {"rescue": {"admin_pass": "1234567"}}"""
+        expected = """body: {"rescue": {"admin_pass": "****"}}"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+
+    def test_xml_message(self):
+        payload = """<?xml version="1.0" encoding="UTF-8"?>
+<rebuild
+    xmlns="http://docs.openstack.org/compute/api/v1.1"
+    name="foobar"
+    imageRef="http://openstack.example.com/v1.1/32278/images/70a599e0-31e7"
+    accessIPv4="1.2.3.4"
+    accessIPv6="fe80::100"
+    adminPass="seekr3t">
+  <metadata>
+    <meta key="My Server Name">Apache1</meta>
+  </metadata>
+</rebuild>"""
+        expected = """<?xml version="1.0" encoding="UTF-8"?>
+<rebuild
+    xmlns="http://docs.openstack.org/compute/api/v1.1"
+    name="foobar"
+    imageRef="http://openstack.example.com/v1.1/32278/images/70a599e0-31e7"
+    accessIPv4="1.2.3.4"
+    accessIPv6="fe80::100"
+    adminPass="****">
+  <metadata>
+    <meta key="My Server Name">Apache1</meta>
+  </metadata>
+</rebuild>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))
+        payload = """<?xml version="1.0" encoding="UTF-8"?>
+<rescue xmlns="http://docs.openstack.org/compute/api/v1.1"
+    admin_pass="MySecretPass"/>"""
+        expected = """<?xml version="1.0" encoding="UTF-8"?>
+<rescue xmlns="http://docs.openstack.org/compute/api/v1.1"
+    admin_pass="****"/>"""
+        self.assertEqual(expected, wsgi.sanitize(payload))

@@ -33,6 +33,7 @@ from oslo.config import cfg
 from nova.compute import task_states
 from nova.compute import vm_states
 from nova.openstack.common import fileutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova import utils
@@ -220,6 +221,15 @@ def write_stored_info(target, field=None, value=None):
     write_file(info_file, field, value)
 
 
+def _hash_file(filename):
+    """Generate a hash for the contents of a file."""
+    checksum = hashlib.sha1()
+    with open(filename) as f:
+        for chunk in iter(lambda: f.read(32768), b''):
+            checksum.update(chunk)
+    return checksum.hexdigest()
+
+
 def read_stored_checksum(target, timestamped=True):
     """Read the checksum.
 
@@ -230,10 +240,7 @@ def read_stored_checksum(target, timestamped=True):
 
 def write_stored_checksum(target):
     """Write a checksum to disk for a file in _base."""
-
-    with open(target, 'r') as img_file:
-        checksum = utils.hash_file(img_file)
-    write_stored_info(target, field='sha1', value=checksum)
+    write_stored_info(target, field='sha1', value=_hash_file(target))
 
 
 class ImageCacheManager(object):
@@ -300,7 +307,7 @@ class ImageCacheManager(object):
                              task_states.RESIZE_MIGRATED,
                              task_states.RESIZE_FINISH]
             if instance['task_state'] in resize_states or \
-                instance['vm_state'] == vm_states.RESIZED:
+                    instance['vm_state'] == vm_states.RESIZED:
                 self.instance_names.add(instance['name'] + '_resize')
                 self.instance_names.add(instance['uuid'] + '_resize')
 
@@ -406,7 +413,7 @@ class ImageCacheManager(object):
                 # shared storage), then we don't need to checksum again.
                 if (stored_timestamp and
                     time.time() - stored_timestamp <
-                    CONF.checksum_interval_seconds):
+                        CONF.checksum_interval_seconds):
                     return True
 
                 # NOTE(mikal): If there is no timestamp, then the checksum was
@@ -415,8 +422,7 @@ class ImageCacheManager(object):
                     write_stored_info(base_file, field='sha1',
                                       value=stored_checksum)
 
-                with open(base_file, 'r') as f:
-                    current_checksum = utils.hash_file(f)
+                current_checksum = _hash_file(base_file)
 
                 if current_checksum != stored_checksum:
                     LOG.error(_('image %(id)s at (%(base_file)s): image '
@@ -494,7 +500,7 @@ class ImageCacheManager(object):
             self.unexplained_images.remove(base_file)
 
         if (base_file and os.path.exists(base_file)
-            and os.path.isfile(base_file)):
+                and os.path.isfile(base_file)):
             # _verify_checksum returns True if the checksum is ok, and None if
             # there is no checksum file
             checksum_result = self._verify_checksum(img_id, base_file)

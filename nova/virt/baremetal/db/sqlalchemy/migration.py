@@ -23,6 +23,7 @@ import os
 import sqlalchemy
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.virt.baremetal.db import migration
 from nova.virt.baremetal.db.sqlalchemy import session
 
@@ -45,7 +46,7 @@ def patched_with_engine(f, *a, **kw):
 #                on that version or higher, this can be removed
 MIN_PKG_VERSION = dist_version.StrictVersion('0.7.3')
 if (not hasattr(migrate, '__version__') or
-    dist_version.StrictVersion(migrate.__version__) < MIN_PKG_VERSION):
+        dist_version.StrictVersion(migrate.__version__) < MIN_PKG_VERSION):
     migrate_util.with_engine = patched_with_engine
 
 

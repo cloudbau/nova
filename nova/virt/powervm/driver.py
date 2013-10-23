@@ -1,6 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
-# Copyright 2012 IBM Corp.
+# Copyright 2013 IBM Corp.
 #
 #    Licensed under the Apache License, Version 2.0 (the "License"); you may
 #    not use this file except in compliance with the License. You may obtain
@@ -20,9 +20,12 @@ import time
 from oslo.config import cfg
 
 from nova.compute import flavors
+from nova.compute import utils as compute_utils
 from nova.image import glance
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt import driver
+from nova.virt.powervm import exception
 from nova.virt.powervm import operator
 
 LOG = logging.getLogger(__name__)
@@ -32,13 +35,10 @@ powervm_opts = [
                default='ivm',
                help='PowerVM manager type (ivm, hmc)'),
     cfg.StrOpt('powervm_mgr',
-               default=None,
                help='PowerVM manager host or ip'),
     cfg.StrOpt('powervm_mgr_user',
-               default=None,
                help='PowerVM manager user name'),
     cfg.StrOpt('powervm_mgr_passwd',
-               default=None,
                help='PowerVM manager user password',
                secret=True),
     cfg.StrOpt('powervm_img_remote_path',
@@ -63,13 +63,10 @@ class PowerVMDriver(driver.ComputeDriver):
         super(PowerVMDriver, self).__init__(virtapi)
         self._powervm = operator.PowerVMOperator()
 
-    @property
-    def host_state(self):
-        pass
-
     def init_host(self, host):
         """Initialize anything that is necessary for the driver to function,
-        including catching up with currently running VM's on the given host."""
+        including catching up with currently running VM's on the given host.
+        """
         pass
 
     def get_info(self, instance):
@@ -89,8 +86,19 @@ class PowerVMDriver(driver.ComputeDriver):
         """Return currently known host stats."""
         return self._powervm.get_host_stats(refresh=refresh)
 
+    def get_host_uptime(self, host):
+        """Returns the result of calling "uptime" on the target host."""
+        return self._powervm.get_host_uptime(host)
+
     def plug_vifs(self, instance, network_info):
-        pass
+        """Plug VIFs into networks."""
+        msg = _("VIF plugging is not supported by the PowerVM driver.")
+        raise NotImplementedError(msg)
+
+    def unplug_vifs(self, instance, network_info):
+        """Unplug VIFs from networks."""
+        msg = _("VIF unplugging is not supported by the PowerVM driver.")
+        raise NotImplementedError(msg)
 
     def macs_for_instance(self, instance):
         return self._powervm.macs_for_instance(instance)
@@ -101,7 +109,7 @@ class PowerVMDriver(driver.ComputeDriver):
         self._powervm.spawn(context, instance, image_meta['id'], network_info)
 
     def destroy(self, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, context=None):
         """Destroy (shutdown and delete) the specified instance."""
         self._powervm.destroy(instance['name'], destroy_disks)
 
@@ -117,7 +125,13 @@ class PowerVMDriver(driver.ComputeDriver):
         :param bad_volumes_callback: Function to handle any bad volumes
             encountered
         """
-        pass
+        if reboot_type == 'SOFT':
+            LOG.debug(_('Soft reboot is not supported for PowerVM.'),
+                      instance=instance)
+            return
+
+        self.power_off(instance)
+        self.power_on(context, instance, network_info, block_device_info)
 
     def get_host_ip_addr(self):
         """Retrieves the IP address of the hypervisor host."""
@@ -145,8 +159,9 @@ class PowerVMDriver(driver.ComputeDriver):
         # get current image info
         glance_service, old_image_id = glance.get_remote_image_service(
                 context, instance['image_ref'])
-        image_meta = glance_service.show(context, old_image_id)
-        img_props = image_meta['properties']
+
+        image_meta = compute_utils.get_image_metadata(
+            context, glance_service, old_image_id, instance)
 
         # build updated snapshot metadata
         snapshot_meta = glance_service.show(context, image_id)
@@ -161,40 +176,41 @@ class PowerVMDriver(driver.ComputeDriver):
                              'container_format': image_meta['container_format']
                             }
 
-        if 'architecture' in image_meta['properties']:
-            arch = image_meta['properties']['architecture']
-            new_snapshot_meta['properties']['architecture'] = arch
-
         # disk capture and glance upload
         self._powervm.capture_image(context, instance, image_id,
                                     new_snapshot_meta, update_task_state)
 
         snapshot_time = time.time() - snapshot_start
         inst_name = instance['name']
-        LOG.info(_("%(inst_name)s captured in %(snapshot_time)s seconds") %
-                    locals())
+        LOG.info(_("%(inst_name)s captured in %(snapshot_time)s seconds"),
+                 {'inst_name': inst_name, 'snapshot_time': snapshot_time})
 
     def pause(self, instance):
         """Pause the specified instance."""
-        pass
+        msg = _("pause is not supported for PowerVM")
+        raise NotImplementedError(msg)
 
     def unpause(self, instance):
         """Unpause paused VM instance."""
-        pass
+        msg = _("unpause is not supported for PowerVM")
+        raise NotImplementedError(msg)
 
     def suspend(self, instance):
         """suspend the specified instance."""
-        pass
+        raise NotImplementedError(_("Suspend is not supported by the"
+                                    "PowerVM driver."))
 
     def resume(self, instance, network_info, block_device_info=None):
         """resume the specified instance."""
-        pass
+        raise NotImplementedError(_("Resume is not supported by the"
+                                    "PowerVM driver."))
 
     def power_off(self, instance):
         """Power off the specified instance."""
         self._powervm.power_off(instance['name'])
 
-    def power_on(self, instance):
+    def power_on(self, context, instance, network_info,
+                 block_device_info=None):
         """Power on the specified instance."""
         self._powervm.power_on(instance['name'])
 
@@ -204,24 +220,8 @@ class PowerVMDriver(driver.ComputeDriver):
 
     def host_power_action(self, host, action):
         """Reboots, shuts down or powers up the host."""
-        pass
-
-    def legacy_nwinfo(self):
-        """
-        Indicate if the driver requires the legacy network_info format.
-        """
-        return False
-
-    def manage_image_cache(self, context, all_instances):
-        """
-        Manage the driver's local image cache.
-
-        Some drivers chose to cache images for instances on disk. This method
-        is an opportunity to do management of that cache which isn't directly
-        related to other calls into the driver. The prime example is to clean
-        the cache and remove images which are no longer of interest.
-        """
-        pass
+        raise NotImplementedError(_("Host power action is not supported by the"
+                                    "PowerVM driver."))
 
     def migrate_disk_and_power_off(self, context, instance, dest,
                                    instance_type, network_info,
@@ -279,7 +279,7 @@ class PowerVMDriver(driver.ComputeDriver):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         block_device_info=None):
+                         block_device_info=None, power_on=True):
         """Completes a resize, turning on the migrated instance
 
         :param network_info:
@@ -290,20 +290,19 @@ class PowerVMDriver(driver.ComputeDriver):
         """
         lpar_obj = self._powervm._create_lpar_instance(instance, network_info)
 
-        instance_type = flavors.extract_instance_type(instance)
+        instance_type = flavors.extract_flavor(instance)
         new_lv_size = instance_type['root_gb']
         old_lv_size = disk_info['old_lv_size']
         if 'root_disk_file' in disk_info:
             disk_size = max(int(new_lv_size), int(old_lv_size))
             disk_size_bytes = disk_size * 1024 * 1024 * 1024
             self._powervm.deploy_from_migrated_file(
-                    lpar_obj, disk_info['root_disk_file'], disk_size_bytes)
+                    lpar_obj, disk_info['root_disk_file'], disk_size_bytes,
+                    power_on)
         else:
             # this shouldn't get hit unless someone forgot to handle
             # a certain migration type
-            raise Exception(
-                    _('Unrecognized root disk information: %s') %
-                    disk_info)
+            raise exception.PowerVMUnrecognizedRootDevice(disk_info=disk_info)
 
     def confirm_migration(self, migration, instance, network_info):
         """Confirms a resize, destroying the source VM."""
@@ -312,24 +311,29 @@ class PowerVMDriver(driver.ComputeDriver):
         self._powervm.destroy(new_name)
 
     def finish_revert_migration(self, instance, network_info,
-                                block_device_info=None):
-        """Finish reverting a resize, powering back on the instance."""
+                                block_device_info=None, power_on=True):
+        """Finish reverting a resize."""
 
         new_name = self._get_resize_name(instance['name'])
 
         # NOTE(ldbragst) In the case of a resize_revert on the same host
         # we reassign the original mac address, replacing the temp mac
         # on the old instance that will be started
-        if (self._powervm.instance_exists(new_name) and
-                self._powervm.instance_exists(instance['name'])):
+        # NOTE(guochbo) We can't judge if a resize_revert on the same host
+        # due to the instance on destination host has been destroyed.
+        # Original mac address is always kept in network_info, we can
+        # reassign the original mac address here without negative effects
+        # even the old instance kept the original mac address
+        if self.instance_exists(new_name):
             original_mac = network_info[0]['address']
-            self._powervm._operator.set_lpar_mac_base_value(instance['name'],
+            self._powervm._operator.set_lpar_mac_base_value(new_name,
                                                             original_mac)
         # Make sure we don't have a failed same-host migration still
         # hanging around
-        if self.instance_exists(new_name):
             if self.instance_exists(instance['name']):
                 self._powervm.destroy(instance['name'])
             # undo instance rename and start
             self._powervm._operator.rename_lpar(new_name, instance['name'])
-        self._powervm.power_on(instance['name'])
+
+        if power_on:
+            self._powervm.power_on(instance['name'])

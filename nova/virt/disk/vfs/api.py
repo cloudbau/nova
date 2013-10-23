@@ -14,6 +14,7 @@
 # License for the specific language governing permissions and limitations
 # under the License.
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 
@@ -25,8 +26,9 @@ class VFS(object):
     @staticmethod
     def instance_for_image(imgfile, imgfmt, partition):
         LOG.debug(_("Instance for image imgfile=%(imgfile)s "
-                    "imgfmt=%(imgfmt)s partition=%(partition)s")
-                  % locals())
+                    "imgfmt=%(imgfmt)s partition=%(partition)s"),
+                  {'imgfile': imgfile, 'imgfmt': imgfmt,
+                   'partition': partition})
         hasGuestfs = False
         try:
             LOG.debug(_("Trying to import guestfs"))

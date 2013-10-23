@@ -50,33 +50,50 @@ FAKE_FLAVORS = {
 }
 
 
-def fake_instance_type_get_by_flavor_id(flavorid):
+def fake_flavor_get_by_flavor_id(flavorid, ctxt=None):
     return FAKE_FLAVORS['flavor %s' % flavorid]
 
 
-def fake_instance_type_get_all(inactive=False, filters=None):
+def fake_get_all_flavors_sorted_list(context=None, inactive=False,
+                                     filters=None, sort_key='flavorid',
+                                     sort_dir='asc', limit=None, marker=None):
+    if marker in ['99999']:
+        raise exception.MarkerNotFound(marker)
+
     def reject_min(db_attr, filter_attr):
         return (filter_attr in filters and
                 int(flavor[db_attr]) < int(filters[filter_attr]))
 
     filters = filters or {}
-    output = {}
+    res = []
     for (flavor_name, flavor) in FAKE_FLAVORS.items():
         if reject_min('memory_mb', 'min_memory_mb'):
             continue
         elif reject_min('root_gb', 'min_root_gb'):
             continue
 
-        output[flavor_name] = flavor
+        res.append(flavor)
+
+    res = sorted(res, key=lambda item: item[sort_key])
+    output = []
+    marker_found = True if marker is None else False
+    for flavor in res:
+        if not marker_found and marker == flavor['flavorid']:
+            marker_found = True
+        elif marker_found:
+            if limit is None or len(output) < int(limit):
+                output.append(flavor)
 
     return output
 
 
-def empty_instance_type_get_all(inactive=False, filters=None):
-    return {}
+def empty_get_all_flavors_sorted_list(context=None, inactive=False,
+                                      filters=None, sort_key='flavorid',
+                                      sort_dir='asc', limit=None, marker=None):
+    return []
 
 
-def return_instance_type_not_found(flavor_id):
+def return_flavor_not_found(flavor_id, ctxt=None):
     raise exception.InstanceTypeNotFound(instance_type_id=flavor_id)
 
 
@@ -86,18 +103,18 @@ class FlavorsTest(test.TestCase):
         self.flags(osapi_compute_extension=[])
         fakes.stub_out_networking(self.stubs)
         fakes.stub_out_rate_limiting(self.stubs)
-        self.stubs.Set(nova.compute.flavors, "get_all_types",
-                       fake_instance_type_get_all)
+        self.stubs.Set(nova.compute.flavors, "get_all_flavors_sorted_list",
+                       fake_get_all_flavors_sorted_list)
         self.stubs.Set(nova.compute.flavors,
-                       "get_instance_type_by_flavor_id",
-                       fake_instance_type_get_by_flavor_id)
+                       "get_flavor_by_flavor_id",
+                       fake_flavor_get_by_flavor_id)
 
         self.controller = flavors.Controller()
 
     def test_get_flavor_by_invalid_id(self):
         self.stubs.Set(nova.compute.flavors,
-                       "get_instance_type_by_flavor_id",
-                       return_instance_type_not_found)
+                       "get_flavor_by_flavor_id",
+                       return_flavor_not_found)
         req = fakes.HTTPRequest.blank('/v2/fake/flavors/asdf')
         self.assertRaises(webob.exc.HTTPNotFound,
                           self.controller.show, req, 'asdf')
@@ -216,6 +233,11 @@ class FlavorsTest(test.TestCase):
             ]
         }
         self.assertThat(flavor, matchers.DictMatches(expected))
+
+    def test_get_flavor_list_with_invalid_marker(self):
+        req = fakes.HTTPRequest.blank('/v2/fake/flavors?marker=99999')
+        self.assertRaises(webob.exc.HTTPBadRequest,
+                          self.controller.index, req)
 
     def test_get_flavor_detail_with_limit(self):
         req = fakes.HTTPRequest.blank('/v2/fake/flavors/detail?limit=1')
@@ -341,8 +363,8 @@ class FlavorsTest(test.TestCase):
         self.assertEqual(flavor, expected)
 
     def test_get_empty_flavor_list(self):
-        self.stubs.Set(nova.compute.flavors, "get_all_types",
-                       empty_instance_type_get_all)
+        self.stubs.Set(nova.compute.flavors, "get_all_flavors_sorted_list",
+                       empty_get_all_flavors_sorted_list)
 
         req = fakes.HTTPRequest.blank('/v2/fake/flavors')
         flavors = self.controller.index(req)
@@ -689,18 +711,17 @@ class DisabledFlavorsWithRealDBTest(test.TestCase):
         self.admin_context = context.get_admin_context()
 
         self.disabled_type = self._create_disabled_instance_type()
-        self.inst_types = db.api.instance_type_get_all(
+        self.inst_types = db.flavor_get_all(
                 self.admin_context)
 
     def tearDown(self):
-        db.api.instance_type_destroy(
+        db.flavor_destroy(
                 self.admin_context, self.disabled_type['name'])
 
         super(DisabledFlavorsWithRealDBTest, self).tearDown()
 
     def _create_disabled_instance_type(self):
-        inst_types = db.api.instance_type_get_all(
-                self.admin_context)
+        inst_types = db.flavor_get_all(self.admin_context)
 
         inst_type = inst_types[0]
 
@@ -710,7 +731,7 @@ class DisabledFlavorsWithRealDBTest(test.TestCase):
                 [int(flavor['flavorid']) for flavor in inst_types]) + 1)
         inst_type['disabled'] = True
 
-        disabled_type = db.api.instance_type_create(
+        disabled_type = db.flavor_create(
                 self.admin_context, inst_type)
 
         return disabled_type
@@ -724,7 +745,7 @@ class DisabledFlavorsWithRealDBTest(test.TestCase):
         db_flavorids = set(i['flavorid'] for i in self.inst_types)
         disabled_flavorid = str(self.disabled_type['flavorid'])
 
-        self.assert_(disabled_flavorid in db_flavorids)
+        self.assertIn(disabled_flavorid, db_flavorids)
         self.assertEqual(db_flavorids - set([disabled_flavorid]),
                          api_flavorids)
 
@@ -737,7 +758,7 @@ class DisabledFlavorsWithRealDBTest(test.TestCase):
         db_flavorids = set(i['flavorid'] for i in self.inst_types)
         disabled_flavorid = str(self.disabled_type['flavorid'])
 
-        self.assert_(disabled_flavorid in db_flavorids)
+        self.assertIn(disabled_flavorid, db_flavorids)
         self.assertEqual(db_flavorids, api_flavorids)
 
     def test_show_should_include_disabled_flavor_for_user(self):
@@ -792,6 +813,7 @@ class ParseIsPublicTest(test.TestCase):
 
     def test_string_none(self):
         self.assertPublic(None, 'none')
+        self.assertPublic(None, 'None')
 
     def test_other(self):
         self.assertRaises(

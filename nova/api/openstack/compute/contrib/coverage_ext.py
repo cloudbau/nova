@@ -12,7 +12,7 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License
+#    under the License.
 
 # See: http://wiki.openstack.org/Nova/CoverageExtension for more information
 # and usage explanation for this API extension
@@ -30,6 +30,7 @@ from webob import exc
 from nova.api.openstack import extensions
 from nova import baserpc
 from nova import db
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common.rpc import common as rpc_common
 
@@ -101,6 +102,7 @@ class CoverageController(object):
     def _start_coverage_telnet(self, tn, service):
         data_file = os.path.join(self.data_path,
                                 '.nova-coverage.%s' % str(service))
+        tn.write('from __future__ import print_function\n')
         tn.write('import sys\n')
         tn.write('from coverage import coverage\n')
         tn.write("coverInst = coverage(data_file='%s') "
@@ -108,7 +110,7 @@ class CoverageController(object):
                  "else coverInst\n" % data_file)
         tn.write('coverInst.skipModules = sys.modules.keys()\n')
         tn.write("coverInst.start()\n")
-        tn.write("print 'finished'\n")
+        tn.write("print('finished')\n")
         tn.expect([re.compile('finished')])
 
     def _start_coverage(self, req, body):
@@ -134,18 +136,19 @@ class CoverageController(object):
             # doesn't resolve to 127.0.0.1. Currently backdoors only open on
             # loopback so this is for covering the common single host use case
             except socket.error as e:
+                exc_info = sys.exc_info()
                 if 'ECONNREFUSED' in e and service['host'] == self.host:
                         service['telnet'] = telnetlib.Telnet('127.0.0.1',
                                                              service['port'])
                 else:
-                    raise e
+                    raise exc_info[0], exc_info[1], exc_info[2]
             self.services.append(service)
             self._start_coverage_telnet(service['telnet'], service['service'])
 
     def _stop_coverage_telnet(self, tn):
         tn.write("coverInst.stop()\n")
         tn.write("coverInst.save()\n")
-        tn.write("print 'finished'\n")
+        tn.write("print('finished')\n")
         tn.expect([re.compile('finished')])
 
     def _check_coverage(self):
@@ -168,14 +171,14 @@ class CoverageController(object):
         if xml:
             execute = str("coverInst.xml_report(outfile='%s')\n" % path)
             tn.write(execute)
-            tn.write("print 'finished'\n")
+            tn.write("print('finished')\n")
             tn.expect([re.compile('finished')])
         else:
             execute = str("output = open('%s', 'w')\n" % path)
             tn.write(execute)
             tn.write("coverInst.report(file=output)\n")
             tn.write("output.close()\n")
-            tn.write("print 'finished'\n")
+            tn.write("print('finished')\n")
             tn.expect([re.compile('finished')])
         tn.close()
 
@@ -213,7 +216,7 @@ class CoverageController(object):
                 coverInst.xml_report(outfile=path)
             elif html:
                 if os.path.isdir(path):
-                    msg = _("Directory conflict: %s already exists")
+                    msg = _("Directory conflict: %s already exists") % path
                     raise exc.HTTPBadRequest(explanation=msg)
                 coverInst.html_report(directory=path)
             else:
@@ -242,7 +245,7 @@ class CoverageController(object):
 
     def _reset_coverage_telnet(self, tn):
         tn.write("coverInst.erase()\n")
-        tn.write("print 'finished'\n")
+        tn.write("print('finished')\n")
         tn.expect([re.compile('finished')])
 
     def _reset_coverage(self, req):

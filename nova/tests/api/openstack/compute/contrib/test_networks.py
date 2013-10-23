@@ -16,14 +16,15 @@
 
 import copy
 import math
-import netaddr
 import uuid
 
+import netaddr
 from oslo.config import cfg
 import webob
 
 from nova.api.openstack.compute.contrib import networks_associate
 from nova.api.openstack.compute.contrib import os_networks as networks
+import nova.context
 from nova import exception
 from nova import test
 from nova.tests.api.openstack import fakes
@@ -143,7 +144,20 @@ class FakeNetworkAPI(object):
                 return
 
     def get_all(self, context):
-        return self.networks
+        return self._fake_db_network_get_all(context, project_only=True)
+
+    def _fake_db_network_get_all(self, context, project_only="allow_none"):
+        project_id = context.project_id
+        nets = self.networks
+        if nova.context.is_user_context(context) and project_only:
+            if project_only == 'allow_none':
+                nets = [n for n in self.networks
+                        if (n['project_id'] == project_id or
+                            n['project_id'] is None)]
+            else:
+                nets = [n for n in self.networks
+                        if n['project_id'] == project_id]
+        return nets
 
     def get(self, context, network_id):
         for network in self.networks:
@@ -178,7 +192,7 @@ class FakeNetworkAPI(object):
         return new_networks
 
 
-class NetworksTest(test.TestCase):
+class NetworksTest(test.NoDBTestCase):
 
     def setUp(self):
         super(NetworksTest, self).setUp()
@@ -199,7 +213,16 @@ class NetworksTest(test.TestCase):
         self.maxDiff = None
         req = fakes.HTTPRequest.blank('/v2/1234/os-networks')
         res_dict = self.controller.index(req)
-        expected = copy.deepcopy(FAKE_USER_NETWORKS)
+        self.assertEquals(res_dict, {'networks': []})
+
+        project_id = req.environ["nova.context"].project_id
+        cxt = req.environ["nova.context"]
+        uuid = FAKE_NETWORKS[0]['uuid']
+        self.fake_network_api.associate(context=cxt,
+                                        network_uuid=uuid,
+                                        project=project_id)
+        res_dict = self.controller.index(req)
+        expected = [FAKE_USER_NETWORKS[0]]
         for network in expected:
             self.network_uuid_to_id(network)
         self.assertEquals(res_dict, {'networks': expected})
@@ -311,7 +334,7 @@ class NetworksTest(test.TestCase):
     def test_network_create(self):
         req = fakes.HTTPRequest.blank('/v2/1234/os-networks')
         res_dict = self.controller.create(req, NEW_NETWORK)
-        self.assertTrue('network' in res_dict)
+        self.assertIn('network', res_dict)
         uuid = res_dict['network']['id']
         req = fakes.HTTPRequest.blank('/v2/1234/os-networks/%s' % uuid)
         res_dict = self.controller.show(req, uuid)

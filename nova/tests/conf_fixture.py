@@ -16,11 +16,12 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
-import fixtures
 from oslo.config import cfg
+
 
 from nova import config
 from nova import ipv6
+from nova.openstack.common.fixture import config as config_fixture
 from nova import paths
 from nova.tests import utils
 
@@ -38,21 +39,15 @@ CONF.import_opt('compute_driver', 'nova.virt.driver')
 CONF.import_opt('api_paste_config', 'nova.wsgi')
 
 
-class ConfFixture(fixtures.Fixture):
+class ConfFixture(config_fixture.Config):
     """Fixture to manage global conf settings."""
-
-    def __init__(self, conf):
-        self.conf = conf
-
     def setUp(self):
         super(ConfFixture, self).setUp()
-
         self.conf.set_default('api_paste_config',
                               paths.state_path_def('etc/nova/api-paste.ini'))
         self.conf.set_default('host', 'fake-mini')
         self.conf.set_default('compute_driver', 'nova.virt.fake.FakeDriver')
         self.conf.set_default('fake_network', True)
-        self.conf.set_default('fake_rabbit', True)
         self.conf.set_default('flat_network_bridge', 'br100')
         self.conf.set_default('floating_ip_dns_manager',
                               'nova.tests.utils.dns_manager')
@@ -65,12 +60,11 @@ class ConfFixture(fixtures.Fixture):
                               'nova.openstack.common.rpc.impl_fake')
         self.conf.set_default('rpc_cast_timeout', 5)
         self.conf.set_default('rpc_response_timeout', 5)
-        self.conf.set_default('sql_connection', "sqlite://")
+        self.conf.set_default('connection', "sqlite://", group='database')
         self.conf.set_default('sqlite_synchronous', False)
         self.conf.set_default('use_ipv6', True)
         self.conf.set_default('verbose', True)
         self.conf.set_default('vlan_interface', 'eth0')
         config.parse_args([], default_config_files=[])
-        self.addCleanup(self.conf.reset)
         self.addCleanup(utils.cleanup_dns_managers)
         self.addCleanup(ipv6.api.reset_backend)

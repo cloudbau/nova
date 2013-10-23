@@ -50,14 +50,17 @@
 A fake XenAPI SDK.
 """
 
+import base64
 import pickle
 import random
 import uuid
 from xml.sax import saxutils
+import zlib
 
 import pprint
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
@@ -74,7 +77,8 @@ LOG = logging.getLogger(__name__)
 def log_db_contents(msg=None):
     text = msg or ""
     content = pprint.pformat(_db_content)
-    LOG.debug(_("%(text)s: _db_content => %(content)s") % locals())
+    LOG.debug(_("%(text)s: _db_content => %(content)s"),
+              {'text': text, 'content': content})
 
 
 def reset():
@@ -94,16 +98,25 @@ def reset_table(table):
     _db_content[table] = {}
 
 
-def create_pool(name_label):
+def _create_pool(name_label):
     return _create_object('pool',
                           {'name_label': name_label})
 
 
 def create_host(name_label, hostname='fake_name', address='fake_addr'):
-    return _create_object('host',
-                          {'name_label': name_label,
-                           'hostname': hostname,
-                           'address': address})
+    host_ref = _create_object('host',
+                               {'name_label': name_label,
+                                'hostname': hostname,
+                                'address': address})
+    host_default_sr_ref = _create_local_srs(host_ref)
+    _create_local_pif(host_ref)
+
+    # Create a pool if we don't have one already
+    if len(_db_content['pool']) == 0:
+        pool_ref = _create_pool('')
+        _db_content['pool'][pool_ref]['master'] = host_ref
+        _db_content['pool'][pool_ref]['default-SR'] = host_default_sr_ref
+        _db_content['pool'][pool_ref]['suspend-image-SR'] = host_default_sr_ref
 
 
 def create_network(name_label, bridge):
@@ -198,7 +211,8 @@ def create_vbd(vm_ref, vdi_ref, userdevice=0):
 
 def after_VBD_create(vbd_ref, vbd_rec):
     """Create read-only fields and backref from VM and VDI to VBD when VBD
-    is created."""
+    is created.
+    """
     vbd_rec['currently_attached'] = False
     vbd_rec['device'] = ''
 
@@ -225,12 +239,13 @@ def after_VM_create(vm_ref, vm_rec):
     vm_rec.setdefault('resident_on', '')
 
 
-def create_pbd(config, host_ref, sr_ref, attached):
+def create_pbd(host_ref, sr_ref, attached):
+    config = {'path': '/var/run/sr-mount/%s' % sr_ref}
     return _create_object('PBD',
-                          {'device-config': config,
+                          {'device_config': config,
                            'host': host_ref,
                            'SR': sr_ref,
-                           'currently-attached': attached})
+                           'currently_attached': attached})
 
 
 def create_task(name_label):
@@ -239,36 +254,29 @@ def create_task(name_label):
                            'status': 'pending'})
 
 
-def create_local_pifs():
-    """Adds a PIF for each to the local database with VLAN=-1.
-       Do this one per host."""
-    for host_ref in _db_content['host'].keys():
-        _create_local_pif(host_ref)
-
-
-def create_local_srs():
+def _create_local_srs(host_ref):
     """Create an SR that looks like the one created on the local disk by
-    default by the XenServer installer.  Do this one per host. Also, fake
-    the installation of an ISO SR."""
-    for host_ref in _db_content['host'].keys():
-        create_sr(name_label='Local storage',
-                  type='lvm',
-                  other_config={'i18n-original-value-name_label':
-                                'Local storage',
-                                'i18n-key': 'local-storage'},
-                  physical_size=40000,
-                  physical_utilisation=20000,
-                  virtual_allocation=10000,
-                  host_ref=host_ref)
-        create_sr(name_label='Local storage ISO',
-                  type='iso',
-                  other_config={'i18n-original-value-name_label':
-                                'Local storage ISO',
-                                'i18n-key': 'local-storage-iso'},
-                  physical_size=80000,
-                  physical_utilisation=40000,
-                  virtual_allocation=80000,
-                  host_ref=host_ref)
+    default by the XenServer installer.  Also, fake the installation of
+    an ISO SR.
+    """
+    create_sr(name_label='Local storage ISO',
+              type='iso',
+              other_config={'i18n-original-value-name_label':
+                            'Local storage ISO',
+                            'i18n-key': 'local-storage-iso'},
+              physical_size=80000,
+              physical_utilisation=40000,
+              virtual_allocation=80000,
+              host_ref=host_ref)
+    return create_sr(name_label='Local storage',
+                     type='ext',
+                     other_config={'i18n-original-value-name_label':
+                                   'Local storage',
+                                   'i18n-key': 'local-storage'},
+                     physical_size=40000,
+                     physical_utilisation=20000,
+                     virtual_allocation=10000,
+                     host_ref=host_ref)
 
 
 def create_sr(**kwargs):
@@ -284,7 +292,7 @@ def create_sr(**kwargs):
               'virtual_allocation': str(kwargs.get('virtual_allocation', 0)),
               'other_config': kwargs.get('other_config', {}),
               'VDIs': kwargs.get('VDIs', [])})
-    pbd_ref = create_pbd('', kwargs.get('host_ref'), sr_ref, True)
+    pbd_ref = create_pbd(kwargs.get('host_ref'), sr_ref, True)
     _db_content['SR'][sr_ref]['PBDs'] = [pbd_ref]
     return sr_ref
 
@@ -297,7 +305,8 @@ def _create_local_pif(host_ref):
                               'VLAN': -1,
                               'device': 'fake0',
                               'host_uuid': host_ref,
-                              'network': ''})
+                              'network': '',
+                              'management': 'true'})
     return pif_ref
 
 
@@ -317,7 +326,7 @@ def _create_sr(table, obj):
     sr_ref = _create_object(table, obj[2])
     if sr_type == 'iscsi':
         vdi_ref = create_vdi('', sr_ref)
-        pbd_ref = create_pbd('', host_ref, sr_ref, True)
+        pbd_ref = create_pbd(host_ref, sr_ref, True)
         _db_content['SR'][sr_ref]['VDIs'] = [vdi_ref]
         _db_content['SR'][sr_ref]['PBDs'] = [pbd_ref]
         _db_content['VDI'][vdi_ref]['SR'] = sr_ref
@@ -348,6 +357,50 @@ def get_all_records(table):
     return _db_content[table]
 
 
+def _query_matches(record, query):
+    # Simple support for the XenServer query language:
+    # 'field "host"="<uuid>" and field "SR"="<sr uuid>"'
+    # Tested through existing tests (e.g. calls to find_network_with_bridge)
+
+    and_clauses = query.split(" and ")
+    if len(and_clauses) > 1:
+        matches = True
+        for clause in and_clauses:
+            matches = matches and _query_matches(record, clause)
+        return matches
+
+    or_clauses = query.split(" or ")
+    if len(or_clauses) > 1:
+        matches = False
+        for clause in or_clauses:
+            matches = matches or _query_matches(record, clause)
+        return matches
+
+    if query[:4] == 'not ':
+        return not _query_matches(record, query[4:])
+
+    # Now it must be a single field - bad queries never match
+    if query[:5] != 'field':
+        return False
+    (field, value) = query[6:].split('=', 1)
+
+    # Some fields (e.g. name_label, memory_overhead) have double
+    # underscores in the DB, but only single underscores when querying
+
+    field = field.replace("__", "_").strip(" \"'")
+    value = value.strip(" \"'")
+    return record[field] == value
+
+
+def get_all_records_where(table_name, query):
+    matching_records = {}
+    table = _db_content[table_name]
+    for record in table:
+        if _query_matches(table[record], query):
+            matching_records[record] = table[record]
+    return matching_records
+
+
 def get_record(table, ref):
     if ref in _db_content[table]:
         return _db_content[table].get(ref)
@@ -363,7 +416,8 @@ def check_for_session_leaks():
 
 def as_value(s):
     """Helper function for simulating XenAPI plugin responses.  It
-    escapes and wraps the given argument."""
+    escapes and wraps the given argument.
+    """
     return '<value>%s</value>' % saxutils.escape(s)
 
 
@@ -371,7 +425,8 @@ def as_json(*args, **kwargs):
     """Helper function for simulating XenAPI plugin responses for those
     that are returning JSON.  If this function is given plain arguments,
     then these are rendered as a JSON list.  If it's given keyword
-    arguments then these are rendered as a JSON dict."""
+    arguments then these are rendered as a JSON dict.
+    """
     arg = args or kwargs
     return jsonutils.dumps(arg)
 
@@ -400,7 +455,7 @@ class SessionBase(object):
         self._session = None
 
     def pool_get_default_SR(self, _1, pool_ref):
-        return 'FAKE DEFAULT SR'
+        return _db_content['pool'].values()[0]['default-SR']
 
     def VBD_insert(self, _1, vbd_ref, vdi_ref):
         vbd_rec = get_record('VBD', vbd_ref)
@@ -455,7 +510,7 @@ class SessionBase(object):
         if not rec['currently_attached']:
             raise Failure(['DEVICE_ALREADY_DETACHED', rec])
         rec['currently_attached'] = False
-        sr_ref = pbd_ref['SR']
+        sr_ref = rec['SR']
         _db_content['SR'][sr_ref]['PBDs'].remove(pbd_ref)
 
     def SR_introduce(self, _1, sr_uuid, label, desc, type, content_type,
@@ -464,40 +519,37 @@ class SessionBase(object):
         rec = None
         for ref, rec in _db_content['SR'].iteritems():
             if rec.get('uuid') == sr_uuid:
-                break
-        if rec:
-            # make forgotten = 0 and return ref
-            _db_content['SR'][ref]['forgotten'] = 0
-            return ref
-        else:
-            # SR not found in db, so we create one
-            params = {}
-            params.update(locals())
-            del params['self']
-            sr_ref = _create_object('SR', params)
-            _db_content['SR'][sr_ref]['uuid'] = sr_uuid
-            _db_content['SR'][sr_ref]['forgotten'] = 0
-            vdi_per_lun = False
-            if type in ('iscsi'):
-                # Just to be clear
-                vdi_per_lun = True
-            if vdi_per_lun:
-                # we need to create a vdi because this introduce
-                # is likely meant for a single vdi
-                vdi_ref = create_vdi('', sr_ref)
-                _db_content['SR'][sr_ref]['VDIs'] = [vdi_ref]
-                _db_content['VDI'][vdi_ref]['SR'] = sr_ref
-            return sr_ref
+                # make forgotten = 0 and return ref
+                _db_content['SR'][ref]['forgotten'] = 0
+                return ref
+        # SR not found in db, so we create one
+        params = {'sr_uuid': sr_uuid,
+                  'label': label,
+                  'desc': desc,
+                  'type': type,
+                  'content_type': content_type,
+                  'shared': shared,
+                  'sm_config': sm_config}
+        sr_ref = _create_object('SR', params)
+        _db_content['SR'][sr_ref]['uuid'] = sr_uuid
+        _db_content['SR'][sr_ref]['forgotten'] = 0
+        vdi_per_lun = False
+        if type in ('iscsi'):
+            # Just to be clear
+            vdi_per_lun = True
+        if vdi_per_lun:
+            # we need to create a vdi because this introduce
+            # is likely meant for a single vdi
+            vdi_ref = create_vdi('', sr_ref)
+            _db_content['SR'][sr_ref]['VDIs'] = [vdi_ref]
+            _db_content['VDI'][vdi_ref]['SR'] = sr_ref
+        return sr_ref
 
     def SR_forget(self, _1, sr_ref):
         _db_content['SR'][sr_ref]['forgotten'] = 1
 
     def SR_scan(self, _1, sr_ref):
         return
-
-    def PIF_get_all_records_where(self, _1, _2):
-        # TODO(salvatore-orlando): filter table on _2
-        return _db_content['PIF']
 
     def VM_get_xenstore_data(self, _1, vm_ref):
         return _db_content['VM'][vm_ref].get('xenstore_data', {})
@@ -553,7 +605,7 @@ class SessionBase(object):
         return 12 * 1024 * 1024 * 1024
 
     def _plugin_agent_version(self, method, args):
-        return as_json(returncode='0', message='1.0')
+        return as_json(returncode='0', message='1.0\\r\\n')
 
     def _plugin_agent_key_init(self, method, args):
         return as_json(returncode='D0', message='1')
@@ -566,6 +618,13 @@ class SessionBase(object):
 
     def _plugin_agent_resetnetwork(self, method, args):
         return as_json(returncode='0', message='success')
+
+    def _plugin_agent_agentupdate(self, method, args):
+        url = args["url"]
+        md5 = args["md5sum"]
+        message = "success with %(url)s and hash:%(md5)s" % dict(url=url,
+                                                                 md5=md5)
+        return as_json(returncode='0', message=message)
 
     def _plugin_noop(self, method, args):
         return ''
@@ -607,6 +666,15 @@ class SessionBase(object):
 
     def _plugin_xenhost_host_uptime(self, method, args):
         return jsonutils.dumps({"uptime": "fake uptime"})
+
+    def _plugin_console_get_console_log(self, method, args):
+        dom_id = args["dom_id"]
+        if dom_id == 0:
+            raise Failure('Guest does not have a console')
+        return base64.b64encode(zlib.compress("dom_id: %s" % dom_id))
+
+    def _plugin_nova_plugin_version_get_version(self, method, args):
+        return pickle.dumps("1.0")
 
     def host_call_plugin(self, _1, _2, plugin, method, args):
         func = getattr(self, '_plugin_%s_%s' % (plugin, method), None)
@@ -670,9 +738,6 @@ class SessionBase(object):
                         vif_map, options):
         pass
 
-    def network_get_all_records_where(self, _1, filter):
-        return self.xenapi.network.get_all_records()
-
     def xenapi_request(self, methodname, params):
         if methodname.startswith('login'):
             self._login(methodname, params)
@@ -719,8 +784,8 @@ class SessionBase(object):
             if impl is not None:
 
                 def callit(*params):
-                    localname = name
-                    LOG.debug(_('Calling %(localname)s %(impl)s') % locals())
+                    LOG.debug(_('Calling %(name)s %(impl)s'),
+                              {'name': name, 'impl': impl})
                     self._check_session(params)
                     return impl(*params)
                 return callit
@@ -768,6 +833,10 @@ class SessionBase(object):
             self._check_arg_count(params, 1)
             return get_all_records(cls)
 
+        if func == 'get_all_records_where':
+            self._check_arg_count(params, 2)
+            return get_all_records_where(cls, params[1])
+
         if func == 'get_record':
             self._check_arg_count(params, 2)
             return get_record(cls, params[1])
@@ -803,7 +872,7 @@ class SessionBase(object):
             val = params[2]
 
             if (ref in _db_content[cls] and
-                field in _db_content[cls][ref]):
+                    field in _db_content[cls][ref]):
                 _db_content[cls][ref][field] = val
                 return
 
@@ -872,7 +941,7 @@ class SessionBase(object):
 
     def _check_session(self, params):
         if (self._session is None or
-            self._session not in _db_content['session']):
+                self._session not in _db_content['session']):
             raise Failure(['HANDLE_INVALID', 'session', self._session])
         if len(params) == 0 or params[0] != self._session:
             LOG.debug(_('Raising NotImplemented'))

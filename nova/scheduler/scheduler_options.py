@@ -29,6 +29,7 @@ import os
 from oslo.config import cfg
 
 from nova.openstack.common import excutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 
@@ -66,18 +67,18 @@ class SchedulerOptions(object):
         """Get the last modified datetime. Broken out for testing."""
         try:
             return os.path.getmtime(filename)
-        except os.error, e:
+        except os.error as e:
             with excutils.save_and_reraise_exception():
                 LOG.exception(_("Could not stat scheduler options file "
-                                "%(filename)s: '%(e)s'"), locals())
+                                "%(filename)s: '%(e)s'"),
+                              {'filename': filename, 'e': e})
 
     def _load_file(self, handle):
         """Decode the JSON file. Broken out for testing."""
         try:
             return json.load(handle)
-        except ValueError, e:
-            LOG.exception(_("Could not decode scheduler options: "
-                            "'%(e)s'") % locals())
+        except ValueError as e:
+            LOG.exception(_("Could not decode scheduler options: '%s'"), e)
             return {}
 
     def _get_time_now(self):
@@ -97,7 +98,7 @@ class SchedulerOptions(object):
 
         last_modified = self._get_file_timestamp(filename)
         if (not last_modified or not self.last_modified or
-            last_modified > self.last_modified):
+                last_modified > self.last_modified):
             self.data = self._load_file(self._get_file_handle(filename))
             self.last_modified = last_modified
         if not self.data:

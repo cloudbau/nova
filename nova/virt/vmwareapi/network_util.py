@@ -21,6 +21,7 @@ Utility functions for ESX Networking.
 """
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.vmwareapi import error_util
 from nova.virt.vmwareapi import vim_util
@@ -51,11 +52,8 @@ def get_network_with_the_name(session, network_name="vmnet0", cluster=None):
     if not vm_networks_ret:
         return None
     vm_networks = vm_networks_ret.ManagedObjectReference
-    networks = session._call_method(vim_util,
-                       "get_properties_for_a_collection_of_objects",
-                       "Network", vm_networks, ["summary.name"])
     network_obj = {}
-    LOG.warn(vm_networks)
+    LOG.debug(vm_networks)
     for network in vm_networks:
         # Get network properties
         if network._type == 'DistributedVirtualPortgroup':
@@ -81,8 +79,6 @@ def get_network_with_the_name(session, network_name="vmnet0", cluster=None):
                 network_obj['name'] = network_name
     if (len(network_obj) > 0):
         return network_obj
-    else:
-        return None
 
 
 def get_vswitch_for_vlan_interface(session, vlan_interface, cluster=None):

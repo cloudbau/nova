@@ -20,6 +20,7 @@ Global cells config options
 
 from oslo.config import cfg
 
+
 cells_opts = [
     cfg.BoolOpt('enable',
                 default=False,
@@ -43,6 +44,26 @@ cells_opts = [
                 default=10.0,
                 help='Percentage of cell capacity to hold in reserve. '
                      'Affects both memory and disk utilization'),
+    cfg.StrOpt('cell_type',
+               default='compute',
+               help='Type of cell: api or compute'),
+    cfg.IntOpt("mute_child_interval",
+               default=300,
+               help='Number of seconds after which a lack of capability and '
+                     'capacity updates signals the child cell is to be '
+                     'treated as a mute.'),
+    cfg.IntOpt('bandwidth_update_interval',
+                default=600,
+                help='Seconds between bandwidth updates for cells.'),
 ]
 
-cfg.CONF.register_opts(cells_opts, group='cells')
+CONF = cfg.CONF
+CONF.register_opts(cells_opts, group='cells')
+
+
+def get_cell_type():
+    """Return the cell type, 'api', 'compute', or None (if cells is disabled).
+    """
+    if not CONF.cells.enable:
+        return
+    return CONF.cells.cell_type

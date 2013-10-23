@@ -23,6 +23,7 @@ from nova.cmd import manage
 from nova import context
 from nova import db
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova import test
 from nova.tests.db import fakes as db_fakes
 
@@ -79,7 +80,7 @@ class FloatingIpCommandsTestCase(test.TestCase):
     def test_address_to_hosts(self):
         def assert_loop(result, expected):
             for ip in result:
-                self.assertTrue(str(ip) in expected)
+                self.assertIn(str(ip), expected)
 
         address_to_hosts = self.commands.address_to_hosts
         # /32 and /31
@@ -280,9 +281,9 @@ class NetworkCommandsTestCase(test.TestCase):
                                dis_host=True)
 
 
-class InstanceTypeCommandsTestCase(test.TestCase):
+class FlavorCommandsTestCase(test.TestCase):
     def setUp(self):
-        super(InstanceTypeCommandsTestCase, self).setUp()
+        super(FlavorCommandsTestCase, self).setUp()
 
         values = dict(name="test.small",
                       memory_mb=220,
@@ -290,22 +291,22 @@ class InstanceTypeCommandsTestCase(test.TestCase):
                       root_gb=16,
                       ephemeral_gb=32,
                       flavorid=105)
-        ref = db.instance_type_create(context.get_admin_context(),
+        ref = db.flavor_create(context.get_admin_context(),
                                       values)
         self.instance_type_name = ref["name"]
         self.instance_type_id = ref["id"]
         self.instance_type_flavorid = ref["flavorid"]
-        self.set_key = manage.InstanceTypeCommands().set_key
-        self.unset_key = manage.InstanceTypeCommands().unset_key
+        self.set_key = manage.FlavorCommands().set_key
+        self.unset_key = manage.FlavorCommands().unset_key
 
     def tearDown(self):
-        db.instance_type_destroy(context.get_admin_context(),
+        db.flavor_destroy(context.get_admin_context(),
                                  "test.small")
-        super(InstanceTypeCommandsTestCase, self).tearDown()
+        super(FlavorCommandsTestCase, self).tearDown()
 
     def _test_extra_specs_empty(self):
         empty_specs = {}
-        actual_specs = db.instance_type_extra_specs_get(
+        actual_specs = db.flavor_extra_specs_get(
                               context.get_admin_context(),
                               self.instance_type_id)
         self.assertEquals(empty_specs, actual_specs)
@@ -316,7 +317,7 @@ class InstanceTypeCommandsTestCase(test.TestCase):
         self._test_extra_specs_empty()
 
         self.set_key(self.instance_type_name, "k1", "v1")
-        actual_specs = db.instance_type_extra_specs_get(
+        actual_specs = db.flavor_extra_specs_get(
                               context.get_admin_context(),
                               self.instance_type_flavorid)
         self.assertEquals(expected_specs, actual_specs)
@@ -331,13 +332,13 @@ class InstanceTypeCommandsTestCase(test.TestCase):
         self._test_extra_specs_empty()
 
         self.set_key(self.instance_type_name, "k1", "v1")
-        actual_specs = db.instance_type_extra_specs_get(
+        actual_specs = db.flavor_extra_specs_get(
                               context.get_admin_context(),
                               self.instance_type_flavorid)
         self.assertEquals(expected_specs, actual_specs)
 
         self.set_key(self.instance_type_name, "k1", "v2")
-        actual_specs = db.instance_type_extra_specs_get(
+        actual_specs = db.flavor_extra_specs_get(
                               context.get_admin_context(),
                               self.instance_type_flavorid)
         self.assertEquals(updated_specs, actual_specs)
@@ -352,7 +353,7 @@ class InstanceTypeCommandsTestCase(test.TestCase):
 
         self.set_key(self.instance_type_name, "k1", "v1")
         self.set_key(self.instance_type_name, "k3", "v3")
-        actual_specs = db.instance_type_extra_specs_get(
+        actual_specs = db.flavor_extra_specs_get(
                               context.get_admin_context(),
                               self.instance_type_flavorid)
         self.assertEquals(two_items_extra_specs, actual_specs)

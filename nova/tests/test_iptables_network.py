@@ -21,7 +21,7 @@ from nova.network import linux_net
 from nova import test
 
 
-class IptablesManagerTestCase(test.TestCase):
+class IptablesManagerTestCase(test.NoDBTestCase):
 
     binary_name = linux_net.get_binary_name()
 
@@ -87,6 +87,31 @@ class IptablesManagerTestCase(test.TestCase):
     def setUp(self):
         super(IptablesManagerTestCase, self).setUp()
         self.manager = linux_net.IptablesManager()
+
+    def test_duplicate_rules_no_dirty(self):
+        table = self.manager.ipv4['filter']
+        table.dirty = False
+        num_rules = len(table.rules)
+        table.add_rule('FORWARD', '-s 1.2.3.4/5 -j DROP')
+        self.assertEqual(len(table.rules), num_rules + 1)
+        self.assertTrue(table.dirty)
+        table.dirty = False
+        num_rules = len(table.rules)
+        table.add_rule('FORWARD', '-s 1.2.3.4/5 -j DROP')
+        self.assertEqual(len(table.rules), num_rules)
+        self.assertFalse(table.dirty)
+
+    def test_clean_tables_no_apply(self):
+        for table in self.manager.ipv4.itervalues():
+            table.dirty = False
+        for table in self.manager.ipv6.itervalues():
+            table.dirty = False
+
+        def error_apply():
+            raise test.TestingException()
+
+        self.stubs.Set(self.manager, '_apply', error_apply)
+        self.manager.apply()
 
     def test_filter_rules_are_wrapped(self):
         current_lines = self.sample_filter

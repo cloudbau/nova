@@ -12,7 +12,7 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License
+#    under the License.
 
 import telnetlib
 
@@ -47,7 +47,7 @@ class FakeCoverage(object):
 
     def stop(self):
         if not self.started:
-            raise AssertionError
+            raise AssertionError()
         self.started = False
 
     def report(self, file):
@@ -106,7 +106,7 @@ class CoverageExtensionTest(test.TestCase):
                                fake_auth_context=self.admin_context))
         self.assertEqual(res.status_int, 200)
         resp_dict = jsonutils.loads(res.body)
-        self.assertTrue('path' in resp_dict)
+        self.assertIn('path', resp_dict)
 
     def test_report_coverage_action_file(self):
         self.stubs.Set(coverage_ext.CoverageController,
@@ -125,8 +125,8 @@ class CoverageExtensionTest(test.TestCase):
                                fake_auth_context=self.admin_context))
         self.assertEqual(res.status_int, 200)
         resp_dict = jsonutils.loads(res.body)
-        self.assertTrue('path' in resp_dict)
-        self.assertTrue('coverage-unit-test.report' in resp_dict['path'])
+        self.assertIn('path', resp_dict)
+        self.assertIn('coverage-unit-test.report', resp_dict['path'])
 
     def test_report_coverage_action_xml_file(self):
         self.stubs.Set(coverage_ext.CoverageController,
@@ -145,8 +145,8 @@ class CoverageExtensionTest(test.TestCase):
                                fake_auth_context=self.admin_context))
         self.assertEqual(res.status_int, 200)
         resp_dict = jsonutils.loads(res.body)
-        self.assertTrue('path' in resp_dict)
-        self.assertTrue('coverage-xml-unit-test.report' in resp_dict['path'])
+        self.assertIn('path', resp_dict)
+        self.assertIn('coverage-xml-unit-test.report', resp_dict['path'])
 
     def test_report_coverage_action_nofile(self):
         self.stubs.Set(coverage_ext.CoverageController,

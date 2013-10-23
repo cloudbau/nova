@@ -27,10 +27,12 @@ from nova import compute
 from nova.compute import power_state
 import nova.db
 from nova import exception
+from nova.objects import instance as instance_obj
 from nova.openstack.common import jsonutils
 from nova import quota
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 from nova.tests import utils
 
 CONF = cfg.CONF
@@ -78,25 +80,28 @@ def security_group_rule_db(rule, id=None):
     return AttrDict(attrs)
 
 
-def return_server(context, server_id):
-    return {'id': int(server_id),
-            'power_state': 0x01,
-            'host': "localhost",
-            'uuid': FAKE_UUID1,
-            'name': 'asdf'}
+def return_server(context, server_id, columns_to_join=None):
+    return fake_instance.fake_db_instance(
+        **{'id': int(server_id),
+           'power_state': 0x01,
+           'host': "localhost",
+           'uuid': FAKE_UUID1,
+           'name': 'asdf'})
 
 
-def return_server_by_uuid(context, server_uuid):
-    return {'id': 1,
-            'power_state': 0x01,
-            'host': "localhost",
-            'uuid': server_uuid,
-            'name': 'asdf'}
+def return_server_by_uuid(context, server_uuid, columns_to_join=None):
+    return fake_instance.fake_db_instance(
+        **{'id': 1,
+           'power_state': 0x01,
+           'host': "localhost",
+           'uuid': server_uuid,
+           'name': 'asdf'})
 
 
-def return_non_running_server(context, server_id):
-    return {'id': server_id, 'power_state': power_state.SHUTDOWN,
-            'uuid': FAKE_UUID1, 'host': "localhost", 'name': 'asdf'}
+def return_non_running_server(context, server_id, columns_to_join=None):
+    return fake_instance.fake_db_instance(
+        **{'id': server_id, 'power_state': power_state.SHUTDOWN,
+           'uuid': FAKE_UUID1, 'host': "localhost", 'name': 'asdf'})
 
 
 def return_security_group_by_name(context, project_id, group_name):
@@ -108,7 +113,7 @@ def return_security_group_without_instances(context, project_id, group_name):
     return {'id': 1, 'name': group_name}
 
 
-def return_server_nonexistent(context, server_id):
+def return_server_nonexistent(context, server_id, columns_to_join=None):
     raise exception.InstanceNotFound(instance_id=server_id)
 
 
@@ -273,7 +278,7 @@ class TestSecurityGroups(test.TestCase):
             self.assertEqual(res_dict['security_group']['name'], name)
 
         sg = security_group_template()
-        self.assertRaises(exception.SecurityGroupLimitExceeded,
+        self.assertRaises(webob.exc.HTTPRequestEntityTooLarge,
                           self.controller.create,
                           req, {'security_group': sg})
 
@@ -347,15 +352,15 @@ class TestSecurityGroups(test.TestCase):
             groups.append(sg)
         expected = {'security_groups': groups}
 
-        def return_instance(context, server_id):
+        def return_instance(context, server_id, columns_to_join=None):
             self.assertEquals(server_id, FAKE_UUID1)
             return return_server_by_uuid(context, server_id)
 
         self.stubs.Set(nova.db, 'instance_get_by_uuid',
                        return_instance)
 
-        def return_security_groups(context, instance_id):
-            self.assertEquals(instance_id, 1)
+        def return_security_groups(context, instance_uuid):
+            self.assertEquals(instance_uuid, FAKE_UUID1)
             return [security_group_db(sg) for sg in groups]
 
         self.stubs.Set(nova.db, 'security_group_get_by_instance',
@@ -407,6 +412,54 @@ class TestSecurityGroups(test.TestCase):
                                       self.fake_id)
         self.assertRaises(webob.exc.HTTPNotFound, self.controller.delete,
                           req, self.fake_id)
+
+    def test_update_security_group(self):
+        sg = security_group_template(id=2, rules=[])
+        sg_update = security_group_template(id=2, rules=[],
+                        name='update_name', description='update_desc')
+
+        def return_security_group(context, group_id):
+            self.assertEquals(sg['id'], group_id)
+            return security_group_db(sg)
+
+        def return_update_security_group(context, group_id, values):
+            self.assertEquals(sg_update['id'], group_id)
+            self.assertEquals(sg_update['name'], values['name'])
+            self.assertEquals(sg_update['description'], values['description'])
+            return security_group_db(sg_update)
+
+        self.stubs.Set(nova.db, 'security_group_update',
+                       return_update_security_group)
+        self.stubs.Set(nova.db, 'security_group_get',
+                       return_security_group)
+
+        req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups/2')
+        res_dict = self.controller.update(req, '2',
+                                          {'security_group': sg_update})
+
+        expected = {'security_group': sg_update}
+        self.assertEquals(res_dict, expected)
+
+    def test_update_security_group_name_to_default(self):
+        sg = security_group_template(id=2, rules=[], name='default')
+
+        def return_security_group(context, group_id):
+            self.assertEquals(sg['id'], group_id)
+            return security_group_db(sg)
+
+        self.stubs.Set(nova.db, 'security_group_get',
+                       return_security_group)
+
+        req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups/2')
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                          req, '2', {'security_group': sg})
+
+    def test_update_default_security_group_fail(self):
+        sg = security_group_template()
+
+        req = fakes.HTTPRequest.blank('/v2/fake/os-security-groups/1')
+        self.assertRaises(webob.exc.HTTPBadRequest, self.controller.update,
+                          req, '1', {'security_group': sg})
 
     def test_delete_security_group_by_id(self):
         sg = security_group_template(id=1, rules=[])
@@ -668,7 +721,7 @@ class TestSecurityGroupRules(test.TestCase):
         db1 = security_group_db(self.sg1)
         db2 = security_group_db(self.sg2)
 
-        def return_security_group(context, group_id):
+        def return_security_group(context, group_id, columns_to_join=None):
             if group_id == db1['id']:
                 return db1
             if group_id == db2['id']:
@@ -1091,7 +1144,7 @@ class TestSecurityGroupRules(test.TestCase):
             'ip_protocol': 'tcp', 'from_port': '121', 'to_port': '121',
             'parent_group_id': self.sg2['id'], 'group_id': self.sg1['id']
         }
-        self.assertRaises(exception.SecurityGroupLimitExceeded,
+        self.assertRaises(webob.exc.HTTPRequestEntityTooLarge,
                           self.controller.create,
                           req, {'security_group_rule': rule})
 
@@ -1108,6 +1161,20 @@ class TestSecurityGroupRules(test.TestCase):
                           self.parent_security_group['id'])
         self.assertEquals(security_group_rule['ip_range']['cidr'],
                           "0.0.0.0/0")
+
+    def test_create_rule_cidr_ipv6_allow_all(self):
+        rule = security_group_rule_template(cidr='::/0',
+                                            parent_group_id=self.sg2['id'])
+
+        req = fakes.HTTPRequest.blank('/v2/fake/os-security-group-rules')
+        res_dict = self.controller.create(req, {'security_group_rule': rule})
+
+        security_group_rule = res_dict['security_group_rule']
+        self.assertNotEquals(security_group_rule['id'], 0)
+        self.assertEquals(security_group_rule['parent_group_id'],
+                          self.parent_security_group['id'])
+        self.assertEquals(security_group_rule['ip_range']['cidr'],
+                          "::/0")
 
     def test_create_rule_cidr_allow_some(self):
         rule = security_group_rule_template(cidr='15.0.0.0/8',
@@ -1269,12 +1336,12 @@ class TestSecurityGroupXMLSerializer(test.TestCase):
 
         for child in tree:
             child_tag = self._tag(child)
-            self.assertTrue(child_tag in raw_rule)
+            self.assertIn(child_tag, raw_rule)
             seen.add(child_tag)
             if child_tag in ('group', 'ip_range'):
                 for gr_child in child:
                     gr_child_tag = self._tag(gr_child)
-                    self.assertTrue(gr_child_tag in raw_rule[child_tag])
+                    self.assertIn(gr_child_tag, raw_rule[child_tag])
                     seen.add('%s/%s' % (child_tag, gr_child_tag))
                     self.assertEqual(gr_child.text,
                                      raw_rule[child_tag][gr_child_tag])
@@ -1409,24 +1476,37 @@ UUID3 = '00000000-0000-0000-0000-000000000003'
 
 
 def fake_compute_get_all(*args, **kwargs):
-    return [
-        fakes.stub_instance(1, uuid=UUID1,
-                            security_groups=[{'name': 'fake-0-0'},
-                                             {'name': 'fake-0-1'}]),
-        fakes.stub_instance(2, uuid=UUID2,
-                            security_groups=[{'name': 'fake-1-0'},
-                                             {'name': 'fake-1-1'}])
+    base = {'id': 1, 'description': 'foo', 'user_id': 'bar',
+            'project_id': 'baz', 'deleted': False, 'deleted_at': None,
+            'updated_at': None, 'created_at': None}
+    db_list = [
+        fakes.stub_instance(
+            1, uuid=UUID1,
+            security_groups=[dict(base, **{'name': 'fake-0-0'}),
+                             dict(base, **{'name': 'fake-0-1'})]),
+        fakes.stub_instance(
+            2, uuid=UUID2,
+            security_groups=[dict(base, **{'name': 'fake-1-0'}),
+                             dict(base, **{'name': 'fake-1-1'})])
     ]
+
+    return instance_obj._make_instance_list(args[1],
+                                            instance_obj.InstanceList(),
+                                            db_list,
+                                            ['metadata', 'system_metadata',
+                                             'security_groups', 'info_cache'])
 
 
 def fake_compute_get(*args, **kwargs):
-    return fakes.stub_instance(1, uuid=UUID3,
+    inst = fakes.stub_instance(1, uuid=UUID3,
                                security_groups=[{'name': 'fake-2-0'},
                                                 {'name': 'fake-2-1'}])
+    return fake_instance.fake_instance_obj(args[1],
+               expected_attrs=instance_obj.INSTANCE_DEFAULT_FIELDS, **inst)
 
 
 def fake_compute_create(*args, **kwargs):
-    return ([fake_compute_get()], '')
+    return ([fake_compute_get(*args, **kwargs)], '')
 
 
 def fake_get_instances_security_groups_bindings(inst, context):

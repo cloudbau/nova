@@ -24,9 +24,12 @@ from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
 from nova.compute import flavors
 from nova import exception
+from nova.openstack.common.gettextutils import _
 
 
-authorize = extensions.soft_extension_authorizer('compute', 'flavor_access')
+soft_authorize = extensions.soft_extension_authorizer('compute',
+                                                      'flavor_access')
+authorize = extensions.extension_authorizer('compute', 'flavor_access')
 
 
 def make_flavor(elem):
@@ -71,7 +74,7 @@ def _marshall_flavor_access(flavor_id):
     rval = []
     try:
         access_list = flavors.\
-                      get_instance_type_access_by_flavor_id(flavor_id)
+                      get_flavor_access_by_flavor_id(flavor_id)
     except exception.FlavorNotFound:
         explanation = _("Flavor not found.")
         raise webob.exc.HTTPNotFound(explanation=explanation)
@@ -95,7 +98,7 @@ class FlavorAccessController(object):
         authorize(context)
 
         try:
-            flavor = flavors.get_instance_type_by_flavor_id(flavor_id)
+            flavor = flavors.get_flavor_by_flavor_id(flavor_id, ctxt=context)
         except exception.FlavorNotFound:
             explanation = _("Flavor not found.")
             raise webob.exc.HTTPNotFound(explanation=explanation)
@@ -119,7 +122,7 @@ class FlavorActionController(wsgi.Controller):
     def _get_flavor_refs(self, context):
         """Return a dictionary mapping flavorid to flavor_ref."""
 
-        flavor_refs = flavors.get_all_types(context)
+        flavor_refs = flavors.get_all_flavors(context)
         rval = {}
         for name, obj in flavor_refs.iteritems():
             rval[obj['flavorid']] = obj
@@ -132,7 +135,7 @@ class FlavorActionController(wsgi.Controller):
     @wsgi.extends
     def show(self, req, resp_obj, id):
         context = req.environ['nova.context']
-        if authorize(context):
+        if soft_authorize(context):
             # Attach our slave template to the response object
             resp_obj.attach(xml=FlavorTemplate())
             db_flavor = req.get_db_flavor(id)
@@ -142,7 +145,7 @@ class FlavorActionController(wsgi.Controller):
     @wsgi.extends
     def detail(self, req, resp_obj):
         context = req.environ['nova.context']
-        if authorize(context):
+        if soft_authorize(context):
             # Attach our slave template to the response object
             resp_obj.attach(xml=FlavorsTemplate())
 
@@ -154,7 +157,7 @@ class FlavorActionController(wsgi.Controller):
     @wsgi.extends(action='create')
     def create(self, req, body, resp_obj):
         context = req.environ['nova.context']
-        if authorize(context):
+        if soft_authorize(context):
             # Attach our slave template to the response object
             resp_obj.attach(xml=FlavorTemplate())
 
@@ -166,14 +169,15 @@ class FlavorActionController(wsgi.Controller):
     @wsgi.action("addTenantAccess")
     def _addTenantAccess(self, req, id, body):
         context = req.environ['nova.context']
-        authorize(context)
+        authorize(context, action="addTenantAccess")
+
         self._check_body(body)
 
         vals = body['addTenantAccess']
         tenant = vals['tenant']
 
         try:
-            flavors.add_instance_type_access(id, tenant, context)
+            flavors.add_flavor_access(id, tenant, context)
         except exception.FlavorAccessExists as err:
             raise webob.exc.HTTPConflict(explanation=err.format_message())
 
@@ -183,15 +187,16 @@ class FlavorActionController(wsgi.Controller):
     @wsgi.action("removeTenantAccess")
     def _removeTenantAccess(self, req, id, body):
         context = req.environ['nova.context']
-        authorize(context)
+        authorize(context, action="removeTenantAccess")
+
         self._check_body(body)
 
         vals = body['removeTenantAccess']
         tenant = vals['tenant']
 
         try:
-            flavors.remove_instance_type_access(id, tenant, context)
-        except exception.FlavorAccessNotFound, e:
+            flavors.remove_flavor_access(id, tenant, context)
+        except exception.FlavorAccessNotFound as e:
             raise webob.exc.HTTPNotFound(explanation=e.format_message())
 
         return _marshall_flavor_access(id)

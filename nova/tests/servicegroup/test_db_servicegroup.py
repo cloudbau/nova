@@ -14,7 +14,6 @@
 
 import datetime
 
-import eventlet
 import fixtures
 
 from nova import context
@@ -68,14 +67,16 @@ class DBServiceGroupTestCase(test.TestCase):
                                              self._binary)
 
         self.assertTrue(self.servicegroup_api.service_is_up(service_ref))
-        eventlet.sleep(self.down_time + 1)
+        self.useFixture(test.TimeOverride())
+        timeutils.advance_time_seconds(self.down_time + 1)
+        self.servicegroup_api._driver._report_state(serv)
         service_ref = db.service_get_by_args(self._ctx,
                                              self._host,
                                              self._binary)
 
         self.assertTrue(self.servicegroup_api.service_is_up(service_ref))
         serv.stop()
-        eventlet.sleep(self.down_time + 1)
+        timeutils.advance_time_seconds(self.down_time + 1)
         service_ref = db.service_get_by_args(self._ctx,
                                              self._host,
                                              self._binary)
@@ -102,11 +103,11 @@ class DBServiceGroupTestCase(test.TestCase):
 
         services = self.servicegroup_api.get_all(self._topic)
 
-        self.assertTrue(service_ref1['host'] in services)
-        self.assertTrue(service_ref2['host'] in services)
+        self.assertIn(service_ref1['host'], services)
+        self.assertIn(service_ref2['host'], services)
 
         service_id = self.servicegroup_api.get_one(self._topic)
-        self.assertTrue(service_id in services)
+        self.assertIn(service_id, services)
 
     def test_service_is_up(self):
         fts_func = datetime.datetime.fromtimestamp

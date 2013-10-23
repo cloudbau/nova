@@ -22,12 +22,14 @@ Class for Tilera bare-metal nodes.
 import base64
 import os
 
+import jinja2
 from oslo.config import cfg
 
 from nova.compute import flavors
 from nova import exception
 from nova.openstack.common.db import exception as db_exc
 from nova.openstack.common import fileutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova import utils
 from nova.virt.baremetal import baremetal_states
@@ -35,69 +37,22 @@ from nova.virt.baremetal import base
 from nova.virt.baremetal import db
 from nova.virt.baremetal import utils as bm_utils
 
-tilera_opts = [
-    cfg.StrOpt('net_config_template',
-               default='$pybasedir/nova/virt/baremetal/'
-                            'net-dhcp.ubuntu.template',
-               help='Template file for injected network config'),
-    ]
 
 LOG = logging.getLogger(__name__)
 
-baremetal_group = cfg.OptGroup(name='baremetal',
-                               title='Baremetal Options')
-
 CONF = cfg.CONF
-CONF.register_group(baremetal_group)
-CONF.register_opts(tilera_opts, baremetal_group)
 CONF.import_opt('use_ipv6', 'nova.netconf')
-
-CHEETAH = None
-
-
-def _get_cheetah():
-    global CHEETAH
-    if CHEETAH is None:
-        from Cheetah import Template
-        CHEETAH = Template.Template
-    return CHEETAH
+CONF.import_opt('net_config_template', 'nova.virt.baremetal.pxe',
+                group='baremetal')
 
 
 def build_network_config(network_info):
-    try:
-        assert isinstance(network_info, list)
-    except AssertionError:
-        network_info = [network_info]
-    interfaces = []
-    for id, (network, mapping) in enumerate(network_info):
-        address_v6 = None
-        gateway_v6 = None
-        netmask_v6 = None
-        if CONF.use_ipv6:
-            address_v6 = mapping['ip6s'][0]['ip']
-            netmask_v6 = mapping['ip6s'][0]['netmask']
-            gateway_v6 = mapping['gateway_v6']
-        interface = {
-                'name': 'eth%d' % id,
-                'address': mapping['ips'][0]['ip'],
-                'gateway': mapping['gateway'],
-                'netmask': mapping['ips'][0]['netmask'],
-                'dns': ' '.join(mapping['dns']),
-                'address_v6': address_v6,
-                'gateway_v6': gateway_v6,
-                'netmask_v6': netmask_v6,
-            }
-        interfaces.append(interface)
-
-    cheetah = _get_cheetah()
-    network_config = str(cheetah(
-            open(CONF.baremetal.net_config_template).read(),
-            searchList=[
-                {'interfaces': interfaces,
-                 'use_ipv6': CONF.use_ipv6,
-                }
-            ]))
-    return network_config
+    interfaces = bm_utils.map_network_interfaces(network_info, CONF.use_ipv6)
+    tmpl_path, tmpl_file = os.path.split(CONF.baremetal.net_config_template)
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(tmpl_path))
+    template = env.get_template(tmpl_file)
+    return template.render({'interfaces': interfaces,
+                            'use_ipv6': CONF.use_ipv6})
 
 
 def get_image_dir_path(instance):
@@ -117,7 +72,7 @@ def get_tilera_nfs_path(node_id):
 
 
 def get_partition_sizes(instance):
-    instance_type = flavors.extract_instance_type(instance)
+    instance_type = flavors.extract_flavor(instance)
     root_mb = instance_type['root_gb'] * 1024
     swap_mb = instance_type['swap']
 
@@ -139,7 +94,7 @@ def get_tftp_image_info(instance):
             }
     try:
         image_info['kernel'][0] = str(instance['kernel_id'])
-    except KeyError as e:
+    except KeyError:
         pass
 
     missing_labels = []
@@ -271,7 +226,7 @@ class Tilera(base.NodeDriver):
         bm_utils.unlink_without_raise(get_image_file_path(instance))
         bm_utils.rmtree_without_raise(get_image_dir_path(instance))
 
-    def activate_bootloader(self, context, node, instance):
+    def activate_bootloader(self, context, node, instance, network_info):
         """Configure Tilera boot loader for an instance
 
         Kernel and ramdisk images are downloaded by cache_tftp_images,
@@ -367,7 +322,7 @@ class Tilera(base.NodeDriver):
 
             status = row.get('task_state')
             if (status == baremetal_states.DEPLOYING and
-                locals['started'] == False):
+                    locals['started'] == False):
                 LOG.info(_('Tilera deploy started for instance %s')
                            % instance['uuid'])
                 locals['started'] = True
@@ -380,7 +335,7 @@ class Tilera(base.NodeDriver):
                 user_data = instance['user_data']
                 try:
                     self._iptables_set(node_ip, user_data)
-                except Exception as ex:
+                except Exception:
                     self.deactivate_bootloader(context, node, instance)
                     raise exception.NovaException(_("Node is "
                           "unknown error state."))

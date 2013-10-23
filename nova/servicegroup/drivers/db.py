@@ -17,11 +17,10 @@ from oslo.config import cfg
 
 from nova import conductor
 from nova import context
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
-from nova.openstack.common import loopingcall
 from nova.openstack.common import timeutils
 from nova.servicegroup import api
-from nova import utils
 
 
 CONF = cfg.CONF
@@ -41,17 +40,15 @@ class DbDriver(api.ServiceGroupDriver):
 
         msg = _('DB_Driver: join new ServiceGroup member %(member_id)s to '
                     'the %(group_id)s group, service = %(service)s')
-        LOG.debug(msg, locals())
+        LOG.debug(msg, {'member_id': member_id, 'group_id': group_id,
+                        'service': service})
         if service is None:
             raise RuntimeError(_('service is a mandatory argument for DB based'
                                  ' ServiceGroup driver'))
         report_interval = service.report_interval
         if report_interval:
-            pulse = loopingcall.FixedIntervalLoopingCall(self._report_state,
-                                                         service)
-            pulse.start(interval=report_interval,
-                        initial_delay=report_interval)
-            return pulse
+            service.tg.add_timer(report_interval, self._report_state,
+                                 report_interval, service)
 
     def is_up(self, service_ref):
         """Moved from nova.utils
@@ -63,8 +60,12 @@ class DbDriver(api.ServiceGroupDriver):
             # conductor, then the timestamp will be a string and needs to be
             # converted back to a datetime.
             last_heartbeat = timeutils.parse_strtime(last_heartbeat)
+        else:
+            # Objects have proper UTC timezones, but the timeutils comparison
+            # below does not (and will fail)
+            last_heartbeat = last_heartbeat.replace(tzinfo=None)
         # Timestamps in DB are UTC.
-        elapsed = utils.total_seconds(timeutils.utcnow() - last_heartbeat)
+        elapsed = timeutils.delta_seconds(last_heartbeat, timeutils.utcnow())
         LOG.debug('DB_Driver.is_up last_heartbeat = %(lhb)s elapsed = %(el)s',
                   {'lhb': str(last_heartbeat), 'el': str(elapsed)})
         return abs(elapsed) <= CONF.service_down_time

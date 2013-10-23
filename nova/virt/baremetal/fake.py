@@ -28,7 +28,7 @@ class FakeDriver(base.NodeDriver):
     def destroy_images(self, context, node, instance):
         pass
 
-    def activate_bootloader(self, context, node, instance):
+    def activate_bootloader(self, context, node, instance, **kwargs):
         pass
 
     def deactivate_bootloader(self, context, node, instance):
@@ -77,8 +77,8 @@ class FakeVolumeDriver(object):
         self.virtapi = virtapi
         self._initiator = "fake_initiator"
 
-    def attach_volume(self, connection_info, instance_name, mountpoint):
+    def attach_volume(self, connection_info, instance, mountpoint):
         pass
 
-    def detach_volume(self, connection_info, instance_name, mountpoint):
+    def detach_volume(self, connection_info, instance, mountpoint):
         pass

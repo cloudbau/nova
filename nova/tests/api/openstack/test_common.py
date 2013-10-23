@@ -196,6 +196,24 @@ class PaginationParamsTest(test.TestCase):
         self.assertEqual(common.get_pagination_params(req),
                          {'marker': marker, 'limit': 20})
 
+    def test_valid_page_size(self):
+        # Test valid page_size param.
+        req = webob.Request.blank('/?page_size=10')
+        self.assertEqual(common.get_pagination_params(req),
+                         {'page_size': 10})
+
+    def test_invalid_page_size(self):
+        # Test invalid page_size param.
+        req = webob.Request.blank('/?page_size=-2')
+        self.assertRaises(
+            webob.exc.HTTPBadRequest, common.get_pagination_params, req)
+
+    def test_valid_limit_and_page_size(self):
+        # Test valid limit and page_size parameters.
+        req = webob.Request.blank('/?limit=20&page_size=5')
+        self.assertEqual(common.get_pagination_params(req),
+                         {'page_size': 5, 'limit': 20})
+
 
 class MiscFunctionsTest(test.TestCase):
 
@@ -323,6 +341,19 @@ class MiscFunctionsTest(test.TestCase):
         metadata3 = "invalid metadata"
         self.assertRaises(webob.exc.HTTPBadRequest,
                 common.check_img_metadata_properties_quota, ctxt, metadata3)
+
+        metadata4 = None
+        self.assertEqual(common.check_img_metadata_properties_quota(ctxt,
+                                                        metadata4), None)
+        metadata5 = {}
+        self.assertEqual(common.check_img_metadata_properties_quota(ctxt,
+                                                        metadata5), None)
+
+    def test_task_and_vm_state_from_status(self):
+        fixture = 'reboot'
+        actual = common.task_and_vm_state_from_status(fixture)
+        excepted = 'active', ['rebooting']
+        self.assertEqual(actual, excepted)
 
 
 class MetadataXMLDeserializationTest(test.TestCase):

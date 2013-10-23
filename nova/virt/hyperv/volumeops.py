@@ -24,12 +24,11 @@ import time
 from oslo.config import cfg
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt import driver
-from nova.virt.hyperv import hostutils
+from nova.virt.hyperv import utilsfactory
 from nova.virt.hyperv import vmutils
-from nova.virt.hyperv import volumeutils
-from nova.virt.hyperv import volumeutilsv2
 
 LOG = logging.getLogger(__name__)
 
@@ -40,13 +39,11 @@ hyper_volumeops_opts = [
     cfg.IntOpt('volume_attach_retry_interval',
                default=5,
                help='Interval between volume attachment attempts, in seconds'),
-    cfg.BoolOpt('force_volumeutils_v1',
-                default=False,
-                help='Force volumeutils v1'),
 ]
 
 CONF = cfg.CONF
 CONF.register_opts(hyper_volumeops_opts, 'hyperv')
+CONF.import_opt('host', 'nova.netconf')
 CONF.import_opt('my_ip', 'nova.netconf')
 
 
@@ -56,18 +53,11 @@ class VolumeOps(object):
     """
 
     def __init__(self):
-        self._hostutils = hostutils.HostUtils()
-        self._vmutils = vmutils.VMUtils()
-        self._volutils = self._get_volume_utils()
+        self._hostutils = utilsfactory.get_hostutils()
+        self._vmutils = utilsfactory.get_vmutils()
+        self._volutils = utilsfactory.get_volumeutils()
         self._initiator = None
         self._default_root_device = 'vda'
-
-    def _get_volume_utils(self):
-        if(not CONF.hyperv.force_volumeutils_v1 and
-           self._hostutils.get_windows_version() >= 6.2):
-            return volumeutilsv2.VolumeUtilsV2()
-        else:
-            return volumeutils.VolumeUtils()
 
     def ebs_root_in_block_devices(self, block_device_info):
         return self._volutils.volume_in_mapping(self._default_root_device,
@@ -97,11 +87,15 @@ class VolumeOps(object):
         if self._volutils.get_device_number_for_target(target_iqn, target_lun):
             LOG.debug(_("Already logged in on storage target. No need to "
                         "login. Portal: %(target_portal)s, "
-                        "IQN: %(target_iqn)s, LUN: %(target_lun)s") % locals())
+                        "IQN: %(target_iqn)s, LUN: %(target_lun)s"),
+                      {'target_portal': target_portal,
+                       'target_iqn': target_iqn, 'target_lun': target_lun})
         else:
             LOG.debug(_("Logging in on storage target. Portal: "
                         "%(target_portal)s, IQN: %(target_iqn)s, "
-                        "LUN: %(target_lun)s") % locals())
+                        "LUN: %(target_lun)s"),
+                      {'target_portal': target_portal,
+                       'target_iqn': target_iqn, 'target_lun': target_lun})
             self._volutils.login_storage_target(target_lun, target_iqn,
                                                 target_portal)
             # Wait for the target to be mounted
@@ -112,8 +106,10 @@ class VolumeOps(object):
         Attach a volume to the SCSI controller or to the IDE controller if
         ebs_root is True
         """
-        LOG.debug(_("Attach_volume: %(connection_info)s to %(instance_name)s")
-                  % locals())
+        target_iqn = None
+        LOG.debug(_("Attach_volume: %(connection_info)s to %(instance_name)s"),
+                  {'connection_info': connection_info,
+                   'instance_name': instance_name})
         try:
             self._login_storage_target(connection_info)
 
@@ -143,12 +139,13 @@ class VolumeOps(object):
                                                       mounted_disk_path)
         except Exception as exn:
             LOG.exception(_('Attach volume failed: %s'), exn)
-            self._volutils.logout_storage_target(target_iqn)
+            if target_iqn:
+                self._volutils.logout_storage_target(target_iqn)
             raise vmutils.HyperVException(_('Unable to attach volume '
                                             'to instance %s') % instance_name)
 
     def _get_free_controller_slot(self, scsi_controller_path):
-        #Slots starts from 0, so the lenght of the disks gives us the free slot
+        #Slots starts from 0, so the length of the disks gives us the free slot
         return self._vmutils.get_attached_disks_count(scsi_controller_path)
 
     def detach_volumes(self, block_device_info, instance_name):
@@ -157,13 +154,15 @@ class VolumeOps(object):
             self.detach_volume(vol['connection_info'], instance_name)
 
     def logout_storage_target(self, target_iqn):
-        LOG.debug(_("Logging off storage target %(target_iqn)s") % locals())
+        LOG.debug(_("Logging off storage target %s"), target_iqn)
         self._volutils.logout_storage_target(target_iqn)
 
     def detach_volume(self, connection_info, instance_name):
-        """Dettach a volume to the SCSI controller."""
+        """Detach a volume to the SCSI controller."""
         LOG.debug(_("Detach_volume: %(connection_info)s "
-                    "from %(instance_name)s") % locals())
+                    "from %(instance_name)s"),
+                  {'connection_info': connection_info,
+                   'instance_name': instance_name})
 
         data = connection_info['data']
         target_lun = data['target_lun']
@@ -187,6 +186,7 @@ class VolumeOps(object):
                          instance=instance)
         return {
             'ip': CONF.my_ip,
+            'host': CONF.host,
             'initiator': self._initiator,
         }
 
@@ -198,7 +198,8 @@ class VolumeOps(object):
             raise exception.NotFound(_('Unable to find a mounted disk for '
                                        'target_iqn: %s') % target_iqn)
         LOG.debug(_('Device number: %(device_number)s, '
-                    'target lun: %(target_lun)s') % locals())
+                    'target lun: %(target_lun)s'),
+                  {'device_number': device_number, 'target_lun': target_lun})
         #Finding Mounted disk drive
         for i in range(0, CONF.hyperv.volume_attach_retry_count):
             mounted_disk_path = self._vmutils.get_mounted_disk_by_drive_number(

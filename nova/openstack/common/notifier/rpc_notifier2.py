@@ -18,7 +18,7 @@
 from oslo.config import cfg
 
 from nova.openstack.common import context as req_context
-from nova.openstack.common.gettextutils import _
+from nova.openstack.common.gettextutils import _  # noqa
 from nova.openstack.common import log as logging
 from nova.openstack.common import rpc
 
@@ -26,7 +26,7 @@ LOG = logging.getLogger(__name__)
 
 notification_topic_opt = cfg.ListOpt(
     'topics', default=['notifications', ],
-    help='AMQP topic(s) used for openstack notifications')
+    help='AMQP topic(s) used for OpenStack notifications')
 
 opt_group = cfg.OptGroup(name='rpc_notifier2',
                          title='Options for rpc_notifier2')
@@ -37,7 +37,7 @@ CONF.register_opt(notification_topic_opt, opt_group)
 
 
 def notify(context, message):
-    """Sends a notification via RPC"""
+    """Sends a notification via RPC."""
     if not context:
         context = req_context.get_admin_context()
     priority = message.get('priority',

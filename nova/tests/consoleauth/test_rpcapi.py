@@ -28,7 +28,7 @@ from nova import test
 CONF = cfg.CONF
 
 
-class ConsoleAuthRpcAPITestCase(test.TestCase):
+class ConsoleAuthRpcAPITestCase(test.NoDBTestCase):
     def _test_consoleauth_api(self, method, **kwargs):
         do_cast = kwargs.pop('_do_cast', False)
         ctxt = context.RequestContext('fake_user', 'fake_project')
@@ -67,8 +67,7 @@ class ConsoleAuthRpcAPITestCase(test.TestCase):
     def test_authorize_console(self):
         self._test_consoleauth_api('authorize_console', token='token',
                 console_type='ctype', host='h', port='p',
-                internal_access_path='iap', instance_uuid="instance",
-                version="1.2")
+                internal_access_path='iap', instance_uuid="instance")
 
     def test_check_token(self):
         self._test_consoleauth_api('check_token', token='t')
@@ -76,5 +75,4 @@ class ConsoleAuthRpcAPITestCase(test.TestCase):
     def test_delete_tokens_for_instnace(self):
         self._test_consoleauth_api('delete_tokens_for_instance',
                                    _do_cast=True,
-                                   instance_uuid="instance",
-                                   version='1.2')
+                                   instance_uuid="instance")

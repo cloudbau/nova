@@ -21,6 +21,7 @@
 
 from oslo.config import cfg
 
+from nova.openstack.common.gettextutils import _
 from nova.virt.xenapi import network_utils
 from nova.virt.xenapi import vm_utils
 
@@ -117,10 +118,13 @@ class XenAPIBridgeDriver(XenVIFDriver):
                 pif_vlan = int(pif_rec['VLAN'])
                 # Raise an exception if VLAN != vlan_num
                 if pif_vlan != vlan_num:
-                    raise Exception(_(
-                                "PIF %(pif_rec['uuid'])s for network "
-                                "%(bridge)s has VLAN id %(pif_vlan)d. "
-                                "Expected %(vlan_num)d") % locals())
+                    raise Exception(_("PIF %(pif_uuid)s for network "
+                                      "%(bridge)s has VLAN id %(pif_vlan)d. "
+                                      "Expected %(vlan_num)d"),
+                                    {'pif_uuid': pif_rec['uuid'],
+                                     'bridge': bridge,
+                                     'pif_vlan': pif_vlan,
+                                     'vlan_num': vlan_num})
 
         return network_ref
 

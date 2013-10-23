@@ -27,6 +27,9 @@ from nova.network import manager as network_manager
 from nova.network import model as network_model
 from nova.network import nova_ipam_lib
 from nova.network import rpcapi as network_rpcapi
+from nova.objects import base as obj_base
+from nova.objects import instance_info_cache
+from nova.openstack.common import jsonutils
 from nova.virt.libvirt import config as libvirt_config
 
 
@@ -54,7 +57,7 @@ class FakeVIFDriver(object):
     def setattr(self, key, val):
         self.__setattr__(key, val)
 
-    def get_config(self, instance, network, mapping, image_meta):
+    def get_config(self, instance, vif, image_meta, inst_type):
         conf = libvirt_config.LibvirtConfigGuestInterface()
 
         for attr, val in conf.__dict__.iteritems():
@@ -266,8 +269,7 @@ def ipv4_like(ip, match_string):
 
 
 def fake_get_instance_nw_info(stubs, num_networks=1, ips_per_vif=2,
-                              floating_ips_per_fixed_ip=0,
-                              spectacular=False):
+                              floating_ips_per_fixed_ip=0):
     # stubs is the self.stubs from the test
     # ips_per_vif is the number of ips each vif will have
     # num_floating_ips is number of float ips for each fixed ip
@@ -331,7 +333,7 @@ def fake_get_instance_nw_info(stubs, num_networks=1, ips_per_vif=2,
 
         subnet_v6 = dict(
             cidr='2001:db8:0:%x::/64' % i,
-            gateway='fe80::def')
+            gateway='2001:db8:0:%x::1' % i)
         return [subnet_v4, subnet_v6]
 
     def get_network_by_uuid(context, uuid):
@@ -355,11 +357,11 @@ def fake_get_instance_nw_info(stubs, num_networks=1, ips_per_vif=2,
     stubs.Set(db, 'network_get', network_get_fake)
     stubs.Set(db, 'instance_info_cache_update', update_cache_fake)
 
-    stubs.Set(nova_ipam_lib.QuantumNovaIPAMLib, 'get_subnets_by_net_id',
+    stubs.Set(nova_ipam_lib.NeutronNovaIPAMLib, 'get_subnets_by_net_id',
               get_subnets_by_net_id)
-    stubs.Set(nova_ipam_lib.QuantumNovaIPAMLib, 'get_v4_ips_by_interface',
+    stubs.Set(nova_ipam_lib.NeutronNovaIPAMLib, 'get_v4_ips_by_interface',
                     get_v4_fake)
-    stubs.Set(nova_ipam_lib.QuantumNovaIPAMLib, 'get_v6_ips_by_interface',
+    stubs.Set(nova_ipam_lib.NeutronNovaIPAMLib, 'get_v6_ips_by_interface',
                     get_v6_fake)
 
     class FakeContext(nova.context.RequestContext):
@@ -369,22 +371,18 @@ def fake_get_instance_nw_info(stubs, num_networks=1, ips_per_vif=2,
     nw_model = network.get_instance_nw_info(
                 FakeContext('fakeuser', 'fake_project'),
                 0, 3, None)
-    if spectacular:
-        return nw_model
-    return nw_model.legacy()
+    return nw_model
 
 
 def stub_out_nw_api_get_instance_nw_info(stubs, func=None,
                                          num_networks=1,
                                          ips_per_vif=1,
-                                         floating_ips_per_fixed_ip=0,
-                                         spectacular=False):
+                                         floating_ips_per_fixed_ip=0):
 
     def get_instance_nw_info(self, context, instance, conductor_api=None):
         return fake_get_instance_nw_info(stubs, num_networks=num_networks,
                         ips_per_vif=ips_per_vif,
-                        floating_ips_per_fixed_ip=floating_ips_per_fixed_ip,
-                        spectacular=spectacular)
+                        floating_ips_per_fixed_ip=floating_ips_per_fixed_ip)
 
     if func is None:
         func = get_instance_nw_info
@@ -406,8 +404,11 @@ def set_stub_network_methods(stubs):
     def fake_networkinfo(*args, **kwargs):
         return network_model.NetworkInfo()
 
+    def fake_async_networkinfo(*args, **kwargs):
+        return network_model.NetworkInfoAsyncWrapper(fake_networkinfo)
+
     stubs.Set(cm, '_get_instance_nw_info', fake_networkinfo)
-    stubs.Set(cm, '_allocate_network', fake_networkinfo)
+    stubs.Set(cm, '_allocate_network', fake_async_networkinfo)
     stubs.Set(cm, '_deallocate_network', lambda *args, **kwargs: None)
 
 
@@ -422,6 +423,7 @@ def unset_stub_network_methods(stubs):
 def stub_compute_with_ips(stubs):
     orig_get = compute_api.API.get
     orig_get_all = compute_api.API.get_all
+    orig_create = compute_api.API.create
 
     def fake_get(*args, **kwargs):
         return _get_instances_with_cached_ips(orig_get, *args, **kwargs)
@@ -429,8 +431,12 @@ def stub_compute_with_ips(stubs):
     def fake_get_all(*args, **kwargs):
         return _get_instances_with_cached_ips(orig_get_all, *args, **kwargs)
 
+    def fake_create(*args, **kwargs):
+        return _create_instances_with_cached_ips(orig_create, *args, **kwargs)
+
     stubs.Set(compute_api.API, 'get', fake_get)
     stubs.Set(compute_api.API, 'get_all', fake_get_all)
+    stubs.Set(compute_api.API, 'create', fake_create)
 
 
 def _get_fake_cache():
@@ -453,7 +459,7 @@ def _get_fake_cache():
         ipv6_addr = 'fe80:b33f::a8bb:ccff:fedd:eeff'
         info[0]['network']['subnets'].append({'cidr': 'fe80:b33f::/64',
                                               'ips': [_ip(ipv6_addr)]})
-    return info
+    return jsonutils.dumps(info)
 
 
 def _get_instances_with_cached_ips(orig_func, *args, **kwargs):
@@ -461,9 +467,35 @@ def _get_instances_with_cached_ips(orig_func, *args, **kwargs):
     entries
     """
     instances = orig_func(*args, **kwargs)
-    if isinstance(instances, list):
+    context = args[0]
+
+    def _info_cache_for(instance):
+        info_cache = {'network_info': _get_fake_cache(),
+                      'instance_uuid': instance['uuid']}
+        if isinstance(instance, obj_base.NovaObject):
+            _info_cache = instance_info_cache.InstanceInfoCache()
+            instance_info_cache.InstanceInfoCache._from_db_object(context,
+                                                                  _info_cache,
+                                                                  info_cache)
+            info_cache = _info_cache
+        instance['info_cache'] = info_cache
+
+    if isinstance(instances, (list, obj_base.ObjectListBase)):
         for instance in instances:
-            instance['info_cache'] = {'network_info': _get_fake_cache()}
+            _info_cache_for(instance)
     else:
-        instances['info_cache'] = {'network_info': _get_fake_cache()}
+        _info_cache_for(instances)
     return instances
+
+
+def _create_instances_with_cached_ips(orig_func, *args, **kwargs):
+    """Kludge the above kludge so that the database doesn't get out
+    of sync with the actual instance.
+    """
+    instances, reservation_id = orig_func(*args, **kwargs)
+    fake_cache = _get_fake_cache()
+    for instance in instances:
+        instance['info_cache']['network_info'] = fake_cache
+        db.instance_info_cache_update(args[1], instance['uuid'],
+                                      {'network_info': fake_cache})
+    return (instances, reservation_id)

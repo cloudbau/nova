@@ -26,7 +26,9 @@ from nova.api.openstack.compute import extensions as compute_extensions
 from nova.api.openstack import extensions as base_extensions
 from nova.api.openstack import wsgi
 from nova.api.openstack import xmlutil
+from nova import exception
 from nova.openstack.common import jsonutils
+import nova.policy
 from nova import test
 from nova.tests.api.openstack import fakes
 from nova.tests import matchers
@@ -147,6 +149,24 @@ class ExtensionTestCase(test.TestCase):
         if fox not in ext_list:
             ext_list.append(fox)
             self.flags(osapi_compute_extension=ext_list)
+        self.fake_context = nova.context.RequestContext('fake', 'fake')
+
+    def test_extension_authorizer_throws_exception_if_policy_fails(self):
+        target = {'project_id': '1234',
+                  'user_id': '5678'}
+        self.mox.StubOutWithMock(nova.policy, 'enforce')
+        nova.policy.enforce(self.fake_context,
+                            "compute_extension:used_limits_for_admin",
+                            target).AndRaise(
+            exception.PolicyNotAuthorized(
+                action="compute_extension:used_limits_for_admin"))
+        ('compute', 'used_limits_for_admin')
+        self.mox.ReplayAll()
+        authorize = base_extensions.extension_authorizer('compute',
+                                                        'used_limits_for_admin'
+        )
+        self.assertRaises(exception.PolicyNotAuthorized, authorize,
+                          self.fake_context, target=target)
 
 
 class ExtensionControllerTest(ExtensionTestCase):
@@ -156,6 +176,7 @@ class ExtensionControllerTest(ExtensionTestCase):
         self.ext_list = [
             "AdminActions",
             "Aggregates",
+            "AssistedVolumeSnapshots",
             "AvailabilityZone",
             "Agents",
             "Certificates",
@@ -173,6 +194,7 @@ class ExtensionControllerTest(ExtensionTestCase):
             "ExtendedVIFNet",
             "Evacuate",
             "ExtendedStatus",
+            "ExtendedVolumes",
             "ExtendedServerAttributes",
             "FixedIPs",
             "FlavorAccess",
@@ -195,6 +217,7 @@ class ExtensionControllerTest(ExtensionTestCase):
             "MultipleCreate",
             "QuotaClasses",
             "Quotas",
+            "ExtendedQuotas",
             "Rescue",
             "SchedulerHints",
             "SecurityGroupDefaultRules",
@@ -207,6 +230,7 @@ class ExtensionControllerTest(ExtensionTestCase):
             "UsedLimits",
             "UserData",
             "VirtualInterfaces",
+            "VolumeAttachmentUpdate",
             "Volumes",
             ]
         self.ext_list.sort()
@@ -281,7 +305,7 @@ class ExtensionControllerTest(ExtensionTestCase):
 
         # Make sure we have all the extensions, extras extensions being OK.
         exts = root.findall('{0}extension'.format(NS))
-        self.assert_(len(exts) >= len(self.ext_list))
+        self.assertTrue(len(exts) >= len(self.ext_list))
 
         # Make sure that at least Fox in Sox is correct.
         (fox_ext, ) = [x for x in exts if x.get('alias') == 'FOXNSOX']

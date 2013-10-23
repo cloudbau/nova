@@ -60,6 +60,7 @@ from oslo.config import cfg
 
 from nova import config
 from nova.openstack.common import cliutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova import version
 from nova.virt.baremetal.db import migration as bmdb_migration
@@ -101,8 +102,10 @@ CATEGORIES = {
 
 
 def methods_of(obj):
-    """Get all callable methods of an object that don't start with underscore
-    returns a list of tuples of the form (method_name, method)"""
+    """Get all callable methods of an object that don't start with underscore.
+
+    returns a list of tuples of the form (method_name, method)
+    """
     result = []
     for i in dir(obj):
         if callable(getattr(obj, i)) and not i.startswith('_'):

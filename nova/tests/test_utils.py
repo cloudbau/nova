@@ -17,7 +17,6 @@
 import __builtin__
 import datetime
 import functools
-import hashlib
 import importlib
 import os
 import os.path
@@ -38,197 +37,93 @@ from nova import utils
 CONF = cfg.CONF
 
 
-class ByteConversionTest(test.TestCase):
-    def test_string_conversions(self):
-        working_examples = {
-            '1024KB': 1048576,
-            '1024TB': 1125899906842624,
-            '1024K': 1048576,
-            '1024T': 1125899906842624,
-            '1TB': 1099511627776,
-            '1T': 1099511627776,
-            '1KB': 1024,
-            '1K': 1024,
-            '1B': 1,
-            '1B': 1,
-            '1': 1,
-            '1MB': 1048576,
-            '7MB': 7340032,
-            '0MB': 0,
-            '0KB': 0,
-            '0TB': 0,
-            '': 0,
-        }
-        for (in_value, expected_value) in working_examples.items():
-            b_value = utils.to_bytes(in_value)
-            self.assertEquals(expected_value, b_value)
-            if len(in_value):
-                in_value = "-" + in_value
-                b_value = utils.to_bytes(in_value)
-                self.assertEquals(expected_value * -1, b_value)
-        breaking_examples = [
-            'junk1KB', '1023BBBB',
-        ]
-        for v in breaking_examples:
-            self.assertRaises(TypeError, utils.to_bytes, v)
+class GetMyIP4AddressTestCase(test.NoDBTestCase):
+    def test_get_my_ipv4_address_with_no_ipv4(self):
+        response = """172.16.0.0/16 via 172.16.251.13 dev tun1
+172.16.251.1 via 172.16.251.13 dev tun1
+172.16.251.13 dev tun1  proto kernel  scope link  src 172.16.251.14
+172.24.0.0/16 via 172.16.251.13 dev tun1
+192.168.122.0/24 dev virbr0  proto kernel  scope link  src 192.168.122.1"""
+
+        def fake_execute(*args, **kwargs):
+            return response, None
+
+        self.stubs.Set(utils, 'execute', fake_execute)
+        address = utils.get_my_ipv4_address()
+        self.assertEqual(address, '127.0.0.1')
+
+    def test_get_my_ipv4_address_bad_process(self):
+        def fake_execute(*args, **kwargs):
+            raise processutils.ProcessExecutionError()
+
+        self.stubs.Set(utils, 'execute', fake_execute)
+        address = utils.get_my_ipv4_address()
+        self.assertEqual(address, '127.0.0.1')
+
+    def test_get_my_ipv4_address_with_single_interface(self):
+        response_route = """default via 192.168.1.1 dev wlan0  proto static
+192.168.1.0/24 dev wlan0  proto kernel  scope link  src 192.168.1.137  metric 9
+"""
+        response_addr = """
+1: lo    inet 127.0.0.1/8 scope host lo
+3: wlan0    inet 192.168.1.137/24 brd 192.168.1.255 scope global wlan0
+"""
+
+        def fake_execute(*args, **kwargs):
+            if 'route' in args:
+                return response_route, None
+            return response_addr, None
+
+        self.stubs.Set(utils, 'execute', fake_execute)
+        address = utils.get_my_ipv4_address()
+        self.assertEqual(address, '192.168.1.137')
+
+    def test_get_my_ipv4_address_with_multi_ipv4_on_single_interface(self):
+        response_route = """
+172.18.56.0/24 dev customer  proto kernel  scope link  src 172.18.56.22
+169.254.0.0/16 dev customer  scope link  metric 1031
+default via 172.18.56.1 dev customer
+"""
+        response_addr = (""
+"31: customer    inet 172.18.56.22/24 brd 172.18.56.255 scope global"
+" customer\n"
+"31: customer    inet 172.18.56.32/24 brd 172.18.56.255 scope global "
+"secondary customer")
+
+        def fake_execute(*args, **kwargs):
+            if 'route' in args:
+                return response_route, None
+            return response_addr, None
+
+        self.stubs.Set(utils, 'execute', fake_execute)
+        address = utils.get_my_ipv4_address()
+        self.assertEqual(address, '172.18.56.22')
+
+    def test_get_my_ipv4_address_with_multiple_interfaces(self):
+        response_route = """
+169.1.9.0/24 dev eth1  proto kernel  scope link  src 169.1.9.10
+172.17.248.0/21 dev eth0  proto kernel  scope link  src 172.17.255.9
+169.254.0.0/16 dev eth0  scope link  metric 1002
+169.254.0.0/16 dev eth1  scope link  metric 1003
+default via 172.17.248.1 dev eth0  proto static
+"""
+        response_addr = """
+1: lo    inet 127.0.0.1/8 scope host lo
+2: eth0    inet 172.17.255.9/21 brd 172.17.255.255 scope global eth0
+3: eth1    inet 169.1.9.10/24 scope global eth1
+"""
+
+        def fake_execute(*args, **kwargs):
+            if 'route' in args:
+                return response_route, None
+            return response_addr, None
+
+        self.stubs.Set(utils, 'execute', fake_execute)
+        address = utils.get_my_ipv4_address()
+        self.assertEqual(address, '172.17.255.9')
 
 
-class GetFromPathTestCase(test.TestCase):
-    def test_tolerates_nones(self):
-        f = utils.get_from_path
-
-        input = []
-        self.assertEquals([], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [None]
-        self.assertEquals([], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': None}]
-        self.assertEquals([], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': None}}]
-        self.assertEquals([{'b': None}], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': None}}}]
-        self.assertEquals([{'b': {'c': None}}], f(input, "a"))
-        self.assertEquals([{'c': None}], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': None}}}, {'a': None}]
-        self.assertEquals([{'b': {'c': None}}], f(input, "a"))
-        self.assertEquals([{'c': None}], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': None}}}, {'a': {'b': None}}]
-        self.assertEquals([{'b': {'c': None}}, {'b': None}], f(input, "a"))
-        self.assertEquals([{'c': None}], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-    def test_does_select(self):
-        f = utils.get_from_path
-
-        input = [{'a': 'a_1'}]
-        self.assertEquals(['a_1'], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': 'b_1'}}]
-        self.assertEquals([{'b': 'b_1'}], f(input, "a"))
-        self.assertEquals(['b_1'], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': 'c_1'}}}]
-        self.assertEquals([{'b': {'c': 'c_1'}}], f(input, "a"))
-        self.assertEquals([{'c': 'c_1'}], f(input, "a/b"))
-        self.assertEquals(['c_1'], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': 'c_1'}}}, {'a': None}]
-        self.assertEquals([{'b': {'c': 'c_1'}}], f(input, "a"))
-        self.assertEquals([{'c': 'c_1'}], f(input, "a/b"))
-        self.assertEquals(['c_1'], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': 'c_1'}}},
-                 {'a': {'b': None}}]
-        self.assertEquals([{'b': {'c': 'c_1'}}, {'b': None}], f(input, "a"))
-        self.assertEquals([{'c': 'c_1'}], f(input, "a/b"))
-        self.assertEquals(['c_1'], f(input, "a/b/c"))
-
-        input = [{'a': {'b': {'c': 'c_1'}}},
-                 {'a': {'b': {'c': 'c_2'}}}]
-        self.assertEquals([{'b': {'c': 'c_1'}}, {'b': {'c': 'c_2'}}],
-                          f(input, "a"))
-        self.assertEquals([{'c': 'c_1'}, {'c': 'c_2'}], f(input, "a/b"))
-        self.assertEquals(['c_1', 'c_2'], f(input, "a/b/c"))
-
-        self.assertEquals([], f(input, "a/b/c/d"))
-        self.assertEquals([], f(input, "c/a/b/d"))
-        self.assertEquals([], f(input, "i/r/t"))
-
-    def test_flattens_lists(self):
-        f = utils.get_from_path
-
-        input = [{'a': [1, 2, 3]}]
-        self.assertEquals([1, 2, 3], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': [1, 2, 3]}}]
-        self.assertEquals([{'b': [1, 2, 3]}], f(input, "a"))
-        self.assertEquals([1, 2, 3], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': {'b': [1, 2, 3]}}, {'a': {'b': [4, 5, 6]}}]
-        self.assertEquals([1, 2, 3, 4, 5, 6], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': [{'b': [1, 2, 3]}, {'b': [4, 5, 6]}]}]
-        self.assertEquals([1, 2, 3, 4, 5, 6], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = [{'a': [1, 2, {'b': 'b_1'}]}]
-        self.assertEquals([1, 2, {'b': 'b_1'}], f(input, "a"))
-        self.assertEquals(['b_1'], f(input, "a/b"))
-
-    def test_bad_xpath(self):
-        f = utils.get_from_path
-
-        self.assertRaises(exception.NovaException, f, [], None)
-        self.assertRaises(exception.NovaException, f, [], "")
-        self.assertRaises(exception.NovaException, f, [], "/")
-        self.assertRaises(exception.NovaException, f, [], "/a")
-        self.assertRaises(exception.NovaException, f, [], "/a/")
-        self.assertRaises(exception.NovaException, f, [], "//")
-        self.assertRaises(exception.NovaException, f, [], "//a")
-        self.assertRaises(exception.NovaException, f, [], "a//a")
-        self.assertRaises(exception.NovaException, f, [], "a//a/")
-        self.assertRaises(exception.NovaException, f, [], "a/a/")
-
-    def test_real_failure1(self):
-        # Real world failure case...
-        #  We weren't coping when the input was a Dictionary instead of a List
-        # This led to test_accepts_dictionaries
-        f = utils.get_from_path
-
-        inst = {'fixed_ip': {'floating_ips': [{'address': '1.2.3.4'}],
-                             'address': '192.168.0.3'},
-                'hostname': ''}
-
-        private_ips = f(inst, 'fixed_ip/address')
-        public_ips = f(inst, 'fixed_ip/floating_ips/address')
-        self.assertEquals(['192.168.0.3'], private_ips)
-        self.assertEquals(['1.2.3.4'], public_ips)
-
-    def test_accepts_dictionaries(self):
-        f = utils.get_from_path
-
-        input = {'a': [1, 2, 3]}
-        self.assertEquals([1, 2, 3], f(input, "a"))
-        self.assertEquals([], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = {'a': {'b': [1, 2, 3]}}
-        self.assertEquals([{'b': [1, 2, 3]}], f(input, "a"))
-        self.assertEquals([1, 2, 3], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = {'a': [{'b': [1, 2, 3]}, {'b': [4, 5, 6]}]}
-        self.assertEquals([1, 2, 3, 4, 5, 6], f(input, "a/b"))
-        self.assertEquals([], f(input, "a/b/c"))
-
-        input = {'a': [1, 2, {'b': 'b_1'}]}
-        self.assertEquals([1, 2, {'b': 'b_1'}], f(input, "a"))
-        self.assertEquals(['b_1'], f(input, "a/b"))
-
-
-class GenericUtilsTestCase(test.TestCase):
+class GenericUtilsTestCase(test.NoDBTestCase):
     def test_parse_server_string(self):
         result = utils.parse_server_string('::1')
         self.assertEqual(('::1', ''), result)
@@ -325,7 +220,7 @@ class GenericUtilsTestCase(test.TestCase):
     def test_read_file_as_root(self):
         def fake_execute(*args, **kwargs):
             if args[1] == 'bad':
-                raise processutils.ProcessExecutionError
+                raise processutils.ProcessExecutionError()
             return 'fakecontents', None
 
         self.stubs.Set(utils, 'execute', fake_execute)
@@ -352,13 +247,6 @@ class GenericUtilsTestCase(test.TestCase):
         self.assertEqual('&gt;', utils.xhtml_escape('>'))
         self.assertEqual('&lt;', utils.xhtml_escape('<'))
         self.assertEqual('&lt;foo&gt;', utils.xhtml_escape('<foo>'))
-
-    def test_hash_file(self):
-        data = 'Mary had a little lamb, its fleece as white as snow'
-        flo = StringIO.StringIO(data)
-        h1 = utils.hash_file(flo)
-        h2 = hashlib.sha1(data).hexdigest()
-        self.assertEquals(h1, h2)
 
     def test_is_valid_ipv4(self):
         self.assertTrue(utils.is_valid_ipv4('127.0.0.1'))
@@ -416,7 +304,7 @@ class GenericUtilsTestCase(test.TestCase):
                           "failure")
 
 
-class MonkeyPatchTestCase(test.TestCase):
+class MonkeyPatchTestCase(test.NoDBTestCase):
     """Unit test for utils.monkey_patch()."""
     def setUp(self):
         super(MonkeyPatchTestCase, self).setUp()
@@ -461,7 +349,7 @@ class MonkeyPatchTestCase(test.TestCase):
             in nova.tests.monkey_patch_example.CALLED_FUNCTION)
 
 
-class MonkeyPatchDefaultTestCase(test.TestCase):
+class MonkeyPatchDefaultTestCase(test.NoDBTestCase):
     """Unit test for default monkey_patch_modules value."""
 
     def setUp(self):
@@ -484,7 +372,7 @@ class MonkeyPatchDefaultTestCase(test.TestCase):
             getattr(decorator_module, decorator_name[1])
 
 
-class AuditPeriodTest(test.TestCase):
+class AuditPeriodTest(test.NoDBTestCase):
 
     def setUp(self):
         super(AuditPeriodTest, self).setUp()
@@ -648,7 +536,7 @@ class AuditPeriodTest(test.TestCase):
                                            year=2011))
 
 
-class DiffDict(test.TestCase):
+class DiffDict(test.NoDBTestCase):
     """Unit tests for diff_dict()."""
 
     def test_no_change(self):
@@ -680,13 +568,16 @@ class DiffDict(test.TestCase):
         self.assertEqual(diff, dict(b=['-']))
 
 
-class MkfsTestCase(test.TestCase):
+class MkfsTestCase(test.NoDBTestCase):
 
     def test_mkfs(self):
         self.mox.StubOutWithMock(utils, 'execute')
-        utils.execute('mkfs', '-t', 'ext4', '-F', '/my/block/dev')
-        utils.execute('mkfs', '-t', 'msdos', '/my/msdos/block/dev')
-        utils.execute('mkswap', '/my/swap/block/dev')
+        utils.execute('mkfs', '-t', 'ext4', '-F', '/my/block/dev',
+                      run_as_root=False)
+        utils.execute('mkfs', '-t', 'msdos', '/my/msdos/block/dev',
+                      run_as_root=False)
+        utils.execute('mkswap', '/my/swap/block/dev',
+                      run_as_root=False)
         self.mox.ReplayAll()
 
         utils.mkfs('ext4', '/my/block/dev')
@@ -696,10 +587,12 @@ class MkfsTestCase(test.TestCase):
     def test_mkfs_with_label(self):
         self.mox.StubOutWithMock(utils, 'execute')
         utils.execute('mkfs', '-t', 'ext4', '-F',
-                      '-L', 'ext4-vol', '/my/block/dev')
+                      '-L', 'ext4-vol', '/my/block/dev', run_as_root=False)
         utils.execute('mkfs', '-t', 'msdos',
-                      '-n', 'msdos-vol', '/my/msdos/block/dev')
-        utils.execute('mkswap', '-L', 'swap-vol', '/my/swap/block/dev')
+                      '-n', 'msdos-vol', '/my/msdos/block/dev',
+                      run_as_root=False)
+        utils.execute('mkswap', '-L', 'swap-vol', '/my/swap/block/dev',
+                      run_as_root=False)
         self.mox.ReplayAll()
 
         utils.mkfs('ext4', '/my/block/dev', 'ext4-vol')
@@ -707,7 +600,7 @@ class MkfsTestCase(test.TestCase):
         utils.mkfs('swap', '/my/swap/block/dev', 'swap-vol')
 
 
-class LastBytesTestCase(test.TestCase):
+class LastBytesTestCase(test.NoDBTestCase):
     """Test the last_bytes() utility method."""
 
     def setUp(self):
@@ -734,7 +627,7 @@ class LastBytesTestCase(test.TestCase):
         self.assertEqual((content, 0), utils.last_bytes(flo, 1000))
 
 
-class IntLikeTestCase(test.TestCase):
+class IntLikeTestCase(test.NoDBTestCase):
 
     def test_is_int_like(self):
         self.assertTrue(utils.is_int_like(1))
@@ -755,7 +648,7 @@ class IntLikeTestCase(test.TestCase):
         self.assertFalse(utils.is_int_like("a1"))
 
 
-class MetadataToDictTestCase(test.TestCase):
+class MetadataToDictTestCase(test.NoDBTestCase):
     def test_metadata_to_dict(self):
         self.assertEqual(utils.metadata_to_dict(
                 [{'key': 'foo1', 'value': 'bar'},
@@ -776,7 +669,7 @@ class MetadataToDictTestCase(test.TestCase):
         self.assertEqual(utils.dict_to_metadata({}), [])
 
 
-class WrappedCodeTestCase(test.TestCase):
+class WrappedCodeTestCase(test.NoDBTestCase):
     """Test the get_wrapped_function utility method."""
 
     def _wrapper(self, function):
@@ -793,10 +686,10 @@ class WrappedCodeTestCase(test.TestCase):
         func = utils.get_wrapped_function(wrapped)
         func_code = func.func_code
         self.assertEqual(4, len(func_code.co_varnames))
-        self.assertTrue('self' in func_code.co_varnames)
-        self.assertTrue('instance' in func_code.co_varnames)
-        self.assertTrue('red' in func_code.co_varnames)
-        self.assertTrue('blue' in func_code.co_varnames)
+        self.assertIn('self', func_code.co_varnames)
+        self.assertIn('instance', func_code.co_varnames)
+        self.assertIn('red', func_code.co_varnames)
+        self.assertIn('blue', func_code.co_varnames)
 
     def test_double_wrapped(self):
         @self._wrapper
@@ -807,10 +700,10 @@ class WrappedCodeTestCase(test.TestCase):
         func = utils.get_wrapped_function(wrapped)
         func_code = func.func_code
         self.assertEqual(4, len(func_code.co_varnames))
-        self.assertTrue('self' in func_code.co_varnames)
-        self.assertTrue('instance' in func_code.co_varnames)
-        self.assertTrue('red' in func_code.co_varnames)
-        self.assertTrue('blue' in func_code.co_varnames)
+        self.assertIn('self', func_code.co_varnames)
+        self.assertIn('instance', func_code.co_varnames)
+        self.assertIn('red', func_code.co_varnames)
+        self.assertIn('blue', func_code.co_varnames)
 
     def test_triple_wrapped(self):
         @self._wrapper
@@ -822,13 +715,13 @@ class WrappedCodeTestCase(test.TestCase):
         func = utils.get_wrapped_function(wrapped)
         func_code = func.func_code
         self.assertEqual(4, len(func_code.co_varnames))
-        self.assertTrue('self' in func_code.co_varnames)
-        self.assertTrue('instance' in func_code.co_varnames)
-        self.assertTrue('red' in func_code.co_varnames)
-        self.assertTrue('blue' in func_code.co_varnames)
+        self.assertIn('self', func_code.co_varnames)
+        self.assertIn('instance', func_code.co_varnames)
+        self.assertIn('red', func_code.co_varnames)
+        self.assertIn('blue', func_code.co_varnames)
 
 
-class StringLengthTestCase(test.TestCase):
+class StringLengthTestCase(test.NoDBTestCase):
     def test_check_string_length(self):
         self.assertIsNone(utils.check_string_length(
                           'test', 'name', max_length=255))
@@ -841,3 +734,194 @@ class StringLengthTestCase(test.TestCase):
         self.assertRaises(exception.InvalidInput,
                           utils.check_string_length,
                           'a' * 256, 'name', max_length=255)
+
+
+class ValidateIntegerTestCase(test.NoDBTestCase):
+    def test_valid_inputs(self):
+        self.assertEquals(
+            utils.validate_integer(42, "answer"), 42)
+        self.assertEquals(
+            utils.validate_integer("42", "answer"), 42)
+        self.assertEquals(
+            utils.validate_integer(
+                "7", "lucky", min_value=7, max_value=8), 7)
+        self.assertEquals(
+            utils.validate_integer(
+                7, "lucky", min_value=6, max_value=7), 7)
+        self.assertEquals(
+            utils.validate_integer(
+                300, "Spartaaa!!!", min_value=300), 300)
+        self.assertEquals(
+            utils.validate_integer(
+                "300", "Spartaaa!!!", max_value=300), 300)
+
+    def test_invalid_inputs(self):
+        self.assertRaises(exception.InvalidInput,
+                          utils.validate_integer,
+                          "im-not-an-int", "not-an-int")
+        self.assertRaises(exception.InvalidInput,
+                          utils.validate_integer,
+                          3.14, "Pie")
+        self.assertRaises(exception.InvalidInput,
+                          utils.validate_integer,
+                          "299", "Sparta no-show",
+                          min_value=300, max_value=300)
+        self.assertRaises(exception.InvalidInput,
+                          utils.validate_integer,
+                          55, "doing 55 in a 54",
+                          max_value=54)
+
+
+class ValidateNeutronConfiguration(test.NoDBTestCase):
+    def setUp(self):
+        super(ValidateNeutronConfiguration, self).setUp()
+        utils.reset_is_neutron()
+
+    def test_nova_network(self):
+        self.flags(network_api_class='nova.network.api.API')
+        self.assertFalse(utils.is_neutron())
+
+    def test_neutron(self):
+        self.flags(network_api_class='nova.network.neutronv2.api.API')
+        self.assertTrue(utils.is_neutron())
+
+    def test_quantum(self):
+        self.flags(network_api_class='nova.network.quantumv2.api.API')
+        self.assertTrue(utils.is_neutron())
+
+
+class AutoDiskConfigUtilTestCase(test.NoDBTestCase):
+    def test_is_auto_disk_config_disabled(self):
+        self.assertTrue(utils.is_auto_disk_config_disabled("Disabled "))
+
+    def test_is_auto_disk_config_disabled_none(self):
+        self.assertFalse(utils.is_auto_disk_config_disabled(None))
+
+    def test_is_auto_disk_config_disabled_false(self):
+        self.assertFalse(utils.is_auto_disk_config_disabled("false"))
+
+
+class GetSystemMetadataFromImageTestCase(test.NoDBTestCase):
+    def get_image(self):
+        image_meta = {
+            "id": "fake-image",
+            "name": "fake-name",
+            "min_ram": 1,
+            "min_disk": 1,
+            "disk_format": "raw",
+            "container_format": "bare",
+        }
+
+        return image_meta
+
+    def get_instance_type(self):
+        instance_type = {
+            "id": "fake.flavor",
+            "root_gb": 10,
+        }
+
+        return instance_type
+
+    def test_base_image_properties(self):
+        image = self.get_image()
+
+        # Verify that we inherit all the needed keys
+        sys_meta = utils.get_system_metadata_from_image(image)
+        for key in utils.SM_INHERITABLE_KEYS:
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            self.assertEqual(image[key], sys_meta.get(sys_key))
+
+        # Verify that everything else is ignored
+        self.assertEqual(len(sys_meta), len(utils.SM_INHERITABLE_KEYS))
+
+    def test_inherit_image_properties(self):
+        image = self.get_image()
+        image["properties"] = {"foo1": "bar", "foo2": "baz"}
+
+        sys_meta = utils.get_system_metadata_from_image(image)
+
+        # Verify that we inherit all the image properties
+        for key, expected in image["properties"].iteritems():
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            self.assertEqual(sys_meta[sys_key], expected)
+
+    def test_vhd_min_disk_image(self):
+        image = self.get_image()
+        instance_type = self.get_instance_type()
+
+        image["disk_format"] = "vhd"
+
+        sys_meta = utils.get_system_metadata_from_image(image, instance_type)
+
+        # Verify that the min_disk property is taken from
+        # instance_type's root_gb when using vhd disk format
+        sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, "min_disk")
+        self.assertEqual(sys_meta[sys_key], instance_type["root_gb"])
+
+    def test_dont_inherit_empty_values(self):
+        image = self.get_image()
+
+        for key in utils.SM_INHERITABLE_KEYS:
+            image[key] = None
+
+        sys_meta = utils.get_system_metadata_from_image(image)
+
+        # Verify that the empty properties have not been inherited
+        for key in utils.SM_INHERITABLE_KEYS:
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            self.assertNotIn(sys_key, sys_meta)
+
+
+class GetImageFromSystemMetadataTestCase(test.NoDBTestCase):
+    def get_system_metadata(self):
+        sys_meta = {
+            "image_min_ram": 1,
+            "image_min_disk": 1,
+            "image_disk_format": "raw",
+            "image_container_format": "bare",
+        }
+
+        return sys_meta
+
+    def test_image_from_system_metadata(self):
+        sys_meta = self.get_system_metadata()
+        sys_meta["%soo1" % utils.SM_IMAGE_PROP_PREFIX] = "bar"
+        sys_meta["%soo2" % utils.SM_IMAGE_PROP_PREFIX] = "baz"
+
+        image = utils.get_image_from_system_metadata(sys_meta)
+
+        # Verify that we inherit all the needed keys
+        for key in utils.SM_INHERITABLE_KEYS:
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            self.assertEqual(image[key], sys_meta.get(sys_key))
+
+        # Verify that we inherit the rest of metadata as properties
+        self.assertIn("properties", image)
+
+        for key, value in image["properties"].iteritems():
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            self.assertEqual(image["properties"][key], sys_meta[sys_key])
+
+    def test_dont_inherit_empty_values(self):
+        sys_meta = self.get_system_metadata()
+
+        for key in utils.SM_INHERITABLE_KEYS:
+            sys_key = "%s%s" % (utils.SM_IMAGE_PROP_PREFIX, key)
+            sys_meta[sys_key] = None
+
+        image = utils.get_image_from_system_metadata(sys_meta)
+
+        # Verify that the empty properties have not been inherited
+        for key in utils.SM_INHERITABLE_KEYS:
+            self.assertNotIn(key, image)
+
+    def test_non_inheritable_image_properties(self):
+        sys_meta = self.get_system_metadata()
+        sys_meta["%soo1" % utils.SM_IMAGE_PROP_PREFIX] = "bar"
+
+        CONF.non_inheritable_image_properties = ["foo1"]
+
+        image = utils.get_image_from_system_metadata(sys_meta)
+
+        # Verify that the foo1 key has not been inherited
+        self.assertNotIn("foo1", image)

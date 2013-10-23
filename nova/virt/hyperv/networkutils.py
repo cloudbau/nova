@@ -25,6 +25,7 @@ import uuid
 if sys.platform == 'win32':
     import wmi
 
+from nova.openstack.common.gettextutils import _
 from nova.virt.hyperv import vmutils
 
 
@@ -58,5 +59,12 @@ class NetworkUtils(object):
         if ret_val != 0:
             raise vmutils.HyperVException(_("Failed to create vswitch port "
                                             "%(port_name)s on switch "
-                                            "%(vswitch_path)s") % locals())
+                                            "%(vswitch_path)s") %
+                                          {'port_name': port_name,
+                                           'vswitch_path': vswitch_path})
         return new_port
+
+    def vswitch_port_needed(self):
+        # NOTE(alexpilotti): In WMI V2 the vswitch_path is set in the VM
+        # setting data without the need for a vswitch port.
+        return True

@@ -27,10 +27,12 @@ semantics of real hypervisor connections.
 
 from oslo.config import cfg
 
+from nova import block_device
 from nova.compute import power_state
 from nova.compute import task_states
 from nova import db
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt import driver
 from nova.virt import virtapi
@@ -89,21 +91,17 @@ class FakeDriver(driver.ComputeDriver):
         super(FakeDriver, self).__init__(virtapi)
         self.instances = {}
         self.host_status_base = {
-          'host_name-description': 'Fake Host',
-          'host_hostname': CONF.host,
-          'host_memory_total': 8000000000,
-          'host_memory_overhead': 10000000,
-          'host_memory_free': 7900000000,
-          'host_memory_free_computed': 7900000000,
-          'host_other_config': {},
-          'host_ip_address': '192.168.1.109',
-          'host_cpu_info': {},
-          'disk_available': 500000000000,
-          'disk_total': 600000000000,
-          'disk_used': 100000000000,
-          'host_uuid': 'cedb9b39-9388-41df-8891-c5c9a0c0fe5f',
-          'host_name_label': 'fake-host',
+          'vcpus': 100000,
+          'memory_mb': 8000000000,
+          'local_gb': 600000000000,
+          'vcpus_used': 0,
+          'memory_mb_used': 0,
+          'local_gb_used': 100000000000,
+          'hypervisor_type': 'fake',
+          'hypervisor_version': '1.0',
           'hypervisor_hostname': CONF.host,
+          'cpu_info': {},
+          'disk_available_least': 500000000000,
           }
         self._mounts = {}
         self._interfaces = {}
@@ -130,6 +128,11 @@ class FakeDriver(driver.ComputeDriver):
         state = power_state.RUNNING
         fake_instance = FakeInstance(name, state)
         self.instances[name] = fake_instance
+
+    def live_snapshot(self, context, instance, name, update_task_state):
+        if instance['name'] not in self.instances:
+            raise exception.InstanceNotRunning(instance_id=instance['uuid'])
+        update_task_state(task_state=task_states.IMAGE_UPLOADING)
 
     def snapshot(self, context, instance, name, update_task_state):
         if instance['name'] not in self.instances:
@@ -170,7 +173,7 @@ class FakeDriver(driver.ComputeDriver):
         pass
 
     def finish_revert_migration(self, instance, network_info,
-                                block_device_info=None):
+                                block_device_info=None, power_on=True):
         pass
 
     def post_live_migration_at_destination(self, context, instance,
@@ -182,7 +185,7 @@ class FakeDriver(driver.ComputeDriver):
     def power_off(self, instance):
         pass
 
-    def power_on(self, instance):
+    def power_on(self, context, instance, network_info, block_device_info):
         pass
 
     def soft_delete(self, instance):
@@ -204,7 +207,7 @@ class FakeDriver(driver.ComputeDriver):
         pass
 
     def destroy(self, instance, network_info, block_device_info=None,
-                destroy_disks=True):
+                destroy_disks=True, context=None):
         key = instance['name']
         if key in self.instances:
             del self.instances[key]
@@ -213,7 +216,8 @@ class FakeDriver(driver.ComputeDriver):
                         {'key': key,
                          'inst': self.instances}, instance=instance)
 
-    def attach_volume(self, connection_info, instance, mountpoint):
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
         """Attach the disk to the instance at mountpoint using info."""
         instance_name = instance['name']
         if instance_name not in self._mounts:
@@ -221,7 +225,8 @@ class FakeDriver(driver.ComputeDriver):
         self._mounts[instance_name][mountpoint] = connection_info
         return True
 
-    def detach_volume(self, connection_info, instance, mountpoint):
+    def detach_volume(self, connection_info, instance, mountpoint,
+                      encryption=None):
         """Detach the disk attached to the instance."""
         try:
             del self._mounts[instance['name']][mountpoint]
@@ -229,18 +234,25 @@ class FakeDriver(driver.ComputeDriver):
             pass
         return True
 
-    def attach_interface(self, instance, image_meta, network_info):
-        for (network, mapping) in network_info:
-            if mapping['vif_uuid'] in self._interfaces:
-                raise exception.InterfaceAttachFailed('duplicate')
-            self._interfaces[mapping['vif_uuid']] = mapping
+    def swap_volume(self, old_connection_info, new_connection_info,
+                    instance, mountpoint):
+        """Replace the disk attached to the instance."""
+        instance_name = instance['name']
+        if instance_name not in self._mounts:
+            self._mounts[instance_name] = {}
+        self._mounts[instance_name][mountpoint] = new_connection_info
+        return True
 
-    def detach_interface(self, instance, network_info):
-        for (network, mapping) in network_info:
-            try:
-                del self._interfaces[mapping['vif_uuid']]
-            except KeyError:
-                raise exception.InterfaceDetachFailed('not attached')
+    def attach_interface(self, instance, image_meta, vif):
+        if vif['id'] in self._interfaces:
+            raise exception.InterfaceAttachFailed('duplicate')
+        self._interfaces[vif['id']] = vif
+
+    def detach_interface(self, instance, vif):
+        try:
+            del self._interfaces[vif['id']]
+        except KeyError:
+            raise exception.InterfaceDetachFailed('not attached')
 
     def get_info(self, instance):
         if instance['name'] not in self.instances:
@@ -272,13 +284,15 @@ class FakeDriver(driver.ComputeDriver):
 
     def get_all_bw_counters(self, instances):
         """Return bandwidth usage counters for each interface on each
-           running VM"""
+           running VM.
+        """
         bw = []
         return bw
 
     def get_all_volume_usage(self, context, compute_host_bdms):
         """Return usage info for volumes attached to vms on
-           a given host"""
+           a given host.
+        """
         volusage = []
         return volusage
 
@@ -337,12 +351,12 @@ class FakeDriver(driver.ComputeDriver):
                'hypervisor_type': 'fake',
                'hypervisor_version': '1.0',
                'hypervisor_hostname': nodename,
+               'disk_available_least': 0,
                'cpu_info': '?'}
         return dic
 
     def ensure_filtering_rules_for_instance(self, instance_ref, network_info):
-        """This method is supported only by libvirt."""
-        raise NotImplementedError('This method is supported only by libvirt.')
+        return
 
     def get_instance_disk_info(self, instance_name):
         return
@@ -350,6 +364,8 @@ class FakeDriver(driver.ComputeDriver):
     def live_migration(self, context, instance_ref, dest,
                        post_method, recover_method, block_migration=False,
                        migrate_data=None):
+        post_method(context, instance_ref, dest, block_migration,
+                            migrate_data)
         return
 
     def check_can_live_migrate_destination_cleanup(self, ctxt,
@@ -368,19 +384,18 @@ class FakeDriver(driver.ComputeDriver):
 
     def finish_migration(self, context, migration, instance, disk_info,
                          network_info, image_meta, resize_instance,
-                         block_device_info=None):
+                         block_device_info=None, power_on=True):
         return
 
     def confirm_migration(self, migration, instance, network_info):
         return
 
     def pre_live_migration(self, context, instance_ref, block_device_info,
-                           network_info, migrate_data=None):
+                           network_info, disk, migrate_data=None):
         return
 
     def unfilter_instance(self, instance_ref, network_info):
-        """This method is supported only by libvirt."""
-        raise NotImplementedError('This method is supported only by libvirt.')
+        return
 
     def test_remove_vm(self, instance_name):
         """Removes the named VM, as if it crashed. For testing."""
@@ -408,7 +423,8 @@ class FakeDriver(driver.ComputeDriver):
 
     def host_maintenance_mode(self, host, mode):
         """Start/Stop host maintenance window. On start, it triggers
-        guest VMs evacuation."""
+        guest VMs evacuation.
+        """
         if not mode:
             return 'off_maintenance'
         return 'on_maintenance'
@@ -425,7 +441,7 @@ class FakeDriver(driver.ComputeDriver):
     def get_volume_connector(self, instance):
         return {'ip': '127.0.0.1', 'initiator': 'fake', 'host': 'fakehost'}
 
-    def get_available_nodes(self):
+    def get_available_nodes(self, refresh=False):
         return _FAKE_NODES
 
     def instance_on_disk(self, instance):
@@ -434,9 +450,6 @@ class FakeDriver(driver.ComputeDriver):
     def list_instance_uuids(self):
         return []
 
-    def legacy_nwinfo(self):
-        return True
-
 
 class FakeVirtAPI(virtapi.VirtAPI):
     def instance_update(self, context, instance_uuid, updates):
@@ -444,25 +457,8 @@ class FakeVirtAPI(virtapi.VirtAPI):
                                                    instance_uuid,
                                                    updates)
 
-    def instance_get_by_uuid(self, context, instance_uuid):
-        return db.instance_get_by_uuid(context, instance_uuid)
-
-    def instance_get_all_by_host(self, context, host):
-        return db.instance_get_all_by_host(context, host)
-
-    def aggregate_get_by_host(self, context, host, key=None):
-        return db.aggregate_get_by_host(context, host, key=key)
-
-    def aggregate_metadata_add(self, context, aggregate, metadata,
-                               set_delete=False):
-        return db.aggregate_metadata_add(context, aggregate['id'], metadata,
-                                         set_delete=set_delete)
-
-    def aggregate_metadata_delete(self, context, aggregate, key):
-        return db.aggregate_metadata_delete(context, aggregate['id'], key)
-
     def security_group_get_by_instance(self, context, instance):
-        return db.security_group_get_by_instance(context, instance['id'])
+        return db.security_group_get_by_instance(context, instance['uuid'])
 
     def security_group_rule_get_by_security_group(self, context,
                                                   security_group):
@@ -478,3 +474,14 @@ class FakeVirtAPI(virtapi.VirtAPI):
 
     def instance_type_get(self, context, instance_type_id):
         return db.instance_type_get(context, instance_type_id)
+
+    def block_device_mapping_get_all_by_instance(self, context, instance,
+                                                 legacy=True):
+        bdms = db.block_device_mapping_get_all_by_instance(context,
+                                                           instance['uuid'])
+        if legacy:
+            bdms = block_device.legacy_mapping(bdms)
+        return bdms
+
+    def block_device_mapping_update(self, context, bdm_id, values):
+        return db.block_device_mapping_update(context, bdm_id, values)

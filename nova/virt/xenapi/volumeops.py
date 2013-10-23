@@ -21,6 +21,7 @@ Management class for Storage-related functions (attach, detach, etc).
 
 from nova import exception
 from nova.openstack.common import excutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.xenapi import vm_utils
 from nova.virt.xenapi import volume_utils
@@ -44,8 +45,11 @@ class VolumeOps(object):
         """
 
         # NOTE: No Resource Pool concept so far
-        LOG.debug(_("Attach_volume: %(connection_info)s, %(instance_name)s,"
-                " %(mountpoint)s") % locals())
+        LOG.debug(_('Attach_volume: %(connection_info)s, %(instance_name)s,'
+                    '" %(mountpoint)s'),
+                  {'connection_info': connection_info,
+                   'instance_name': instance_name,
+                   'mountpoint': mountpoint})
 
         dev_number = volume_utils.get_device_number(mountpoint)
         vm_ref = vm_utils.vm_ref_or_raise(self._session, instance_name)
@@ -55,7 +59,8 @@ class VolumeOps(object):
                                                  hotplug=hotplug)
 
         LOG.info(_('Mountpoint %(mountpoint)s attached to'
-                ' instance %(instance_name)s') % locals())
+                   ' instance %(instance_name)s'),
+                 {'instance_name': instance_name, 'mountpoint': mountpoint})
 
         return (sr_uuid, vdi_uuid)
 
@@ -67,7 +72,7 @@ class VolumeOps(object):
         """
 
         # NOTE: No Resource Pool concept so far
-        LOG.debug(_("Connect_volume: %(connection_info)s") % locals())
+        LOG.debug(_("Connect_volume: %s"), connection_info)
 
         sr_uuid, vdi_uuid = self._connect_volume(connection_info,
                                                  None, None, None, False)
@@ -111,7 +116,8 @@ class VolumeOps(object):
                                               dev_number, bootable=False,
                                               osvol=True)
 
-                if hotplug:
+                running = not vm_utils.is_vm_shutdown(self._session, vm_ref)
+                if hotplug and running:
                     self._session.call_xenapi("VBD.plug", vbd_ref)
 
             vdi_uuid = self._session.call_xenapi("VDI.get_uuid", vdi_ref)
@@ -125,8 +131,8 @@ class VolumeOps(object):
 
     def detach_volume(self, connection_info, instance_name, mountpoint):
         """Detach volume storage to VM instance."""
-        LOG.debug(_("Detach_volume: %(instance_name)s, %(mountpoint)s")
-                % locals())
+        LOG.debug(_("Detach_volume: %(instance_name)s, %(mountpoint)s"),
+                  {'instance_name': instance_name, 'mountpoint': mountpoint})
 
         device_number = volume_utils.get_device_number(mountpoint)
         vm_ref = vm_utils.vm_ref_or_raise(self._session, instance_name)
@@ -136,8 +142,8 @@ class VolumeOps(object):
         except volume_utils.StorageError:
             # NOTE(sirp): If we don't find the VBD then it must have been
             # detached previously.
-            LOG.warn(_('Skipping detach because VBD for %(instance_name)s was'
-                       ' not found') % locals())
+            LOG.warn(_('Skipping detach because VBD for %s was'
+                       ' not found'), instance_name)
             return
 
         # Unplug VBD if we're NOT shutdown
@@ -145,7 +151,8 @@ class VolumeOps(object):
         self._detach_vbd(vbd_ref, unplug=unplug)
 
         LOG.info(_('Mountpoint %(mountpoint)s detached from instance'
-                   ' %(instance_name)s') % locals())
+                   ' %(instance_name)s'),
+                 {'instance_name': instance_name, 'mountpoint': mountpoint})
 
     def _get_all_volume_vbd_refs(self, vm_ref):
         """Return VBD refs for all Nova/Cinder volumes."""

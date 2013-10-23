@@ -18,9 +18,9 @@ from eventlet import tpool
 import guestfs
 
 from nova import exception
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.disk.vfs import api as vfs
-from nova.virt.libvirt import driver as libvirt_driver
 
 
 LOG = logging.getLogger(__name__)
@@ -85,11 +85,25 @@ class VFSGuestFS(vfs.VFS):
                 _("No mount points found in %(root)s of %(imgfile)s") %
                 {'root': root, 'imgfile': self.imgfile})
 
-        mounts.sort(key=lambda mount: mount[1])
+        # the root directory must be mounted first
+        mounts.sort(key=lambda mount: mount[0])
+
+        root_mounted = False
         for mount in mounts:
             LOG.debug(_("Mounting %(dev)s at %(dir)s") %
                       {'dev': mount[1], 'dir': mount[0]})
-            self.handle.mount_options("", mount[1], mount[0])
+            try:
+                self.handle.mount_options("", mount[1], mount[0])
+                root_mounted = True
+            except RuntimeError as e:
+                msg = _("Error mounting %(device)s to %(dir)s in image"
+                        " %(imgfile)s with libguestfs (%(e)s)") % \
+                      {'imgfile': self.imgfile, 'device': mount[1],
+                       'dir': mount[0], 'e': e}
+                if root_mounted:
+                    LOG.debug(msg)
+                else:
+                    raise exception.NovaException(msg)
 
     def setup(self):
         LOG.debug(_("Setting up appliance for %(imgfile)s %(imgfmt)s") %
@@ -98,9 +112,6 @@ class VFSGuestFS(vfs.VFS):
 
         try:
             self.handle.add_drive_opts(self.imgfile, format=self.imgfmt)
-            if self.handle.get_attach_method() == 'libvirt':
-                libvirt_url = 'libvirt:' + libvirt_driver.LibvirtDriver.uri()
-                self.handle.set_attach_method(libvirt_url)
             self.handle.launch()
 
             self.setup_os()
@@ -151,27 +162,27 @@ class VFSGuestFS(vfs.VFS):
         return path
 
     def make_path(self, path):
-        LOG.debug(_("Make directory path=%(path)s") % locals())
+        LOG.debug(_("Make directory path=%s"), path)
         path = self._canonicalize_path(path)
         self.handle.mkdir_p(path)
 
     def append_file(self, path, content):
-        LOG.debug(_("Append file path=%(path)s") % locals())
+        LOG.debug(_("Append file path=%s"), path)
         path = self._canonicalize_path(path)
         self.handle.write_append(path, content)
 
     def replace_file(self, path, content):
-        LOG.debug(_("Replace file path=%(path)s") % locals())
+        LOG.debug(_("Replace file path=%s"), path)
         path = self._canonicalize_path(path)
         self.handle.write(path, content)
 
     def read_file(self, path):
-        LOG.debug(_("Read file path=%(path)s") % locals())
+        LOG.debug(_("Read file path=%s"), path)
         path = self._canonicalize_path(path)
         return self.handle.read_file(path)
 
     def has_file(self, path):
-        LOG.debug(_("Has file path=%(path)s") % locals())
+        LOG.debug(_("Has file path=%s"), path)
         path = self._canonicalize_path(path)
         try:
             self.handle.stat(path)
@@ -180,13 +191,15 @@ class VFSGuestFS(vfs.VFS):
             return False
 
     def set_permissions(self, path, mode):
-        LOG.debug(_("Set permissions path=%(path)s mode=%(mode)s") % locals())
+        LOG.debug(_("Set permissions path=%(path)s mode=%(mode)s"),
+                  {'path': path, 'mode': mode})
         path = self._canonicalize_path(path)
         self.handle.chmod(mode, path)
 
     def set_ownership(self, path, user, group):
         LOG.debug(_("Set ownership path=%(path)s "
-                    "user=%(user)s group=%(group)s") % locals())
+                    "user=%(user)s group=%(group)s"),
+                  {'path': path, 'user': user, 'group': group})
         path = self._canonicalize_path(path)
         uid = -1
         gid = -1
@@ -198,5 +211,6 @@ class VFSGuestFS(vfs.VFS):
             gid = int(self.handle.aug_get(
                     "/files/etc/group/" + group + "/gid"))
 
-        LOG.debug(_("chown uid=%(uid)d gid=%(gid)s") % locals())
+        LOG.debug(_("chown uid=%(uid)d gid=%(gid)s"),
+                  {'uid': uid, 'gid': gid})
         self.handle.chown(uid, gid, path)

@@ -24,7 +24,7 @@ from nova import test
 import nova.tests.image.fake
 
 
-class FakeImageServiceTestCase(test.TestCase):
+class FakeImageServiceTestCase(test.NoDBTestCase):
     def setUp(self):
         super(FakeImageServiceTestCase, self).setUp()
         self.image_service = nova.tests.image.fake.FakeImageService()
@@ -43,8 +43,8 @@ class FakeImageServiceTestCase(test.TestCase):
                                          'status', 'is_public', 'properties',
                                          'disk_format', 'container_format',
                                          'size']))
-            self.assertTrue(isinstance(image['created_at'], datetime.datetime))
-            self.assertTrue(isinstance(image['updated_at'], datetime.datetime))
+            self.assertIsInstance(image['created_at'], datetime.datetime)
+            self.assertIsInstance(image['updated_at'], datetime.datetime)
 
             if not (isinstance(image['deleted_at'], datetime.datetime) or
                                       image['deleted_at'] is None):
@@ -83,7 +83,7 @@ class FakeImageServiceTestCase(test.TestCase):
 
     def test_create_rejects_duplicate_ids(self):
         self.image_service.create(self.context, {'id': '34'})
-        self.assertRaises(exception.Duplicate,
+        self.assertRaises(exception.CouldNotUploadImage,
                           self.image_service.create,
                           self.context,
                           {'id': '34'})

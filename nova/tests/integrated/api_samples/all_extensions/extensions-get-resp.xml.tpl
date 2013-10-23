@@ -24,6 +24,9 @@
   <extension alias="OS-EXT-STS" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_status/api/v1.1" name="ExtendedStatus">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-extended-volumes" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_volumes/api/v1.1" name="ExtendedVolumes">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="OS-EXT-VIF-NET" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended-virtual-interfaces-net/api/v1.1" name="ExtendedVIFNet">
     <description>%(text)s</description>
   </extension>
@@ -31,6 +34,9 @@
     <description>%(text)s</description>
   </extension>
   <extension alias="OS-FLV-EXT-DATA" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/flavor_extra_data/api/v1.1" name="FlavorExtraData">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="OS-SRV-USG" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/server_usage/api/v1.1" name="ServerUsage">
     <description>%(text)s</description>
   </extension>
   <extension alias="OS-SCH-HNT" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/scheduler-hints/api/v2" name="SchedulerHints">
@@ -54,7 +60,13 @@
   <extension alias="os-baremetal-nodes" name="BareMetalNodes" namespace="http://docs.openstack.org/compute/ext/baremetal_nodes/api/v2" updated="%(timestamp)s">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-block-device-mapping-v2-boot" name="BlockDeviceMappingV2Boot" namespace="http://docs.openstack.org/compute/ext/block_device_mapping_v2_boot/api/v2" updated="%(timestamp)s">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-cells" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/cells/api/v1.1" name="Cells">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-cell-capacities" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/cell_capacities/api/v1.1" name="CellCapacities">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-certificates" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/certificates/api/v1.1" name="Certificates">
@@ -129,6 +141,9 @@
   <extension alias="os-services" name="Services" namespace="http://docs.openstack.org/compute/ext/services/api/v2" updated="%(timestamp)s">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-extended-services" name="ExtendedServices" namespace="http://docs.openstack.org/compute/ext/extended_services/api/v2" updated="%(timestamp)s">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-fping" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/fping/api/v1.1" name="Fping">
     <description>%(text)s</description>
   </extension>
@@ -156,7 +171,13 @@
   <extension alias="os-quota-class-sets" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/quota-classes-sets/api/v1.1" name="QuotaClasses">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-extended-quotas" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/extended_quotas/api/v1.1" name="ExtendedQuotas">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-quota-sets" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/quotas-sets/api/v1.1" name="Quotas">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-user-quotas" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/user_quotas/api/v1.1" name="UserQuotas">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-rescue" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/rescue/api/v1.1" name="Rescue">
@@ -177,10 +198,16 @@
   <extension alias="os-server-start-stop" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/servers/api/v1.1" name="ServerStartStop">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-shelve" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/shelve/api/v1.1" name="Shelve">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-simple-tenant-usage" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/os-simple-tenant-usage/api/v1.1" name="SimpleTenantUsage">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-used-limits" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/used_limits/api/v1.1" name="UsedLimits">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-used-limits-for-admin" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/used_limits_for_admin/api/v1.1" name="UsedLimitsForAdmin">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-user-data" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/userdata/api/v1.1" name="UserData">
@@ -189,10 +216,21 @@
   <extension alias="os-virtual-interfaces" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/virtual_interfaces/api/v1.1" name="VirtualInterfaces">
     <description>%(text)s</description>
   </extension>
+  <extension alias="os-volume-attachment-update" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/os-volume-attachment-update/api/v2" name="VolumeAttachmentUpdate">
+    <description>%(text)s</description>
+  </extension>
   <extension alias="os-volumes" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/volumes/api/v1.1" name="Volumes">
     <description>%(text)s</description>
   </extension>
   <extension alias="os-instance-actions" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/instance-actions/api/v1.1" name="InstanceActions">
     <description>%(text)s</description>
+  </extension>
+  <extension alias="os-migrations" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/migrations/api/v2.0" name="Migrations">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-assisted-volume-snapshots" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/assisted-volume-snapshots/api/v2" name="AssistedVolumeSnapshots">
+    <description>%(text)s</description>
+  </extension>
+  <extension alias="os-baremetal-ext-status" updated="%(timestamp)s" namespace="http://docs.openstack.org/compute/ext/baremetal_ext_status/api/v2" name="BareMetalExtStatus">    <description>%(text)s</description>
   </extension>
 </extensions>

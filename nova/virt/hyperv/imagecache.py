@@ -23,10 +23,11 @@ from oslo.config import cfg
 
 from nova.compute import flavors
 from nova.openstack.common import excutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova import utils
-from nova.virt.hyperv import pathutils
-from nova.virt.hyperv import vhdutils
+from nova.virt.hyperv import utilsfactory
+from nova.virt.hyperv import vhdutilsv2
 from nova.virt.hyperv import vmutils
 from nova.virt import images
 
@@ -38,8 +39,8 @@ CONF.import_opt('use_cow_images', 'nova.virt.driver')
 
 class ImageCache(object):
     def __init__(self):
-        self._pathutils = pathutils.PathUtils()
-        self._vhdutils = vhdutils.VHDUtils()
+        self._pathutils = utilsfactory.get_pathutils()
+        self._vhdutils = utilsfactory.get_vhdutils()
 
     def _validate_vhd_image(self, vhd_path):
         try:
@@ -52,7 +53,7 @@ class ImageCache(object):
     def _get_root_vhd_size_gb(self, instance):
         try:
             # In case of resizes we need the old root disk size
-            old_instance_type = flavors.extract_instance_type(
+            old_instance_type = flavors.extract_flavor(
                 instance, prefix='old_')
             return old_instance_type['root_gb']
         except KeyError:
@@ -65,13 +66,23 @@ class ImageCache(object):
         root_vhd_size_gb = self._get_root_vhd_size_gb(instance)
         root_vhd_size = root_vhd_size_gb * 1024 ** 3
 
-        if root_vhd_size < vhd_size:
-            raise vmutils.HyperVException(_("Cannot resize the image to a "
-                                            "size smaller than the VHD max. "
-                                            "internal size: %(vhd_size)s. "
-                                            "Requested disk size: "
-                                            "%(root_vhd_size)s") % locals())
-        if root_vhd_size > vhd_size:
+        # NOTE(lpetrut): Checking the namespace is needed as the following
+        # method is not yet implemented in the vhdutilsv2 module.
+        if not isinstance(self._vhdutils, vhdutilsv2.VHDUtilsV2):
+            root_vhd_internal_size = (
+                self._vhdutils.get_internal_vhd_size_by_file_size(
+                    vhd_path, root_vhd_size))
+        else:
+            root_vhd_internal_size = root_vhd_size
+
+        if root_vhd_internal_size < vhd_size:
+            raise vmutils.HyperVException(
+                _("Cannot resize the image to a size smaller than the VHD "
+                  "max. internal size: %(vhd_size)s. Requested disk size: "
+                  "%(root_vhd_size)s") %
+                {'vhd_size': vhd_size, 'root_vhd_size': root_vhd_size}
+            )
+        if root_vhd_internal_size > vhd_size:
             path_parts = os.path.splitext(vhd_path)
             resized_vhd_path = '%s_%s%s' % (path_parts[0],
                                             root_vhd_size_gb,
@@ -82,10 +93,14 @@ class ImageCache(object):
                 if not self._pathutils.exists(resized_vhd_path):
                     try:
                         LOG.debug(_("Copying VHD %(vhd_path)s to "
-                                    "%(resized_vhd_path)s") % locals())
+                                    "%(resized_vhd_path)s"),
+                                  {'vhd_path': vhd_path,
+                                   'resized_vhd_path': resized_vhd_path})
                         self._pathutils.copyfile(vhd_path, resized_vhd_path)
                         LOG.debug(_("Resizing VHD %(resized_vhd_path)s to new "
-                                    "size %(root_vhd_size)s") % locals())
+                                    "size %(root_vhd_size)s"),
+                                  {'resized_vhd_path': resized_vhd_path,
+                                   'root_vhd_size': root_vhd_size})
                         self._vhdutils.resize_vhd(resized_vhd_path,
                                                   root_vhd_size)
                     except Exception:
@@ -100,25 +115,38 @@ class ImageCache(object):
         image_id = instance['image_ref']
 
         base_vhd_dir = self._pathutils.get_base_vhd_dir()
-        vhd_path = os.path.join(base_vhd_dir, image_id + ".vhd")
+        base_vhd_path = os.path.join(base_vhd_dir, image_id)
 
-        @utils.synchronized(vhd_path)
+        @utils.synchronized(base_vhd_path)
         def fetch_image_if_not_existing():
-            if not self._pathutils.exists(vhd_path):
+            vhd_path = None
+            for format_ext in ['vhd', 'vhdx']:
+                test_path = base_vhd_path + '.' + format_ext
+                if self._pathutils.exists(test_path):
+                    vhd_path = test_path
+                    break
+
+            if not vhd_path:
                 try:
-                    images.fetch(context, image_id, vhd_path,
+                    images.fetch(context, image_id, base_vhd_path,
                                  instance['user_id'],
                                  instance['project_id'])
+
+                    format_ext = self._vhdutils.get_vhd_format(base_vhd_path)
+                    vhd_path = base_vhd_path + '.' + format_ext.lower()
+                    self._pathutils.rename(base_vhd_path, vhd_path)
                 except Exception:
                     with excutils.save_and_reraise_exception():
-                        if self._pathutils.exists(vhd_path):
-                            self._pathutils.remove(vhd_path)
+                        if self._pathutils.exists(base_vhd_path):
+                            self._pathutils.remove(base_vhd_path)
 
-        fetch_image_if_not_existing()
+            return vhd_path
 
-        if CONF.use_cow_images:
+        vhd_path = fetch_image_if_not_existing()
+
+        if CONF.use_cow_images and vhd_path.split('.')[-1].lower() == 'vhd':
             # Resize the base VHD image as it's not possible to resize a
-            # differencing VHD.
+            # differencing VHD. This does not apply to VHDX images.
             resized_vhd_path = self._resize_and_cache_vhd(instance, vhd_path)
             if resized_vhd_path:
                 return resized_vhd_path

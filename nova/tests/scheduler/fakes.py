@@ -18,7 +18,6 @@ Fakes For Scheduler tests.
 
 import mox
 
-from nova.compute import flavors
 from nova.compute import vm_states
 from nova import db
 from nova.scheduler import filter_scheduler
@@ -30,22 +29,22 @@ COMPUTE_NODES = [
              disk_available_least=512, free_ram_mb=512, vcpus_used=1,
              free_disk_mb=512, local_gb_used=0, updated_at=None,
              service=dict(host='host1', disabled=False),
-             hypervisor_hostname='node1'),
+             hypervisor_hostname='node1', host_ip='127.0.0.1'),
         dict(id=2, local_gb=2048, memory_mb=2048, vcpus=2,
              disk_available_least=1024, free_ram_mb=1024, vcpus_used=2,
              free_disk_mb=1024, local_gb_used=0, updated_at=None,
              service=dict(host='host2', disabled=True),
-             hypervisor_hostname='node2'),
+             hypervisor_hostname='node2', host_ip='127.0.0.1'),
         dict(id=3, local_gb=4096, memory_mb=4096, vcpus=4,
              disk_available_least=3072, free_ram_mb=3072, vcpus_used=1,
              free_disk_mb=3072, local_gb_used=0, updated_at=None,
              service=dict(host='host3', disabled=False),
-             hypervisor_hostname='node3'),
+             hypervisor_hostname='node3', host_ip='127.0.0.1'),
         dict(id=4, local_gb=8192, memory_mb=8192, vcpus=8,
              disk_available_least=8192, free_ram_mb=8192, vcpus_used=0,
              free_disk_mb=8192, local_gb_used=0, updated_at=None,
              service=dict(host='host4', disabled=False),
-             hypervisor_hostname='node4'),
+             hypervisor_hostname='node4', host_ip='127.0.0.1'),
         # Broken entry
         dict(id=5, local_gb=1024, memory_mb=1024, vcpus=1, service=None),
 ]
@@ -78,7 +77,8 @@ class FakeHostManager(host_manager.HostManager):
     """host1: free_ram_mb=1024-512-512=0, free_disk_gb=1024-512-512=0
        host2: free_ram_mb=2048-512=1536  free_disk_gb=2048-512=1536
        host3: free_ram_mb=4096-1024=3072  free_disk_gb=4096-1024=3072
-       host4: free_ram_mb=8192  free_disk_gb=8192"""
+       host4: free_ram_mb=8192  free_disk_gb=8192
+    """
 
     def __init__(self):
         super(FakeHostManager, self).__init__()
@@ -107,14 +107,14 @@ class FakeHostState(host_manager.HostState):
 
 
 class FakeInstance(object):
-    def __init__(self, context=None, params=None, type_name='m1.tiny'):
+    def __init__(self, context=None, params=None):
         """Create a test instance. Returns uuid."""
         self.context = context
 
-        i = self._create_fake_instance(params, type_name=type_name)
+        i = self._create_fake_instance(params=params)
         self.uuid = i['uuid']
 
-    def _create_fake_instance(self, params=None, type_name='m1.tiny'):
+    def _create_fake_instance(self, params=None):
         """Create a test instance."""
         if not params:
             params = {}
@@ -123,11 +123,9 @@ class FakeInstance(object):
         inst['vm_state'] = vm_states.ACTIVE
         inst['image_ref'] = 1
         inst['reservation_id'] = 'r-fakeres'
-        inst['launch_time'] = '10'
         inst['user_id'] = 'fake'
         inst['project_id'] = 'fake'
-        type_id = flavors.get_instance_type_by_name(type_name)['id']
-        inst['instance_type_id'] = type_id
+        inst['instance_type_id'] = 2
         inst['ami_launch_index'] = 0
         inst.update(params)
         return db.instance_create(self.context, inst)

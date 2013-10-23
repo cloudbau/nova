@@ -21,6 +21,7 @@ PowerVM LPAR configuration attributes.
 
 import shlex
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.virt.powervm import exception
 
@@ -51,7 +52,7 @@ def load_from_conf_data(conf_data):
     for (key, value) in attribs.items():
         try:
             lpar[key] = value
-        except exception.PowerVMLPARAttributeNotFound as e:
+        except exception.PowerVMLPARAttributeNotFound:
             LOG.info(_('Encountered unknown LPAR attribute: %s\n'
                        'Continuing without storing') % key)
     return lpar

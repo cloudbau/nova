@@ -22,11 +22,12 @@ import tempfile
 
 from nova import test
 
+from nova.openstack.common import fileutils
 from nova import utils
 from nova.virt import configdrive
 
 
-class ConfigDriveTestCase(test.TestCase):
+class ConfigDriveTestCase(test.NoDBTestCase):
 
     def test_create_configdrive_iso(self):
         imagefile = None
@@ -53,7 +54,7 @@ class ConfigDriveTestCase(test.TestCase):
 
         finally:
             if imagefile:
-                utils.delete_if_exists(imagefile)
+                fileutils.delete_if_exists(imagefile)
 
     def test_create_configdrive_vfat(self):
         imagefile = None
@@ -87,4 +88,4 @@ class ConfigDriveTestCase(test.TestCase):
 
         finally:
             if imagefile:
-                utils.delete_if_exists(imagefile)
+                fileutils.delete_if_exists(imagefile)

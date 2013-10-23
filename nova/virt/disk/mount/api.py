@@ -18,6 +18,7 @@
 import os
 import time
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova import utils
@@ -40,7 +41,9 @@ class Mount(object):
     def instance_for_format(imgfile, mountdir, partition, imgfmt):
         LOG.debug(_("Instance for format imgfile=%(imgfile)s "
                     "mountdir=%(mountdir)s partition=%(partition)s "
-                    "imgfmt=%(imgfmt)s") % locals())
+                    "imgfmt=%(imgfmt)s"),
+                  {'imgfile': imgfile, 'mountdir': mountdir,
+                   'partition': partition, 'imgfmt': imgfmt})
         if imgfmt == "raw":
             LOG.debug(_("Using LoopMount"))
             return importutils.import_object(
@@ -56,7 +59,9 @@ class Mount(object):
     def instance_for_device(imgfile, mountdir, partition, device):
         LOG.debug(_("Instance for device imgfile=%(imgfile)s "
                     "mountdir=%(mountdir)s partition=%(partition)s "
-                    "device=%(device)s") % locals())
+                    "device=%(device)s"),
+                  {'imgfile': imgfile, 'mountdir': mountdir,
+                   'partition': partition, 'device': device})
         if "loop" in device:
             LOG.debug(_("Using LoopMount"))
             return importutils.import_object(

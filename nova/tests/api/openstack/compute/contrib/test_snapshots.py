@@ -25,7 +25,7 @@ from nova.tests.api.openstack import fakes
 from nova.volume import cinder
 
 
-class SnapshotApiTest(test.TestCase):
+class SnapshotApiTest(test.NoDBTestCase):
     def setUp(self):
         super(SnapshotApiTest, self).setUp()
         fakes.stub_out_networking(self.stubs)
@@ -62,7 +62,7 @@ class SnapshotApiTest(test.TestCase):
         resp = req.get_response(self.app)
         self.assertEqual(resp.status_int, 200)
         resp_dict = jsonutils.loads(resp.body)
-        self.assertTrue('snapshot' in resp_dict)
+        self.assertIn('snapshot', resp_dict)
         self.assertEqual(resp_dict['snapshot']['displayName'],
                         snapshot['display_name'])
         self.assertEqual(resp_dict['snapshot']['displayDescription'],
@@ -85,7 +85,7 @@ class SnapshotApiTest(test.TestCase):
         self.assertEqual(resp.status_int, 200)
 
         resp_dict = jsonutils.loads(resp.body)
-        self.assertTrue('snapshot' in resp_dict)
+        self.assertIn('snapshot', resp_dict)
         self.assertEqual(resp_dict['snapshot']['displayName'],
                         snapshot['display_name'])
         self.assertEqual(resp_dict['snapshot']['displayDescription'],
@@ -129,7 +129,7 @@ class SnapshotApiTest(test.TestCase):
 
         self.assertEqual(resp.status_int, 200)
         resp_dict = jsonutils.loads(resp.body)
-        self.assertTrue('snapshot' in resp_dict)
+        self.assertIn('snapshot', resp_dict)
         self.assertEqual(resp_dict['snapshot']['id'], str(snapshot_id))
 
     def test_snapshot_show_invalid_id(self):
@@ -146,7 +146,7 @@ class SnapshotApiTest(test.TestCase):
         self.assertEqual(resp.status_int, 200)
 
         resp_dict = jsonutils.loads(resp.body)
-        self.assertTrue('snapshots' in resp_dict)
+        self.assertIn('snapshots', resp_dict)
         resp_snapshots = resp_dict['snapshots']
         self.assertEqual(len(resp_snapshots), 3)
 
@@ -154,7 +154,7 @@ class SnapshotApiTest(test.TestCase):
         self.assertEqual(resp_snapshot['id'], 102)
 
 
-class SnapshotSerializerTest(test.TestCase):
+class SnapshotSerializerTest(test.NoDBTestCase):
     def _verify_snapshot(self, snap, tree):
         self.assertEqual(tree.tag, 'snapshot')
 

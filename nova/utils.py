@@ -21,9 +21,7 @@
 
 import contextlib
 import datetime
-import errno
 import functools
-import hashlib
 import inspect
 import os
 import pyclbr
@@ -34,15 +32,16 @@ import socket
 import struct
 import sys
 import tempfile
-import time
 from xml.sax import saxutils
 
+import eventlet
 import netaddr
-
 from oslo.config import cfg
 
 from nova import exception
 from nova.openstack.common import excutils
+from nova.openstack.common import gettextutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import lockutils
 from nova.openstack.common import log as logging
@@ -50,7 +49,7 @@ from nova.openstack.common import processutils
 from nova.openstack.common.rpc import common as rpc_common
 from nova.openstack.common import timeutils
 
-notify_decorator = 'nova.openstack.common.notifier.api.notify_decorator'
+notify_decorator = 'nova.notifications.notify_decorator'
 
 monkey_patch_opts = [
     cfg.BoolOpt('monkey_patch',
@@ -67,9 +66,6 @@ utils_opts = [
     cfg.IntOpt('password_length',
                default=12,
                help='Length of generated instance admin passwords'),
-    cfg.BoolOpt('disable_process_locking',
-                default=False,
-                help='Whether to disable inter-process locks'),
     cfg.StrOpt('instance_usage_audit_period',
                default='month',
                help='time period to generate instance usages for.  '
@@ -79,12 +75,12 @@ utils_opts = [
                help='Path to the rootwrap configuration file to use for '
                     'running commands as root'),
     cfg.StrOpt('tempdir',
-               default=None,
                help='Explicitly specify the temporary working directory'),
 ]
 CONF = cfg.CONF
 CONF.register_opts(monkey_patch_opts)
 CONF.register_opts(utils_opts)
+CONF.import_opt('network_api_class', 'nova.network')
 
 LOG = logging.getLogger(__name__)
 
@@ -98,7 +94,24 @@ BYTE_MULTIPLIERS = {
     'k': 1024,
 }
 
+# used in limits
+TIME_UNITS = {
+    'SECOND': 1,
+    'MINUTE': 60,
+    'HOUR': 3600,
+    'DAY': 84400
+}
+
+
+_IS_NEUTRON_ATTEMPTED = False
+_IS_NEUTRON = False
+
 synchronized = lockutils.synchronized_with_prefix('nova-')
+
+SM_IMAGE_PROP_PREFIX = "image_"
+SM_INHERITABLE_KEYS = (
+    'min_ram', 'min_disk', 'disk_format', 'container_format',
+)
 
 
 def vpn_ping(address, port, timeout=0.05, session_id=None):
@@ -150,28 +163,27 @@ def vpn_ping(address, port, timeout=0.05, session_id=None):
         return server_sess
 
 
+def _get_root_helper():
+    return 'sudo nova-rootwrap %s' % CONF.rootwrap_config
+
+
 def execute(*cmd, **kwargs):
     """Convenience wrapper around oslo's execute() method."""
     if 'run_as_root' in kwargs and not 'root_helper' in kwargs:
-        kwargs['root_helper'] = 'sudo nova-rootwrap %s' % CONF.rootwrap_config
+        kwargs['root_helper'] = _get_root_helper()
     return processutils.execute(*cmd, **kwargs)
 
 
 def trycmd(*args, **kwargs):
     """Convenience wrapper around oslo's trycmd() method."""
     if 'run_as_root' in kwargs and not 'root_helper' in kwargs:
-        kwargs['root_helper'] = 'sudo nova-rootwrap %s' % CONF.rootwrap_config
+        kwargs['root_helper'] = _get_root_helper()
     return processutils.trycmd(*args, **kwargs)
 
 
 def novadir():
     import nova
     return os.path.abspath(nova.__file__).split('nova/__init__.py')[0]
-
-
-def debug(arg):
-    LOG.debug(_('debug in callback: %s'), arg)
-    return arg
 
 
 def generate_uid(topic, size=8):
@@ -210,7 +222,8 @@ def last_completed_audit_period(unit=None, before=None):
 
     returns:  2 tuple of datetimes (begin, end)
               The begin timestamp of this audit period is the same as the
-              end of the previous."""
+              end of the previous.
+    """
     if not unit:
         unit = CONF.instance_usage_audit_period
 
@@ -319,8 +332,58 @@ def generate_password(length=None, symbolgroups=DEFAULT_PASSWORD_SYMBOLS):
     return ''.join(password)
 
 
-def last_octet(address):
-    return int(address.split('.')[-1])
+def get_my_ipv4_address():
+    """Run ip route/addr commands to figure out the best ipv4
+    """
+    LOCALHOST = '127.0.0.1'
+    try:
+        out = execute('ip', '-f', 'inet', '-o', 'route', 'show')
+
+        # Find the default route
+        regex_default = ('default\s*via\s*'
+                         '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'
+                         '\s*dev\s*(\w*)\s*')
+        default_routes = re.findall(regex_default, out[0])
+        if not default_routes:
+            return LOCALHOST
+        gateway, iface = default_routes[0]
+
+        # Find the right subnet for the gateway/interface for
+        # the default route
+        route = ('(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\/(\d{1,2})'
+              '\s*dev\s*(\w*)\s*')
+        for match in re.finditer(route, out[0]):
+            subnet = netaddr.IPNetwork(match.group(1) + "/" + match.group(2))
+            if (match.group(3) == iface and
+                    netaddr.IPAddress(gateway) in subnet):
+                try:
+                    return _get_ipv4_address_for_interface(iface)
+                except exception.NovaException:
+                    pass
+    except Exception as ex:
+        LOG.error(_("Couldn't get IPv4 : %(ex)s") % {'ex': ex})
+    return LOCALHOST
+
+
+def _get_ipv4_address_for_interface(iface):
+    """Run ip addr show for an interface and grab its ipv4 addresses
+    """
+    try:
+        out = execute('ip', '-f', 'inet', '-o', 'addr', 'show', iface)
+        regexp_address = re.compile('inet\s*'
+                                    '(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})')
+        address = [m.group(1) for m in regexp_address.finditer(out[0])
+                   if m.group(1) != '127.0.0.1']
+        if address:
+            return address[0]
+        else:
+            msg = _('IPv4 address is not found.: %s') % out[0]
+            raise exception.NovaException(msg)
+    except Exception as ex:
+        msg = _("Couldn't get IPv4 of %(interface)s"
+                " : %(ex)s") % {'interface': iface, 'ex': ex}
+        LOG.error(msg)
+        raise exception.NovaException(msg)
 
 
 def get_my_linklocal(interface):
@@ -336,26 +399,8 @@ def get_my_linklocal(interface):
             raise exception.NovaException(msg)
     except Exception as ex:
         msg = _("Couldn't get Link Local IP of %(interface)s"
-                " :%(ex)s") % locals()
+                " :%(ex)s") % {'interface': interface, 'ex': ex}
         raise exception.NovaException(msg)
-
-
-def parse_mailmap(mailmap='.mailmap'):
-    mapping = {}
-    if os.path.exists(mailmap):
-        fp = open(mailmap, 'r')
-        for l in fp:
-            l = l.strip()
-            if not l.startswith('#') and ' ' in l:
-                canonical_email, alias = l.split(' ')
-                mapping[alias.lower()] = canonical_email.lower()
-    return mapping
-
-
-def str_dict_replace(s, mapping):
-    for s1, s2 in mapping.iteritems():
-        s = s.replace(s1, s2)
-    return s
 
 
 class LazyPluggable(object):
@@ -409,137 +454,10 @@ def utf8(value):
     """
     if isinstance(value, unicode):
         return value.encode('utf-8')
+    elif isinstance(value, gettextutils.Message):
+        return unicode(value).encode('utf-8')
     assert isinstance(value, str)
     return value
-
-
-def to_bytes(text, default=0):
-    """Try to turn a string into a number of bytes. Looks at the last
-    characters of the text to determine what conversion is needed to
-    turn the input text into a byte number.
-
-    Supports: B/b, K/k, M/m, G/g, T/t (or the same with b/B on the end)
-
-    """
-    # Take off everything not number 'like' (which should leave
-    # only the byte 'identifier' left)
-    mult_key_org = text.lstrip('-1234567890')
-    mult_key = mult_key_org.lower()
-    mult_key_len = len(mult_key)
-    if mult_key.endswith("b"):
-        mult_key = mult_key[0:-1]
-    try:
-        multiplier = BYTE_MULTIPLIERS[mult_key]
-        if mult_key_len:
-            # Empty cases shouldn't cause text[0:-0]
-            text = text[0:-mult_key_len]
-        return int(text) * multiplier
-    except KeyError:
-        msg = _('Unknown byte multiplier: %s') % mult_key_org
-        raise TypeError(msg)
-    except ValueError:
-        return default
-
-
-def delete_if_exists(pathname):
-    """delete a file, but ignore file not found error."""
-
-    try:
-        os.unlink(pathname)
-    except OSError as e:
-        if e.errno == errno.ENOENT:
-            return
-        else:
-            raise
-
-
-def get_from_path(items, path):
-    """Returns a list of items matching the specified path.
-
-    Takes an XPath-like expression e.g. prop1/prop2/prop3, and for each item
-    in items, looks up items[prop1][prop2][prop3].  Like XPath, if any of the
-    intermediate results are lists it will treat each list item individually.
-    A 'None' in items or any child expressions will be ignored, this function
-    will not throw because of None (anywhere) in items.  The returned list
-    will contain no None values.
-
-    """
-    if path is None:
-        raise exception.NovaException('Invalid mini_xpath')
-
-    (first_token, sep, remainder) = path.partition('/')
-
-    if first_token == '':
-        raise exception.NovaException('Invalid mini_xpath')
-
-    results = []
-
-    if items is None:
-        return results
-
-    if not isinstance(items, list):
-        # Wrap single objects in a list
-        items = [items]
-
-    for item in items:
-        if item is None:
-            continue
-        get_method = getattr(item, 'get', None)
-        if get_method is None:
-            continue
-        child = get_method(first_token)
-        if child is None:
-            continue
-        if isinstance(child, list):
-            # Flatten intermediate lists
-            for x in child:
-                results.append(x)
-        else:
-            results.append(child)
-
-    if not sep:
-        # No more tokens
-        return results
-    else:
-        return get_from_path(results, remainder)
-
-
-def flatten_dict(dict_, flattened=None):
-    """Recursively flatten a nested dictionary."""
-    flattened = flattened or {}
-    for key, value in dict_.iteritems():
-        if hasattr(value, 'iteritems'):
-            flatten_dict(value, flattened)
-        else:
-            flattened[key] = value
-    return flattened
-
-
-def partition_dict(dict_, keys):
-    """Return two dicts, one with `keys` the other with everything else."""
-    intersection = {}
-    difference = {}
-    for key, value in dict_.iteritems():
-        if key in keys:
-            intersection[key] = value
-        else:
-            difference[key] = value
-    return intersection, difference
-
-
-def map_dict_keys(dict_, key_map):
-    """Return a dict in which the dictionaries keys are mapped to new keys."""
-    mapped = {}
-    for key, value in dict_.iteritems():
-        mapped_key = key_map[key] if key in key_map else key
-        mapped[mapped_key] = value
-    return mapped
-
-
-def subset_dict(dict_, keys):
-    """Return a dict that only contains a subset of keys."""
-    subset = partition_dict(dict_, keys)[0]
-    return subset
 
 
 def diff_dict(orig, new):
@@ -639,8 +557,11 @@ def get_shortened_ipv6_cidr(address):
 
 
 def is_valid_cidr(address):
-    """Check if the provided ipv4 or ipv6 address is a valid
-    CIDR address or not"""
+    """Check if address is valid
+
+    The provided address can be a IPv6 or a IPv4
+    CIDR address.
+    """
     try:
         # Validate the correct CIDR Address
         netaddr.IPNetwork(address)
@@ -656,15 +577,17 @@ def is_valid_cidr(address):
     ip_segment = address.split('/')
 
     if (len(ip_segment) <= 1 or
-        ip_segment[1] == ''):
+            ip_segment[1] == ''):
         return False
 
     return True
 
 
 def get_ip_version(network):
-    """Returns the IP version of a network (IPv4 or IPv6). Raises
-    AddrFormatError if invalid network."""
+    """Returns the IP version of a network (IPv4 or IPv6).
+
+    Raises AddrFormatError if invalid network.
+    """
     if netaddr.IPNetwork(network).version == 6:
         return "IPv6"
     elif netaddr.IPNetwork(network).version == 4:
@@ -679,10 +602,10 @@ def monkey_patch():
     using CONF.monkey_patch_modules.
     The format is "Module path:Decorator function".
     Example:
-      'nova.api.ec2.cloud:nova.openstack.common.notifier.api.notify_decorator'
+      'nova.api.ec2.cloud:nova.notifications.notify_decorator'
 
     Parameters of the decorator is as follows.
-    (See nova.openstack.common.notifier.api.notify_decorator)
+    (See nova.notifications.notify_decorator)
 
     name - name of the function
     function - object of the function
@@ -721,32 +644,6 @@ def convert_to_list_dict(lst, label):
     return [{label: x} for x in lst]
 
 
-def timefunc(func):
-    """Decorator that logs how long a particular function took to execute."""
-    @functools.wraps(func)
-    def inner(*args, **kwargs):
-        start_time = time.time()
-        try:
-            return func(*args, **kwargs)
-        finally:
-            total_time = time.time() - start_time
-            LOG.debug(_("timefunc: '%(name)s' took %(total_time).2f secs") %
-                      dict(name=func.__name__, total_time=total_time))
-    return inner
-
-
-@contextlib.contextmanager
-def remove_path_on_error(path):
-    """Protect code that wants to operate on PATH atomically.
-    Any exception will cause PATH to be removed.
-    """
-    try:
-        yield
-    except Exception:
-        with excutils.save_and_reraise_exception():
-            delete_if_exists(path)
-
-
 def make_dev_path(dev, partition=None, base='/dev'):
     """Return a path to a particular device.
 
@@ -760,15 +657,6 @@ def make_dev_path(dev, partition=None, base='/dev'):
     if partition:
         path += str(partition)
     return path
-
-
-def total_seconds(td):
-    """Local total_seconds implementation for compatibility with python 2.6."""
-    if hasattr(td, 'total_seconds'):
-        return td.total_seconds()
-    else:
-        return ((td.days * 86400 + td.seconds) * 10 ** 6 +
-                td.microseconds) / 10.0 ** 6
 
 
 def sanitize_hostname(hostname):
@@ -803,26 +691,6 @@ def read_cached_file(filename, cache_info, reload_func=None):
         if reload_func:
             reload_func(cache_info['data'])
     return cache_info['data']
-
-
-def file_open(*args, **kwargs):
-    """Open file
-
-    see built-in file() documentation for more details
-
-    Note: The reason this is kept in a separate module is to easily
-          be able to provide a stub module that doesn't alter system
-          state at all (for unit tests)
-    """
-    return file(*args, **kwargs)
-
-
-def hash_file(file_like_object):
-    """Generate a hash for the contents of a file."""
-    checksum = hashlib.sha1()
-    for chunk in iter(lambda: file_like_object.read(32768), b''):
-        checksum.update(chunk)
-    return checksum.hexdigest()
 
 
 @contextlib.contextmanager
@@ -920,14 +788,16 @@ def temporary_chown(path, owner_uid=None):
 
 @contextlib.contextmanager
 def tempdir(**kwargs):
-    tempfile.tempdir = CONF.tempdir
-    tmpdir = tempfile.mkdtemp(**kwargs)
+    argdict = kwargs.copy()
+    if 'dir' not in argdict:
+        argdict['dir'] = CONF.tempdir
+    tmpdir = tempfile.mkdtemp(**argdict)
     try:
         yield tmpdir
     finally:
         try:
             shutil.rmtree(tmpdir)
-        except OSError, e:
+        except OSError as e:
             LOG.error(_('Could not remove tmpdir: %s'), str(e))
 
 
@@ -971,7 +841,7 @@ class UndoManager(object):
             self._rollback()
 
 
-def mkfs(fs, path, label=None):
+def mkfs(fs, path, label=None, run_as_root=False):
     """Format a file or block device
 
     :param fs: Filesystem type (examples include 'swap', 'ext3', 'ext4'
@@ -984,7 +854,7 @@ def mkfs(fs, path, label=None):
     else:
         args = ['mkfs', '-t', fs]
     #add -F to force no interactive execute on non-block device.
-    if fs in ('ext3', 'ext4'):
+    if fs in ('ext3', 'ext4', 'ntfs'):
         args.extend(['-F'])
     if label:
         if fs in ('msdos', 'vfat'):
@@ -993,7 +863,7 @@ def mkfs(fs, path, label=None):
             label_opt = '-L'
         args.extend([label_opt, label])
     args.append(path)
-    execute(*args)
+    execute(*args, run_as_root=run_as_root)
 
 
 def last_bytes(file_like_object, num):
@@ -1007,7 +877,7 @@ def last_bytes(file_like_object, num):
 
     try:
         file_like_object.seek(-num, os.SEEK_END)
-    except IOError, e:
+    except IOError as e:
         if e.errno == 22:
             file_like_object.seek(0, os.SEEK_SET)
         else:
@@ -1030,6 +900,22 @@ def dict_to_metadata(metadata):
     for key, value in metadata.iteritems():
         result.append(dict(key=key, value=value))
     return result
+
+
+def instance_meta(instance):
+    if isinstance(instance['metadata'], dict):
+        return instance['metadata']
+    else:
+        return metadata_to_dict(instance['metadata'])
+
+
+def instance_sys_meta(instance):
+    if not instance.get('system_metadata'):
+        return {}
+    if isinstance(instance['system_metadata'], dict):
+        return instance['system_metadata']
+    else:
+        return metadata_to_dict(instance['system_metadata'])
 
 
 def get_wrapped_function(function):
@@ -1055,7 +941,8 @@ def get_wrapped_function(function):
 
 class ExceptionHelper(object):
     """Class to wrap another and translate the ClientExceptions raised by its
-    function calls to the actual ones"""
+    function calls to the actual ones.
+    """
 
     def __init__(self, target):
         self._target = target
@@ -1067,7 +954,7 @@ class ExceptionHelper(object):
         def wrapper(*args, **kwargs):
             try:
                 return func(*args, **kwargs)
-            except rpc_common.ClientException, e:
+            except rpc_common.ClientException as e:
                 raise (e._exc_info[1], None, e._exc_info[2])
         return wrapper
 
@@ -1084,11 +971,165 @@ def check_string_length(value, name, min_length=0, max_length=None):
         raise exception.InvalidInput(message=msg)
 
     if len(value) < min_length:
-        msg = _("%(name)s has less than %(min_length)s "
-                    "characters.") % locals()
+        msg = _("%(name)s has a minimum character requirement of "
+                "%(min_length)s.") % {'name': name, 'min_length': min_length}
         raise exception.InvalidInput(message=msg)
 
     if max_length and len(value) > max_length:
         msg = _("%(name)s has more than %(max_length)s "
-                    "characters.") % locals()
+                "characters.") % {'name': name, 'max_length': max_length}
         raise exception.InvalidInput(message=msg)
+
+
+def validate_integer(value, name, min_value=None, max_value=None):
+    """Make sure that value is a valid integer, potentially within range."""
+    try:
+        value = int(str(value))
+    except ValueError:
+        msg = _('%(value_name)s must be an integer')
+        raise exception.InvalidInput(reason=(
+            msg % {'value_name': name}))
+
+    if min_value is not None:
+        if value < min_value:
+            msg = _('%(value_name)s must be >= %(min_value)d')
+            raise exception.InvalidInput(
+                reason=(msg % {'value_name': name,
+                               'min_value': min_value}))
+    if max_value is not None:
+        if value > max_value:
+            msg = _('%(value_name)s must be <= %(max_value)d')
+            raise exception.InvalidInput(
+                reason=(
+                    msg % {'value_name': name,
+                           'max_value': max_value})
+            )
+    return value
+
+
+def spawn_n(func, *args, **kwargs):
+    """Passthrough method for eventlet.spawn_n.
+
+    This utility exists so that it can be stubbed for testing without
+    interfering with the service spawns.
+    """
+    eventlet.spawn_n(func, *args, **kwargs)
+
+
+def is_none_string(val):
+    """
+    Check if a string represents a None value.
+    """
+    if not isinstance(val, basestring):
+        return False
+
+    return val.lower() == 'none'
+
+
+def convert_version_to_int(version):
+    return version[0] * 1000000 + version[1] * 1000 + version[2]
+
+
+def is_neutron():
+    global _IS_NEUTRON_ATTEMPTED
+    global _IS_NEUTRON
+
+    if _IS_NEUTRON_ATTEMPTED:
+        return _IS_NEUTRON
+
+    try:
+        # compatibility with Folsom/Grizzly configs
+        cls_name = CONF.network_api_class
+        if cls_name == 'nova.network.quantumv2.api.API':
+            cls_name = 'nova.network.neutronv2.api.API'
+        _IS_NEUTRON_ATTEMPTED = True
+
+        from nova.network.neutronv2 import api as neutron_api
+        _IS_NEUTRON = issubclass(importutils.import_class(cls_name),
+                                 neutron_api.API)
+    except ImportError:
+        _IS_NEUTRON = False
+
+    return _IS_NEUTRON
+
+
+def reset_is_neutron():
+    global _IS_NEUTRON_ATTEMPTED
+    global _IS_NEUTRON
+
+    _IS_NEUTRON_ATTEMPTED = False
+    _IS_NEUTRON = False
+
+
+def is_auto_disk_config_disabled(auto_disk_config_raw):
+    auto_disk_config_disabled = False
+    if auto_disk_config_raw is not None:
+        adc_lowered = auto_disk_config_raw.strip().lower()
+        if adc_lowered == "disabled":
+            auto_disk_config_disabled = True
+    return auto_disk_config_disabled
+
+
+def get_auto_disk_config_from_instance(instance=None, sys_meta=None):
+    if sys_meta is None:
+        sys_meta = instance_sys_meta(instance)
+    return sys_meta.get("image_auto_disk_config")
+
+
+def get_auto_disk_config_from_image_props(image_properties):
+    return image_properties.get("auto_disk_config")
+
+
+def get_system_metadata_from_image(image_meta, instance_type=None):
+    system_meta = {}
+    prefix_format = SM_IMAGE_PROP_PREFIX + '%s'
+
+    for key, value in image_meta.get('properties', {}).iteritems():
+        new_value = unicode(value)[:255]
+        system_meta[prefix_format % key] = new_value
+
+    for key in SM_INHERITABLE_KEYS:
+        value = image_meta.get(key)
+
+        if key == 'min_disk' and instance_type:
+            if image_meta.get('disk_format') == 'vhd':
+                value = instance_type['root_gb']
+            else:
+                value = max(value, instance_type['root_gb'])
+
+        if value is None:
+            continue
+
+        system_meta[prefix_format % key] = value
+
+    return system_meta
+
+
+def get_image_from_system_metadata(system_meta):
+    image_meta = {}
+    properties = {}
+
+    if not isinstance(system_meta, dict):
+        system_meta = metadata_to_dict(system_meta)
+
+    for key, value in system_meta.iteritems():
+        if value is None:
+            continue
+
+        # NOTE(xqueralt): Not sure this has to inherit all the properties or
+        # just the ones we need. Leaving it for now to keep the old behaviour.
+        if key.startswith(SM_IMAGE_PROP_PREFIX):
+            key = key[len(SM_IMAGE_PROP_PREFIX):]
+
+        if key in SM_INHERITABLE_KEYS:
+            image_meta[key] = value
+        else:
+            # Skip properties that are non-inheritable
+            if key in CONF.non_inheritable_image_properties:
+                continue
+            properties[key] = value
+
+    if properties:
+        image_meta['properties'] = properties
+
+    return image_meta

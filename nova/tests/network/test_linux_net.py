@@ -16,8 +16,10 @@
 # under the License.
 
 import calendar
+import contextlib
 import os
 
+import mock
 import mox
 from oslo.config import cfg
 
@@ -200,7 +202,7 @@ def get_associated(context, network_id, host=None, address=None):
     for datum in fixed_ips:
         if (datum['network_id'] == network_id and datum['allocated']
             and datum['instance_uuid'] is not None
-            and datum['virtual_interface_id'] is not None):
+                and datum['virtual_interface_id'] is not None):
             instance = instances[datum['instance_uuid']]
             if host and host != instance['host']:
                 continue
@@ -222,7 +224,7 @@ def get_associated(context, network_id, host=None, address=None):
     return result
 
 
-class LinuxNetworkTestCase(test.TestCase):
+class LinuxNetworkTestCase(test.NoDBTestCase):
 
     def setUp(self):
         super(LinuxNetworkTestCase, self).setUp()
@@ -241,6 +243,28 @@ class LinuxNetworkTestCase(test.TestCase):
         self.stubs.Set(db, 'virtual_interface_get_by_instance', get_vifs)
         self.stubs.Set(db, 'instance_get', get_instance)
         self.stubs.Set(db, 'network_get_associated_fixed_ips', get_associated)
+
+    def _test_add_snat_rule(self, expected):
+        def verify_add_rule(chain, rule):
+            self.assertEqual(chain, 'snat')
+            self.assertEqual(rule, expected)
+
+        self.stubs.Set(linux_net.iptables_manager.ipv4['nat'],
+                       'add_rule', verify_add_rule)
+        linux_net.add_snat_rule('10.0.0.0/24')
+
+    def test_add_snat_rule(self):
+        self.flags(routing_source_ip='10.10.10.1')
+        expected = ('-s 10.0.0.0/24 -d 0.0.0.0/0 '
+                    '-j SNAT --to-source 10.10.10.1 -o eth0')
+        self._test_add_snat_rule(expected)
+
+    def test_add_snat_rule_snat_range(self):
+        self.flags(routing_source_ip='10.10.10.1',
+                   force_snat_range=['10.10.10.0/24'])
+        expected = ('-s 10.0.0.0/24 -d 10.10.10.0/24 '
+                    '-j SNAT --to-source 10.10.10.1 -o eth0')
+        self._test_add_snat_rule(expected)
 
     def test_update_dhcp_for_nw00(self):
         self.flags(use_single_default_gateway=True)
@@ -405,7 +429,8 @@ class LinuxNetworkTestCase(test.TestCase):
     def test_linux_bridge_driver_plug(self):
         """Makes sure plug doesn't drop FORWARD by default.
 
-        Ensures bug 890195 doesn't reappear."""
+        Ensures bug 890195 doesn't reappear.
+        """
 
         def fake_execute(*args, **kwargs):
             return "", ""
@@ -423,14 +448,15 @@ class LinuxNetworkTestCase(test.TestCase):
     def test_vlan_override(self):
         """Makes sure vlan_interface flag overrides network bridge_interface.
 
-        Allows heterogeneous networks a la bug 833426"""
+        Allows heterogeneous networks a la bug 833426
+        """
 
         driver = linux_net.LinuxBridgeInterfaceDriver()
 
         info = {}
 
-        @classmethod
-        def test_ensure(_self, vlan, bridge, interface, network, mac_address):
+        @staticmethod
+        def test_ensure(vlan, bridge, interface, network, mac_address):
             info['passed_interface'] = interface
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -452,14 +478,15 @@ class LinuxNetworkTestCase(test.TestCase):
     def test_flat_override(self):
         """Makes sure flat_interface flag overrides network bridge_interface.
 
-        Allows heterogeneous networks a la bug 833426"""
+        Allows heterogeneous networks a la bug 833426
+        """
 
         driver = linux_net.LinuxBridgeInterfaceDriver()
 
         info = {}
 
-        @classmethod
-        def test_ensure(_self, bridge, interface, network, gateway):
+        @staticmethod
+        def test_ensure(bridge, interface, network, gateway):
             info['passed_interface'] = interface
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -570,8 +597,8 @@ class LinuxNetworkTestCase(test.TestCase):
 
         driver = linux_net.LinuxBridgeInterfaceDriver()
 
-        @classmethod
-        def fake_ensure(_self, bridge, interface, network, gateway):
+        @staticmethod
+        def fake_ensure(bridge, interface, network, gateway):
             return bridge
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -609,13 +636,13 @@ class LinuxNetworkTestCase(test.TestCase):
              '-s 192.168.1.1 -j DROP' % iface,
         ]
         for inp in expected_inputs:
-            self.assertTrue(inp in inputs[0])
+            self.assertIn(inp, inputs[0])
 
         executes = []
         inputs = []
 
-        @classmethod
-        def fake_remove(_self, bridge, gateway):
+        @staticmethod
+        def fake_remove(bridge, gateway):
             return
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -634,7 +661,7 @@ class LinuxNetworkTestCase(test.TestCase):
         ]
         self.assertEqual(executes, expected)
         for inp in expected_inputs:
-            self.assertFalse(inp in inputs[0])
+            self.assertNotIn(inp, inputs[0])
 
     def test_isolated_host_iptables_logdrop(self):
         # Ensure that a different drop action for iptables doesn't change
@@ -661,8 +688,8 @@ class LinuxNetworkTestCase(test.TestCase):
 
         driver = linux_net.LinuxBridgeInterfaceDriver()
 
-        @classmethod
-        def fake_ensure(_self, bridge, interface, network, gateway):
+        @staticmethod
+        def fake_ensure(bridge, interface, network, gateway):
             return bridge
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -700,13 +727,13 @@ class LinuxNetworkTestCase(test.TestCase):
               '-s 192.168.1.1 -j LOGDROP' % iface),
         ]
         for inp in expected_inputs:
-            self.assertTrue(inp in inputs[0])
+            self.assertIn(inp, inputs[0])
 
         executes = []
         inputs = []
 
-        @classmethod
-        def fake_remove(_self, bridge, gateway):
+        @staticmethod
+        def fake_remove(bridge, gateway):
             return
 
         self.stubs.Set(linux_net.LinuxBridgeInterfaceDriver,
@@ -725,7 +752,7 @@ class LinuxNetworkTestCase(test.TestCase):
         ]
         self.assertEqual(executes, expected)
         for inp in expected_inputs:
-            self.assertFalse(inp in inputs[0])
+            self.assertNotIn(inp, inputs[0])
 
     def _test_initialize_gateway(self, existing, expected, routes=''):
         self.flags(fake_network=False)
@@ -836,7 +863,6 @@ class LinuxNetworkTestCase(test.TestCase):
         self.stubs.Set(ln, 'ensure_ebtables_rules', lambda *a, **kw: None)
         net = {'bridge': 'br100', 'cidr': '10.0.0.0/24'}
         ln.ensure_floating_forward('10.10.10.10', '10.0.0.1', 'eth0', net)
-        one_forward_rules = len(linux_net.iptables_manager.ipv4['nat'].rules)
         ln.ensure_floating_forward('10.10.10.11', '10.0.0.10', 'eth0', net)
         two_forward_rules = len(linux_net.iptables_manager.ipv4['nat'].rules)
         ln.ensure_floating_forward('10.10.10.10', '10.0.0.3', 'eth0', net)
@@ -867,3 +893,71 @@ class LinuxNetworkTestCase(test.TestCase):
         self.mox.ReplayAll()
         manager.defer_apply_off()
         self.assertFalse(manager.iptables_apply_deferred)
+
+    def _test_add_metadata_accept_rule(self, expected):
+        def verify_add_rule(chain, rule):
+            self.assertEqual(chain, 'INPUT')
+            self.assertEqual(expected, rule)
+
+        self.stubs.Set(linux_net.iptables_manager.ipv4['filter'],
+                       'add_rule', verify_add_rule)
+        linux_net.metadata_accept()
+
+    def test_metadata_accept(self):
+        self.flags(metadata_port='8775')
+        self.flags(metadata_host='10.10.10.1')
+        expected = ('-s 0.0.0.0/0 -p tcp -m tcp --dport 8775 '
+                    '-d 10.10.10.1 -j ACCEPT')
+        self._test_add_metadata_accept_rule(expected)
+
+    def test_metadata_accept_localhost(self):
+        self.flags(metadata_port='8775')
+        self.flags(metadata_host='127.0.0.1')
+        expected = ('-s 0.0.0.0/0 -p tcp -m tcp --dport 8775 '
+                    '-m addrtype --dst-type LOCAL -j ACCEPT')
+        self._test_add_metadata_accept_rule(expected)
+
+    def _test_add_metadata_forward_rule(self, expected):
+        def verify_add_rule(chain, rule):
+            self.assertEqual(chain, 'PREROUTING')
+            self.assertEqual(expected, rule)
+
+        self.stubs.Set(linux_net.iptables_manager.ipv4['nat'],
+                       'add_rule', verify_add_rule)
+        linux_net.metadata_forward()
+
+    def test_metadata_forward(self):
+        self.flags(metadata_port='8775')
+        self.flags(metadata_host='10.10.10.1')
+        expected = ('-s 0.0.0.0/0 -d 169.254.169.254/32 -p tcp -m tcp '
+                    '--dport 80 -j DNAT --to-destination 10.10.10.1:8775')
+        self._test_add_metadata_forward_rule(expected)
+
+    def test_metadata_forward_localhost(self):
+        self.flags(metadata_port='8775')
+        self.flags(metadata_host='127.0.0.1')
+        expected = ('-s 0.0.0.0/0 -d 169.254.169.254/32 -p tcp -m tcp '
+                    '--dport 80 -j REDIRECT --to-ports 8775')
+        self._test_add_metadata_forward_rule(expected)
+
+    def test_ensure_bridge_brings_up_interface(self):
+        calls = {
+            'device_exists': [mock.call('bridge')],
+            '_execute': [
+                mock.call('brctl', 'addif', 'bridge', 'eth0',
+                          run_as_root=True, check_exit_code=False),
+                mock.call('ip', 'link', 'set', 'eth0', 'up',
+                          run_as_root=True, check_exit_code=False),
+                mock.call('ip', 'route', 'show', 'dev', 'eth0'),
+                mock.call('ip', 'addr', 'show', 'dev', 'eth0', 'scope',
+                          'global', run_as_root=True),
+                ]
+            }
+        with contextlib.nested(
+            mock.patch.object(linux_net, 'device_exists', return_value=True),
+            mock.patch.object(linux_net, '_execute', return_value=('', ''))
+        ) as (device_exists, _execute):
+            driver = linux_net.LinuxBridgeInterfaceDriver()
+            driver.ensure_bridge('bridge', 'eth0')
+            device_exists.assert_has_calls(calls['device_exists'])
+            _execute.assert_has_calls(calls['_execute'])

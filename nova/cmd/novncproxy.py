@@ -20,6 +20,8 @@ Websocket proxy that is compatible with OpenStack Nova
 noVNC consoles. Leverages websockify.py by Joel Martin
 """
 
+from __future__ import print_function
+
 import os
 import sys
 
@@ -30,27 +32,6 @@ from nova.console import websocketproxy
 
 
 opts = [
-    cfg.BoolOpt('record',
-                default=False,
-                help='Record sessions to FILE.[session_number]'),
-    cfg.BoolOpt('daemon',
-                default=False,
-                help='Become a daemon (background process)'),
-    cfg.BoolOpt('ssl_only',
-                default=False,
-                help='Disallow non-encrypted connections'),
-    cfg.BoolOpt('source_is_ipv6',
-                default=False,
-                help='Source is ipv6'),
-    cfg.StrOpt('cert',
-               default='self.pem',
-               help='SSL certificate file'),
-    cfg.StrOpt('key',
-               default=None,
-               help='SSL key file (if separate from cert)'),
-    cfg.StrOpt('web',
-               default='/usr/share/novnc',
-               help='Run webserver on same port. Serve files from DIR.'),
     cfg.StrOpt('novncproxy_host',
                default='0.0.0.0',
                help='Host on which to listen for incoming requests'),
@@ -61,20 +42,27 @@ opts = [
 
 CONF = cfg.CONF
 CONF.register_cli_opts(opts)
-CONF.import_opt('debug', 'nova.openstack.common.log')
+CONF.import_opt('record', 'nova.cmd.novnc')
+CONF.import_opt('daemon', 'nova.cmd.novnc')
+CONF.import_opt('ssl_only', 'nova.cmd.novnc')
+CONF.import_opt('source_is_ipv6', 'nova.cmd.novnc')
+CONF.import_opt('cert', 'nova.cmd.novnc')
+CONF.import_opt('key', 'nova.cmd.novnc')
+CONF.import_opt('web', 'nova.cmd.novnc')
 
 
 def main():
     # Setup flags
+    CONF.set_default('web', '/usr/share/novnc')
     config.parse_args(sys.argv)
 
     if CONF.ssl_only and not os.path.exists(CONF.cert):
-        print "SSL only and %s not found" % CONF.cert
+        print("SSL only and %s not found" % CONF.cert)
         return(-1)
 
     # Check to see if novnc html/js/css files are present
     if not os.path.exists(CONF.web):
-        print "Can not find novnc html/js/css files at %s." % CONF.web
+        print("Can not find novnc html/js/css files at %s." % CONF.web)
         return(-1)
 
     # Create and start the NovaWebSockets proxy
@@ -89,6 +77,8 @@ def main():
                                    daemon=CONF.daemon,
                                    record=CONF.record,
                                    web=CONF.web,
+                                   file_only=True,
+                                   no_parent=True,
                                    target_host='ignore',
                                    target_port='ignore',
                                    wrap_mode='exit',

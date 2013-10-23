@@ -57,9 +57,11 @@ from oslo.config import cfg
 
 from nova import baserpc
 from nova.db import base
+from nova import notifier
+from nova.objects import base as objects_base
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common import periodic_task
-from nova.openstack.common.plugin import pluginmanager
 from nova.openstack.common.rpc import dispatcher as rpc_dispatcher
 from nova.scheduler import rpcapi as scheduler_rpcapi
 
@@ -77,23 +79,24 @@ class Manager(base.Base, periodic_task.PeriodicTasks):
         if not host:
             host = CONF.host
         self.host = host
-        self.load_plugins()
         self.backdoor_port = None
         self.service_name = service_name
+        self.notifier = notifier.get_notifier(self.service_name, self.host)
         super(Manager, self).__init__(db_driver)
 
-    def load_plugins(self):
-        pluginmgr = pluginmanager.PluginManager('nova', self.__class__)
-        pluginmgr.load_plugins()
-
-    def create_rpc_dispatcher(self, backdoor_port=None):
+    def create_rpc_dispatcher(self, backdoor_port=None, additional_apis=None):
         '''Get the rpc dispatcher for this manager.
 
         If a manager would like to set an rpc API version, or support more than
         one class as the target of rpc messages, override this method.
         '''
+        apis = []
+        if additional_apis:
+            apis.extend(additional_apis)
         base_rpc = baserpc.BaseRPCAPI(self.service_name, backdoor_port)
-        return rpc_dispatcher.RpcDispatcher([self, base_rpc])
+        apis.extend([self, base_rpc])
+        serializer = objects_base.NovaObjectSerializer()
+        return rpc_dispatcher.RpcDispatcher(apis, serializer)
 
     def periodic_tasks(self, context, raise_on_error=False):
         """Tasks to be run at a periodic interval."""
@@ -108,7 +111,7 @@ class Manager(base.Base, periodic_task.PeriodicTasks):
         """
         pass
 
-    def pre_start_hook(self, **kwargs):
+    def pre_start_hook(self):
         """Hook to provide the manager the ability to do additional
         start-up work before any RPC queues/consumers are created. This is
         called after other initialization has succeeded and a service
@@ -145,23 +148,20 @@ class SchedulerDependentManager(Manager):
         super(SchedulerDependentManager, self).__init__(host, db_driver,
                 service_name)
 
-    def load_plugins(self):
-        pluginmgr = pluginmanager.PluginManager('nova', self.service_name)
-        pluginmgr.load_plugins()
-
     def update_service_capabilities(self, capabilities):
         """Remember these capabilities to send on next periodic update."""
         if not isinstance(capabilities, list):
             capabilities = [capabilities]
         self.last_capabilities = capabilities
 
-    @periodic_task.periodic_task
     def publish_service_capabilities(self, context):
         """Pass data back to the scheduler.
 
         Called at a periodic interval. And also called via rpc soon after
         the start of the scheduler.
         """
+        #NOTE(jogo): this is now deprecated, unused and can be removed in
+        #V3.0 of compute  RPCAPI
         if self.last_capabilities:
             LOG.debug(_('Notifying Schedulers of capabilities ...'))
             self.scheduler_rpcapi.update_service_capabilities(context,

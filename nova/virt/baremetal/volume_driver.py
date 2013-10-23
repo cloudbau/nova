@@ -22,6 +22,8 @@ from oslo.config import cfg
 
 from nova import context as nova_context
 from nova import exception
+from nova import network
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
@@ -172,6 +174,13 @@ def _get_iqn(instance_name, mountpoint):
     return iqn
 
 
+def _get_fixed_ips(instance):
+    context = nova_context.get_admin_context()
+    nw_info = network.API().get_instance_nw_info(context, instance)
+    ips = nw_info.fixed_ips()
+    return ips
+
+
 class VolumeDriver(object):
 
     def __init__(self, virtapi):
@@ -199,7 +208,7 @@ class VolumeDriver(object):
 
 
 class LibvirtVolumeDriver(VolumeDriver):
-    """The VolumeDriver deligates to nova.virt.libvirt.volume."""
+    """The VolumeDriver delegates to nova.virt.libvirt.volume."""
 
     def __init__(self, virtapi):
         super(LibvirtVolumeDriver, self).__init__(virtapi)
@@ -219,10 +228,8 @@ class LibvirtVolumeDriver(VolumeDriver):
         return method(connection_info, *args, **kwargs)
 
     def attach_volume(self, connection_info, instance, mountpoint):
-        node = _get_baremetal_node_by_instance_uuid(instance['uuid'])
-        ctx = nova_context.get_admin_context()
-        pxe_ip = bmdb.bm_pxe_ip_get_by_bm_node_id(ctx, node['id'])
-        if not pxe_ip:
+        fixed_ips = _get_fixed_ips(instance)
+        if not fixed_ips:
             if not CONF.baremetal.use_unsafe_iscsi:
                 raise exception.NovaException(_(
                     'No fixed PXE IP is associated to %s') % instance['uuid'])
@@ -236,8 +243,9 @@ class LibvirtVolumeDriver(VolumeDriver):
         tid = _get_next_tid()
         _create_iscsi_export_tgtadm(device_path, tid, iqn)
 
-        if pxe_ip:
-            _allow_iscsi_tgtadm(tid, pxe_ip['address'])
+        if fixed_ips:
+            for ip in fixed_ips:
+                _allow_iscsi_tgtadm(tid, ip['address'])
         else:
             # NOTE(NTTdocomo): Since nova-compute does not know the
             # instance's initiator ip, it allows any initiators

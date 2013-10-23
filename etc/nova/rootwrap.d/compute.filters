@@ -135,8 +135,7 @@ kill_dnsmasq: KillFilter, root, /usr/sbin/dnsmasq, -9, -HUP
 kill_radvd: KillFilter, root, /usr/sbin/radvd
 
 # nova/network/linux_net.py: dnsmasq call
-dnsmasq: DnsmasqFilter, /usr/sbin/dnsmasq, root
-dnsmasq_deprecated: DeprecatedDnsmasqFilter, /usr/sbin/dnsmasq, root
+dnsmasq: EnvFilter, env, root, CONFIG_FILE=, NETWORK_ID=, dnsmasq
 
 # nova/network/linux_net.py: 'radvd', '-C', '%s' % _ra_file(dev, 'conf'..
 radvd: CommandFilter, radvd, root
@@ -199,9 +198,14 @@ systool: CommandFilter, systool, root
 # nova/virt/libvirt/volume.py:
 sginfo: CommandFilter, sginfo, root
 sg_scan: CommandFilter, sg_scan, root
+cryptsetup: CommandFilter, cryptsetup, root
+ln: RegExpFilter, ln, root, ln, --symbolic, --force, /dev/mapper/ip-.*-iscsi-iqn.2010-10.org.openstack:volume-.*, /dev/disk/by-path/ip-.*-iscsi-iqn.2010-10.org.openstack:volume-.*
 
 # nova/virt/xenapi/vm_utils.py:
 xenstore-read: CommandFilter, xenstore-read, root
 
 # nova/virt/baremetal/tilera.py: 'rpc.mountd'
 rpc.mountd: CommandFilter, rpc.mountd, root
+
+# nova/virt/libvirt/utils.py:
+rbd: CommandFilter, rbd, root

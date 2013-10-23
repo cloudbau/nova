@@ -23,6 +23,7 @@ import webob.dec
 import webob.exc
 
 from nova import context
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova import wsgi
@@ -30,8 +31,8 @@ from nova import wsgi
 
 auth_opts = [
     cfg.BoolOpt('api_rate_limit',
-                default=True,
-                help='whether to rate limit the api'),
+                default=False,
+                help='whether to use per-user rate limiting for the api.'),
     cfg.StrOpt('auth_strategy',
                default='noauth',
                help='The strategy to use for auth: noauth or keystone.'),

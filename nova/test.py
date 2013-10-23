@@ -26,22 +26,25 @@ inline callbacks.
 import eventlet
 eventlet.monkey_patch(os=False)
 
+import copy
+import gettext
 import os
 import shutil
 import sys
+import tempfile
 import uuid
 
 import fixtures
-import mox
 from oslo.config import cfg
-import stubout
 import testtools
 
 from nova import context
 from nova import db
 from nova.db import migration
 from nova.network import manager as network_manager
+from nova.objects import base as objects_base
 from nova.openstack.common.db.sqlalchemy import session
+from nova.openstack.common.fixture import moxstubout
 from nova.openstack.common import log as logging
 from nova.openstack.common import timeutils
 from nova import paths
@@ -58,9 +61,11 @@ test_opts = [
 
 CONF = cfg.CONF
 CONF.register_opts(test_opts)
-CONF.import_opt('sql_connection',
-                'nova.openstack.common.db.sqlalchemy.session')
+CONF.import_opt('connection',
+                'nova.openstack.common.db.sqlalchemy.session',
+                group='database')
 CONF.import_opt('sqlite_db', 'nova.openstack.common.db.sqlalchemy.session')
+CONF.import_opt('enabled', 'nova.api.openstack', group='osapi_v3')
 CONF.set_override('use_stderr', False)
 
 logging.setup('nova')
@@ -87,7 +92,6 @@ class Database(fixtures.Fixture):
             if os.path.exists(testdb):
                 return
         db_migrate.db_sync()
-        self.post_migrations()
         if sql_connection == "sqlite://":
             conn = self.engine.connect()
             self._DB = "".join(line for line in conn.connection.iterdump())
@@ -107,14 +111,22 @@ class Database(fixtures.Fixture):
             shutil.copyfile(paths.state_path_rel(self.sqlite_clean_db),
                             paths.state_path_rel(self.sqlite_db))
 
-    def post_migrations(self):
-        """Any addition steps that are needed outside of the migrations."""
+
+class SampleNetworks(fixtures.Fixture):
+
+    """Create sample networks in the database."""
+
+    def __init__(self, host=None):
+        self.host = host
+
+    def setUp(self):
+        super(SampleNetworks, self).setUp()
         ctxt = context.get_admin_context()
-        network = network_manager.VlanManager()
+        network = network_manager.VlanManager(host=self.host)
         bridge_interface = CONF.flat_interface or CONF.vlan_interface
         network.create_networks(ctxt,
                                 label='test',
-                                cidr=CONF.fixed_range,
+                                cidr='10.0.0.0/8',
                                 multi_host=CONF.multi_host,
                                 num_networks=CONF.num_networks,
                                 network_size=CONF.network_size,
@@ -164,19 +176,15 @@ class ServiceFixture(fixtures.Fixture):
         self.addCleanup(self.service.kill)
 
 
-class MoxStubout(fixtures.Fixture):
-    """Deal with code around mox and stubout as a fixture."""
+class TranslationFixture(fixtures.Fixture):
+    """Use gettext NullTranslation objects in tests."""
 
     def setUp(self):
-        super(MoxStubout, self).setUp()
-        # emulate some of the mox stuff, we can't use the metaclass
-        # because it screws with our generators
-        self.mox = mox.Mox()
-        self.stubs = stubout.StubOutForTesting()
-        self.addCleanup(self.stubs.UnsetAll)
-        self.addCleanup(self.stubs.SmartUnsetAll)
-        self.addCleanup(self.mox.UnsetStubs)
-        self.addCleanup(self.mox.VerifyAll)
+        super(TranslationFixture, self).setUp()
+        nulltrans = gettext.NullTranslations()
+        gettext_fixture = fixtures.MonkeyPatch('gettext.translation',
+                                               lambda *x, **y: nulltrans)
+        self.gettext_patcher = self.useFixture(gettext_fixture)
 
 
 class TestingException(Exception):
@@ -184,7 +192,12 @@ class TestingException(Exception):
 
 
 class TestCase(testtools.TestCase):
-    """Test case base class for all unit tests."""
+    """Test case base class for all unit tests.
+
+    Due to the slowness of DB access, please consider deriving from
+    `NoDBTestCase` first.
+    """
+    USES_DB = True
 
     def setUp(self):
         """Run before each test method to initialize test environment."""
@@ -199,6 +212,7 @@ class TestCase(testtools.TestCase):
             self.useFixture(fixtures.Timeout(test_timeout, gentle=True))
         self.useFixture(fixtures.NestedTempfile())
         self.useFixture(fixtures.TempHomeDir())
+        self.useFixture(TranslationFixture())
 
         if (os.environ.get('OS_STDOUT_CAPTURE') == 'True' or
                 os.environ.get('OS_STDOUT_CAPTURE') == '1'):
@@ -212,21 +226,38 @@ class TestCase(testtools.TestCase):
         self.log_fixture = self.useFixture(fixtures.FakeLogger())
         self.useFixture(conf_fixture.ConfFixture(CONF))
 
-        global _DB_CACHE
-        if not _DB_CACHE:
-            _DB_CACHE = Database(session, migration,
-                                    sql_connection=CONF.sql_connection,
-                                    sqlite_db=CONF.sqlite_db,
-                                    sqlite_clean_db=CONF.sqlite_clean_db)
-        self.useFixture(_DB_CACHE)
+        if self.USES_DB:
+            global _DB_CACHE
+            if not _DB_CACHE:
+                _DB_CACHE = Database(session, migration,
+                        sql_connection=CONF.database.connection,
+                        sqlite_db=CONF.sqlite_db,
+                        sqlite_clean_db=CONF.sqlite_clean_db)
 
-        mox_fixture = self.useFixture(MoxStubout())
+            self.useFixture(_DB_CACHE)
+
+        # NOTE(danms): Make sure to reset us back to non-remote objects
+        # for each test to avoid interactions. Also, backup the object
+        # registry.
+        objects_base.NovaObject.indirection_api = None
+        self._base_test_obj_backup = copy.copy(
+            objects_base.NovaObject._obj_classes)
+        self.addCleanup(self._restore_obj_registry)
+
+        mox_fixture = self.useFixture(moxstubout.MoxStubout())
         self.mox = mox_fixture.mox
         self.stubs = mox_fixture.stubs
         self.addCleanup(self._clear_attrs)
         self.useFixture(fixtures.EnvironmentVariable('http_proxy'))
         self.policy = self.useFixture(policy_fixture.PolicyFixture())
         CONF.set_override('fatal_exception_format_errors', True)
+        CONF.set_override('enabled', True, 'osapi_v3')
+        CONF.set_override('force_dhcp_release', False)
+        # This will be cleaned up by the NestedTempfile fixture
+        CONF.set_override('lock_path', tempfile.mkdtemp())
+
+    def _restore_obj_registry(self):
+        objects_base.NovaObject._obj_classes = self._base_test_obj_backup
 
     def _clear_attrs(self):
         # Delete attributes that don't start with _ so they don't pin
@@ -268,3 +299,12 @@ class TimeOverride(fixtures.Fixture):
         super(TimeOverride, self).setUp()
         timeutils.set_time_override()
         self.addCleanup(timeutils.clear_time_override)
+
+
+class NoDBTestCase(TestCase):
+    """
+    `NoDBTestCase` differs from TestCase in that DB access is not supported.
+    This makes tests run significantly faster. If possible, all new tests
+    should derive from this class.
+    """
+    USES_DB = False

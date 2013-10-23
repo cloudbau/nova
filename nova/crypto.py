@@ -40,6 +40,7 @@ from nova import db
 from nova import exception
 from nova.openstack.common import excutils
 from nova.openstack.common import fileutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.openstack.common import processutils
 from nova.openstack.common import timeutils
@@ -140,7 +141,8 @@ def generate_fingerprint(public_key):
                 f.write(public_key)
             return _generate_fingerprint(pubfile)
         except processutils.ProcessExecutionError:
-            raise exception.InvalidKeypair()
+            raise exception.InvalidKeypair(
+                reason=_('failed to generate fingerprint'))
 
 
 def generate_key_pair(bits=None):
@@ -230,10 +232,10 @@ def convert_from_sshrsa_to_pkcs8(pubkey):
     #              +- INTEGER 65537
 
     # Build the sequence for the bit string
-    n_val = eval(
-        '0x' + ''.join(['%02X' % struct.unpack('B', x)[0] for x in parts[2]]))
-    e_val = eval(
-        '0x' + ''.join(['%02X' % struct.unpack('B', x)[0] for x in parts[1]]))
+    n_val = int(
+        ''.join(['%02X' % struct.unpack('B', x)[0] for x in parts[2]]), 16)
+    e_val = int(
+        ''.join(['%02X' % struct.unpack('B', x)[0] for x in parts[1]]), 16)
     pkinfo = _to_sequence(univ.Integer(n_val), univ.Integer(e_val))
 
     # Convert the sequence into a bit string
@@ -324,7 +326,7 @@ def generate_x509_cert(user_id, project_id, bits=1024):
 
     with utils.tempdir() as tmpdir:
         keyfile = os.path.abspath(os.path.join(tmpdir, 'temp.key'))
-        csrfile = os.path.join(tmpdir, 'temp.csr')
+        csrfile = os.path.abspath(os.path.join(tmpdir, 'temp.csr'))
         utils.execute('openssl', 'genrsa', '-out', keyfile, str(bits))
         utils.execute('openssl', 'req', '-new', '-key', keyfile, '-out',
                       csrfile, '-batch', '-subj', subject)

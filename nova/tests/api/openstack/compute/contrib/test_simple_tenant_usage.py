@@ -59,7 +59,7 @@ FAKE_INST_TYPE = {'id': 1,
 
 def get_fake_db_instance(start, end, instance_id, tenant_id):
     sys_meta = utils.dict_to_metadata(
-        flavors.save_instance_type_info({}, FAKE_INST_TYPE))
+        flavors.save_flavor_info({}, FAKE_INST_TYPE))
     return {'id': instance_id,
             'uuid': '00000000-0000-0000-0000-00000000000000%02d' % instance_id,
             'image_ref': '1',
@@ -198,7 +198,7 @@ class SimpleTenantUsageTest(test.TestCase):
             uptime = delta.days * 24 * 3600 + delta.seconds
             self.assertEqual(int(servers[j]['uptime']), uptime)
             self.assertEqual(int(servers[j]['hours']), HOURS)
-            self.assertTrue(servers[j]['instance_id'] in uuids)
+            self.assertIn(servers[j]['instance_id'], uuids)
 
     def test_verify_show_cant_view_other_tenant(self):
         req = webob.Request.blank(
@@ -248,7 +248,7 @@ class SimpleTenantUsageSerializerTest(test.TestCase):
         not_seen = set(raw_usage.keys())
 
         for child in tree:
-            self.assertTrue(child.tag in not_seen)
+            self.assertIn(child.tag, not_seen)
             not_seen.remove(child.tag)
             self.assertEqual(str(raw_usage[child.tag]), child.text)
 
@@ -261,7 +261,7 @@ class SimpleTenantUsageSerializerTest(test.TestCase):
         not_seen = set(raw_usage.keys())
 
         for child in tree:
-            self.assertTrue(child.tag in not_seen)
+            self.assertIn(child.tag, not_seen)
             not_seen.remove(child.tag)
             if child.tag == 'server_usages':
                 for idx, gr_child in enumerate(child):
@@ -415,25 +415,25 @@ class SimpleTenantUsageControllerTest(test.TestCase):
         class FakeComputeAPI:
             def get_instance_type(self, context, flavor_type):
                 if flavor_type == 1:
-                    return flavors.get_default_instance_type()
+                    return flavors.get_default_flavor()
                 else:
                     raise exception.InstanceTypeNotFound(flavor_type)
 
         self.compute_api = FakeComputeAPI()
         self.context = None
 
-        now = datetime.datetime.now()
+        now = timeutils.utcnow()
         self.baseinst = dict(display_name='foo',
                              launched_at=now - datetime.timedelta(1),
                              terminated_at=now,
                              instance_type_id=1,
                              vm_state='deleted',
                              deleted=0)
-        basetype = flavors.get_default_instance_type()
+        basetype = flavors.get_default_flavor()
         sys_meta = utils.dict_to_metadata(
-            flavors.save_instance_type_info({}, basetype))
+            flavors.save_flavor_info({}, basetype))
         self.baseinst['system_metadata'] = sys_meta
-        self.basetype = flavors.extract_instance_type(self.baseinst)
+        self.basetype = flavors.extract_flavor(self.baseinst)
 
     def test_get_flavor_from_sys_meta(self):
         # Non-deleted instances get their type information from their
@@ -458,7 +458,7 @@ class SimpleTenantUsageControllerTest(test.TestCase):
                                      deleted=1)
         flavor = self.controller._get_flavor(self.context, self.compute_api,
                                              inst_without_sys_meta, {})
-        self.assertEqual(flavor, flavors.get_default_instance_type())
+        self.assertEqual(flavor, flavors.get_default_flavor())
 
     def test_get_flavor_from_deleted_with_id_of_deleted(self):
         # Verify the legacy behavior of instance_type_id pointing to a

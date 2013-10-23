@@ -23,7 +23,7 @@ from nova.compute import vm_states
 from nova import test
 
 
-class StatsTestCase(test.TestCase):
+class StatsTestCase(test.NoDBTestCase):
     def setUp(self):
         super(StatsTestCase, self).setUp()
         self.stats = stats.Stats()
@@ -173,8 +173,9 @@ class StatsTestCase(test.TestCase):
     def test_io_workload(self):
         vms = [vm_states.ACTIVE, vm_states.BUILDING, vm_states.PAUSED]
         tasks = [task_states.RESIZE_MIGRATING, task_states.REBUILDING,
-                      task_states.RESIZE_PREP, task_states.IMAGE_SNAPSHOT,
-                      task_states.IMAGE_BACKUP, task_states.RESCUING]
+                 task_states.RESIZE_PREP, task_states.IMAGE_SNAPSHOT,
+                 task_states.IMAGE_LIVE_SNAPSHOT, task_states.IMAGE_BACKUP,
+                 task_states.RESCUING]
 
         for state in vms:
             self.stats._increment("num_vm_" + state)
@@ -195,7 +196,6 @@ class StatsTestCase(test.TestCase):
 
         self.assertNotEqual(0, len(self.stats))
         self.assertEqual(1, len(self.stats.states))
-
         self.stats.clear()
 
         self.assertEqual(0, len(self.stats))

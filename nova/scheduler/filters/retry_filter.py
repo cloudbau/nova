@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.scheduler import filters
 
@@ -39,7 +40,9 @@ class RetryFilter(filters.BaseHostFilter):
         pass_msg = "passes" if passes else "fails"
 
         LOG.debug(_("Host %(host)s %(pass_msg)s.  Previously tried hosts: "
-                    "%(hosts)s") % locals())
+                    "%(hosts)s") % {'host': host,
+                                    'pass_msg': pass_msg,
+                                    'hosts': hosts})
 
         # Host passes if it's not in the list of previously attempted hosts:
         return passes

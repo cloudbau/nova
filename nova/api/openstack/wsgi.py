@@ -1,5 +1,6 @@
 # vim: tabstop=4 shiftwidth=4 softtabstop=4
 
+# Copyright 2013 IBM Corp.
 # Copyright 2011 OpenStack Foundation
 # All Rights Reserved.
 #
@@ -17,6 +18,7 @@
 
 import inspect
 import math
+import re
 import time
 from xml.dom import minidom
 
@@ -25,6 +27,8 @@ import webob
 
 from nova.api.openstack import xmlutil
 from nova import exception
+from nova.openstack.common import gettextutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
 from nova import wsgi
@@ -67,6 +71,17 @@ _ROUTES_METHODS = [
     'delete',
     'show',
     'update',
+]
+
+_SANITIZE_KEYS = ['adminPass', 'admin_pass']
+
+_SANITIZE_PATTERNS = [
+    re.compile(r'(adminPass\s*[=]\s*[\"\']).*?([\"\'])', re.DOTALL),
+    re.compile(r'(admin_pass\s*[=]\s*[\"\']).*?([\"\'])', re.DOTALL),
+    re.compile(r'(<adminPass>).*?(</adminPass>)', re.DOTALL),
+    re.compile(r'(<admin_pass>).*?(</admin_pass>)', re.DOTALL),
+    re.compile(r'([\"\']adminPass[\"\']\s*:\s*[\"\']).*?([\"\'])', re.DOTALL),
+    re.compile(r'([\"\']admin_pass[\"\']\s*:\s*[\"\']).*?([\"\'])', re.DOTALL)
 ]
 
 
@@ -175,6 +190,17 @@ class Request(webob.Request):
 
         return content_type
 
+    def best_match_language(self):
+        """Determine the best available language for the request.
+
+        :returns: the best language match or None if the 'Accept-Language'
+                  header was not available in the request.
+        """
+        if not self.accept_language:
+            return None
+        return self.accept_language.best_match(
+                gettextutils.get_available_languages('nova'))
+
 
 class ActionDispatcher(object):
     """Maps method name to local methods through action name."""
@@ -254,7 +280,7 @@ class XMLDeserializer(TextDeserializer):
         for node in parent.childNodes:
             if (node.localName == name and
                 node.namespaceURI and
-                node.namespaceURI == namespace):
+                    node.namespaceURI == namespace):
                 return node
         return None
 
@@ -660,12 +686,12 @@ class ResourceExceptionHandler(object):
             return True
 
         if isinstance(ex_value, exception.NotAuthorized):
-            msg = unicode(ex_value.message % ex_value.kwargs)
-            raise Fault(webob.exc.HTTPForbidden(explanation=msg))
+            raise Fault(webob.exc.HTTPForbidden(
+                    explanation=ex_value.format_message()))
         elif isinstance(ex_value, exception.Invalid):
-            msg = unicode(ex_value.message % ex_value.kwargs)
             raise Fault(exception.ConvertedException(
-                    code=ex_value.code, explanation=msg))
+                    code=ex_value.code,
+                    explanation=ex_value.format_message()))
 
         # Under python 2.6, TypeError's exception value is actually a string,
         # so test # here via ex_type instead:
@@ -684,6 +710,15 @@ class ResourceExceptionHandler(object):
 
         # We didn't handle the exception
         return False
+
+
+def sanitize(msg):
+    if not (key in msg for key in _SANITIZE_KEYS):
+        return msg
+
+    for pattern in _SANITIZE_PATTERNS:
+        msg = re.sub(pattern, r'\1****\2', msg)
+    return msg
 
 
 class Resource(wsgi.Application):
@@ -817,7 +852,11 @@ class Resource(wsgi.Application):
         except (KeyError, TypeError):
             raise exception.InvalidContentType(content_type=content_type)
 
-        return deserializer().deserialize(body)
+        if (hasattr(deserializer, 'want_controller')
+                and deserializer.want_controller):
+            return deserializer(self.controller).deserialize(body)
+        else:
+            return deserializer().deserialize(body)
 
     def pre_process_extensions(self, extensions, request, action_args):
         # List of callables for post-processing extensions
@@ -917,9 +956,10 @@ class Resource(wsgi.Application):
 
         if body:
             msg = _("Action: '%(action)s', body: "
-                    "%(body)s") % {'action': action, 'body': body}
-            LOG.debug(msg)
-        LOG.debug(_("Calling method %s") % meth)
+                    "%(body)s") % {'action': action,
+                                   'body': unicode(body, 'utf-8')}
+            LOG.debug(sanitize(msg))
+        LOG.debug(_("Calling method %s") % str(meth))
 
         # Now, deserialize the request body...
         try:
@@ -940,7 +980,11 @@ class Resource(wsgi.Application):
         project_id = action_args.pop("project_id", None)
         context = request.environ.get('nova.context')
         if (context and project_id and (project_id != context.project_id)):
-            msg = _("Malformed request url")
+            msg = _("Malformed request URL: URL's project_id '%(project_id)s'"
+                    " doesn't match Context's project_id"
+                    " '%(context_project_id)s'") % \
+                    {'project_id': project_id,
+                     'context_project_id': context.project_id}
             return Fault(webob.exc.HTTPBadRequest(explanation=msg))
 
         # Run pre-processing extensions
@@ -967,7 +1011,6 @@ class Resource(wsgi.Application):
 
             # Run post-processing extensions
             if resp_obj:
-                _set_request_id_header(request, resp_obj)
                 # Do a preserialize to set up the response object
                 serializers = getattr(meth, 'wsgi_serializers', {})
                 resp_obj._bind_method_serializers(serializers)
@@ -982,6 +1025,9 @@ class Resource(wsgi.Application):
             if resp_obj and not response:
                 response = resp_obj.serialize(request, accept,
                                               self.default_serializers)
+
+        if context and hasattr(response, 'headers'):
+            response.headers.add('x-compute-request-id', context.request_id)
 
         return response
 
@@ -1009,7 +1055,7 @@ class Resource(wsgi.Application):
                 meth = getattr(self.controller, action)
         except AttributeError:
             if (not self.wsgi_actions or
-                action not in _ROUTES_METHODS + ['action']):
+                    action not in _ROUTES_METHODS + ['action']):
                 # Propagate the error
                 raise
         else:
@@ -1154,6 +1200,7 @@ class Fault(webob.exc.HTTPException):
             409: "conflictingRequest",
             413: "overLimit",
             415: "badMediaType",
+            429: "overLimit",
             501: "notImplemented",
             503: "serviceUnavailable"}
 
@@ -1167,6 +1214,8 @@ class Fault(webob.exc.HTTPException):
     @webob.dec.wsgify(RequestClass=Request)
     def __call__(self, req):
         """Generate a WSGI response based on the exception passed to ctor."""
+
+        user_locale = req.best_match_language()
         # Replace the body with fault details.
         code = self.wrapped_exc.status_int
         fault_name = self._fault_names.get(code, "computeFault")
@@ -1174,11 +1223,13 @@ class Fault(webob.exc.HTTPException):
         LOG.debug(_("Returning %(code)s to user: %(explanation)s"),
                   {'code': code, 'explanation': explanation})
 
+        explanation = gettextutils.get_localized_message(explanation,
+                                                         user_locale)
         fault_data = {
             fault_name: {
                 'code': code,
                 'message': explanation}}
-        if code == 413:
+        if code == 413 or code == 429:
             retry = self.wrapped_exc.headers.get('Retry-After', None)
             if retry:
                 fault_data[fault_name]['retryAfter'] = retry
@@ -1204,17 +1255,17 @@ class Fault(webob.exc.HTTPException):
         return self.wrapped_exc.__str__()
 
 
-class OverLimitFault(webob.exc.HTTPException):
+class RateLimitFault(webob.exc.HTTPException):
     """
     Rate-limited request response.
     """
 
     def __init__(self, message, details, retry_time):
         """
-        Initialize new `OverLimitFault` with relevant information.
+        Initialize new `RateLimitFault` with relevant information.
         """
-        hdrs = OverLimitFault._retry_after(retry_time)
-        self.wrapped_exc = webob.exc.HTTPRequestEntityTooLarge(headers=hdrs)
+        hdrs = RateLimitFault._retry_after(retry_time)
+        self.wrapped_exc = webob.exc.HTTPTooManyRequests(headers=hdrs)
         self.content = {
             "overLimit": {
                 "code": self.wrapped_exc.status_int,
@@ -1237,8 +1288,18 @@ class OverLimitFault(webob.exc.HTTPException):
         Return the wrapped exception with a serialized body conforming to our
         error format.
         """
+        user_locale = request.best_match_language()
         content_type = request.best_match_content_type()
         metadata = {"attributes": {"overLimit": ["code", "retryAfter"]}}
+
+        self.content['overLimit']['message'] = \
+                gettextutils.get_localized_message(
+                        self.content['overLimit']['message'],
+                        user_locale)
+        self.content['overLimit']['details'] = \
+                gettextutils.get_localized_message(
+                        self.content['overLimit']['details'],
+                        user_locale)
 
         xml_serializer = XMLDictSerializer(metadata, XMLNS_V11)
         serializer = {

@@ -14,7 +14,7 @@
 #    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
 #    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
 #    License for the specific language governing permissions and limitations
-#    under the License
+#    under the License.
 
 import re
 import webob
@@ -23,6 +23,7 @@ from nova.api.openstack import extensions
 from nova.api.openstack import wsgi
 from nova import compute
 from nova import exception
+from nova.openstack.common.gettextutils import _
 
 
 authorize = extensions.extension_authorizer('compute', 'console_output')
@@ -52,7 +53,11 @@ class ConsoleOutputController(wsgi.Controller):
 
         if length is not None:
             try:
-                int(length)
+                # NOTE(maurosr): cast length into a string before cast into an
+                # integer to avoid thing like: int(2.5) which is 2 instead of
+                # raise ValueError like it would when we try int("2.5"). This
+                # can be removed once we have api validation landed.
+                int(str(length))
             except ValueError:
                 raise webob.exc.HTTPBadRequest(_('Length in request body must '
                                                  'be an integer value'))
@@ -67,7 +72,7 @@ class ConsoleOutputController(wsgi.Controller):
             raise webob.exc.HTTPConflict(explanation=e.format_message())
 
         # XML output is not correctly escaped, so remove invalid characters
-        remove_re = re.compile('[\x00-\x08\x0B-\x0C\x0E-\x1F-\x0D]')
+        remove_re = re.compile('[\x00-\x08\x0B-\x1F]')
         output = remove_re.sub('', output)
 
         return {'output': output}

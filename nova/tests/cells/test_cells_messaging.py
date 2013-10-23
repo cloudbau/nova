@@ -19,12 +19,19 @@ from oslo.config import cfg
 
 from nova.cells import messaging
 from nova.cells import utils as cells_utils
+from nova.compute import task_states
 from nova.compute import vm_states
 from nova import context
 from nova import db
 from nova import exception
+from nova.network import model as network_model
+from nova.objects import base as objects_base
+from nova.objects import fields as objects_fields
+from nova.objects import instance as instance_obj
+from nova.openstack.common import jsonutils
 from nova.openstack.common import rpc
 from nova.openstack.common import timeutils
+from nova.openstack.common import uuidutils
 from nova import test
 from nova.tests.cells import fakes
 from nova.tests import fake_instance_actions
@@ -259,6 +266,49 @@ class CellsMessageClassesTestCase(test.TestCase):
         self.assertEqual(method_kwargs, call_info['kwargs'])
         self.assertEqual(target_cell, call_info['routing_path'])
 
+    def test_child_targeted_message_with_object(self):
+        target_cell = 'api-cell!child-cell1'
+        method = 'our_fake_method'
+        direction = 'down'
+
+        call_info = {}
+
+        class CellsMsgingTestObject(objects_base.NovaObject):
+            """Test object.  We just need 1 field in order to test
+            that this gets serialized properly.
+            """
+            fields = {'test': objects_fields.StringField()}
+
+        test_obj = CellsMsgingTestObject()
+        test_obj.test = 'meow'
+
+        method_kwargs = dict(obj=test_obj, arg1=1, arg2=2)
+
+        def our_fake_method(message, **kwargs):
+            call_info['context'] = message.ctxt
+            call_info['routing_path'] = message.routing_path
+            call_info['kwargs'] = kwargs
+
+        fakes.stub_tgt_method(self, 'child-cell1', 'our_fake_method',
+                our_fake_method)
+
+        tgt_message = messaging._TargetedMessage(self.msg_runner,
+                                                  self.ctxt, method,
+                                                  method_kwargs, direction,
+                                                  target_cell)
+        tgt_message.process()
+
+        self.assertEqual(self.ctxt, call_info['context'])
+        self.assertEqual(target_cell, call_info['routing_path'])
+        self.assertEqual(3, len(call_info['kwargs']))
+        self.assertEqual(1, call_info['kwargs']['arg1'])
+        self.assertEqual(2, call_info['kwargs']['arg2'])
+        # Verify we get a new object with what we expect.
+        obj = call_info['kwargs']['obj']
+        self.assertIsInstance(obj, CellsMsgingTestObject)
+        self.assertNotEqual(id(test_obj), id(obj))
+        self.assertEqual(test_obj.test, obj.test)
+
     def test_grandchild_targeted_message(self):
         target_cell = 'api-cell!child-cell2!grandchild-cell1'
         method = 'our_fake_method'
@@ -313,7 +363,7 @@ class CellsMessageClassesTestCase(test.TestCase):
         self.assertEqual(method_kwargs, call_info['kwargs'])
         self.assertEqual(target_cell, call_info['routing_path'])
         self.assertFalse(response.failure)
-        self.assertTrue(response.value_or_raise(), 'our_fake_response')
+        self.assertEqual(response.value_or_raise(), 'our_fake_response')
 
     def test_grandchild_targeted_message_with_error(self):
         target_cell = 'api-cell!child-cell2!grandchild-cell1'
@@ -594,6 +644,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         methods_cls = self.tgt_msg_runner.methods_by_type['targeted']
         self.tgt_methods_cls = methods_cls
         self.tgt_compute_api = methods_cls.compute_api
+        self.tgt_host_api = methods_cls.host_api
         self.tgt_db_inst = methods_cls.db
         self.tgt_c_rpcapi = methods_cls.compute_rpcapi
 
@@ -608,18 +659,83 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                                                   self.tgt_cell_name,
                                                   host_sched_kwargs)
 
+    def test_build_instances(self):
+        build_inst_kwargs = {'filter_properties': {},
+                             'key1': 'value1',
+                             'key2': 'value2'}
+        self.mox.StubOutWithMock(self.tgt_scheduler, 'build_instances')
+        self.tgt_scheduler.build_instances(self.ctxt, build_inst_kwargs)
+        self.mox.ReplayAll()
+        self.src_msg_runner.build_instances(self.ctxt, self.tgt_cell_name,
+                build_inst_kwargs)
+
     def test_run_compute_api_method(self):
 
         instance_uuid = 'fake_instance_uuid'
-        method_info = {'method': 'reboot',
+        method_info = {'method': 'backup',
                        'method_args': (instance_uuid, 2, 3),
                        'method_kwargs': {'arg1': 'val1', 'arg2': 'val2'}}
-        self.mox.StubOutWithMock(self.tgt_compute_api, 'reboot')
+        self.mox.StubOutWithMock(self.tgt_compute_api, 'backup')
         self.mox.StubOutWithMock(self.tgt_db_inst, 'instance_get_by_uuid')
 
         self.tgt_db_inst.instance_get_by_uuid(self.ctxt,
                 instance_uuid).AndReturn('fake_instance')
-        self.tgt_compute_api.reboot(self.ctxt, 'fake_instance', 2, 3,
+        self.tgt_compute_api.backup(self.ctxt, 'fake_instance', 2, 3,
+                arg1='val1', arg2='val2').AndReturn('fake_result')
+        self.mox.ReplayAll()
+
+        response = self.src_msg_runner.run_compute_api_method(
+                self.ctxt,
+                self.tgt_cell_name,
+                method_info,
+                True)
+        result = response.value_or_raise()
+        self.assertEqual('fake_result', result)
+
+    def test_run_compute_api_method_expects_obj(self):
+        instance_uuid = 'fake_instance_uuid'
+        method_info = {'method': 'start',
+                       'method_args': (instance_uuid, 2, 3),
+                       'method_kwargs': {'arg1': 'val1', 'arg2': 'val2'}}
+        self.mox.StubOutWithMock(self.tgt_compute_api, 'start')
+        self.mox.StubOutWithMock(self.tgt_db_inst, 'instance_get_by_uuid')
+
+        self.tgt_db_inst.instance_get_by_uuid(self.ctxt,
+                instance_uuid).AndReturn('fake_instance')
+
+        def get_instance_mock():
+            # NOTE(comstud): This block of code simulates the following
+            # mox code:
+            #
+            # self.mox.StubOutWithMock(instance_obj, 'Instance',
+            #                          use_mock_anything=True)
+            # self.mox.StubOutWithMock(instance_obj.Instance,
+            #                          '_from_db_object')
+            # instance_mock = self.mox.CreateMock(instance_obj.Instance)
+            # instance_obj.Instance().AndReturn(instance_mock)
+            #
+            # Unfortunately, the above code fails on py27 do to some
+            # issue with the Mock object do to similar issue as this:
+            # https://code.google.com/p/pymox/issues/detail?id=35
+            #
+            class FakeInstance(object):
+                @classmethod
+                def _from_db_object(cls, ctxt, obj, db_obj):
+                    pass
+
+            instance_mock = FakeInstance()
+
+            def fake_instance():
+                return instance_mock
+
+            self.stubs.Set(instance_obj, 'Instance', fake_instance)
+            self.mox.StubOutWithMock(instance_mock, '_from_db_object')
+            return instance_mock
+
+        instance = get_instance_mock()
+        instance._from_db_object(
+                self.ctxt, instance, 'fake_instance').AndReturn(instance)
+        self.tgt_compute_api.start(self.ctxt, instance, 2, 3,
                 arg1='val1', arg2='val2').AndReturn('fake_result')
         self.mox.ReplayAll()
 
@@ -774,6 +890,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         result = response.value_or_raise()
         result.pop('created_at', None)
         result.pop('updated_at', None)
+        result.pop('disabled_reason', None)
         expected_result = dict(
             deleted=0, deleted_at=None,
             binary=fake_service['binary'],
@@ -847,7 +964,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         response = self.src_msg_runner.task_log_get_all(self.ctxt,
                 self.tgt_cell_name, task_name, begin, end, host=host,
                 state=state)
-        self.assertTrue(isinstance(response, list))
+        self.assertIsInstance(response, list)
         self.assertEqual(1, len(response))
         result = response[0].value_or_raise()
         self.assertEqual(['fake_result'], result)
@@ -879,7 +996,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                                                    self.tgt_cell_name,
                                                    'fake-uuid')
         result = response.value_or_raise()
-        self.assertEqual([fake_act], result)
+        self.assertEqual([jsonutils.to_primitive(fake_act)], result)
 
     def test_action_get_by_request_id(self):
         fake_uuid = fake_instance_actions.FAKE_UUID
@@ -894,7 +1011,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
         response = self.src_msg_runner.action_get_by_request_id(self.ctxt,
                 self.tgt_cell_name, 'fake-uuid', 'req-fake')
         result = response.value_or_raise()
-        self.assertEqual(fake_act, result)
+        self.assertEqual(jsonutils.to_primitive(fake_act), result)
 
     def test_action_events_get(self):
         fake_action_id = fake_instance_actions.FAKE_ACTION_ID1
@@ -909,7 +1026,7 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                                                          self.tgt_cell_name,
                                                          'fake-action')
         result = response.value_or_raise()
-        self.assertEqual(fake_events, result)
+        self.assertEqual(jsonutils.to_primitive(fake_events), result)
 
     def test_validate_console_port(self):
         instance_uuid = 'fake_instance_uuid'
@@ -932,6 +1049,297 @@ class CellsTargetedMethodsTestCase(test.TestCase):
                 console_type)
         result = response.value_or_raise()
         self.assertEqual('fake_result', result)
+
+    def test_get_migrations_for_a_given_cell(self):
+        filters = {'cell_name': 'child-cell2', 'status': 'confirmed'}
+        migrations_in_progress = [{'id': 123}]
+        self.mox.StubOutWithMock(self.tgt_compute_api,
+                                 'get_migrations')
+
+        self.tgt_compute_api.get_migrations(self.ctxt, filters).\
+            AndReturn(migrations_in_progress)
+        self.mox.ReplayAll()
+
+        responses = self.src_msg_runner.get_migrations(
+                self.ctxt,
+                self.tgt_cell_name, False, filters)
+        result = responses[0].value_or_raise()
+        self.assertEqual(migrations_in_progress, result)
+
+    def test_get_migrations_for_an_invalid_cell(self):
+        filters = {'cell_name': 'invalid_Cell', 'status': 'confirmed'}
+
+        responses = self.src_msg_runner.get_migrations(
+                self.ctxt,
+                'api_cell!invalid_cell', False, filters)
+
+        self.assertEqual(0, len(responses))
+
+    def test_call_compute_api_with_obj(self):
+        instance = instance_obj.Instance()
+        instance.uuid = uuidutils.generate_uuid()
+        self.mox.StubOutWithMock(instance, 'refresh')
+        # Using 'snapshot' for this test, because it
+        # takes args and kwargs.
+        self.mox.StubOutWithMock(self.tgt_compute_api, 'snapshot')
+        instance.refresh(self.ctxt)
+        self.tgt_compute_api.snapshot(
+                self.ctxt, instance, 'name',
+                extra_properties='props').AndReturn('foo')
+
+        self.mox.ReplayAll()
+        result = self.tgt_methods_cls._call_compute_api_with_obj(
+                self.ctxt, instance, 'snapshot', 'name',
+                extra_properties='props')
+        self.assertEqual('foo', result)
+
+    def test_call_compute_with_obj_unknown_instance(self):
+        instance = instance_obj.Instance()
+        instance.uuid = uuidutils.generate_uuid()
+        instance.vm_state = vm_states.ACTIVE
+        instance.task_state = None
+        self.mox.StubOutWithMock(instance, 'refresh')
+        self.mox.StubOutWithMock(self.tgt_msg_runner,
+                                 'instance_destroy_at_top')
+
+        instance.refresh(self.ctxt).AndRaise(
+                exception.InstanceNotFound(instance_id=instance.uuid))
+
+        self.tgt_msg_runner.instance_destroy_at_top(self.ctxt,
+                                                    {'uuid': instance.uuid})
+
+        self.mox.ReplayAll()
+        self.assertRaises(exception.InstanceNotFound,
+                          self.tgt_methods_cls._call_compute_api_with_obj,
+                          self.ctxt, instance, 'snapshot', 'name')
+
+    def _instance_update_helper(self, admin_state_reset):
+        class FakeMessage(object):
+            pass
+
+        message = FakeMessage()
+        message.ctxt = self.ctxt
+
+        instance = instance_obj.Instance()
+        instance.cell_name = self.tgt_cell_name
+        instance.obj_reset_changes()
+        instance.task_state = 'meow'
+        instance.vm_state = 'wuff'
+        instance.user_data = 'foo'
+        self.assertEqual(set(['user_data', 'vm_state', 'task_state']),
+                         instance.obj_what_changed())
+
+        self.mox.StubOutWithMock(instance, 'save')
+
+        def _check_object(*args, **kwargs):
+            # task_state and vm_state changes should have been cleared
+            # before calling save()
+            if admin_state_reset:
+                self.assertEqual(
+                        set(['user_data', 'vm_state', 'task_state']),
+                        instance.obj_what_changed())
+            else:
+                self.assertEqual(set(['user_data']),
+                                 instance.obj_what_changed())
+
+        instance.save(self.ctxt, expected_task_state='exp_task',
+                      expected_vm_state='exp_vm').WithSideEffects(
+                              _check_object)
+
+        self.mox.ReplayAll()
+
+        self.tgt_methods_cls.instance_update_from_api(
+                message,
+                instance,
+                expected_vm_state='exp_vm',
+                expected_task_state='exp_task',
+                admin_state_reset=admin_state_reset)
+
+    def test_instance_update_from_api(self):
+        self._instance_update_helper(False)
+
+    def test_instance_update_from_api_admin_state_reset(self):
+        self._instance_update_helper(True)
+
+    def _test_instance_action_method(self, method, args, kwargs,
+                                     expected_args, expected_kwargs,
+                                     expect_result):
+        class FakeMessage(object):
+            pass
+
+        message = FakeMessage()
+        message.ctxt = self.ctxt
+        message.need_response = expect_result
+
+        meth_cls = self.tgt_methods_cls
+        self.mox.StubOutWithMock(meth_cls, '_call_compute_api_with_obj')
+
+        method_corrections = {
+            'terminate': 'delete',
+            }
+        api_method = method_corrections.get(method, method)
+
+        meth_cls._call_compute_api_with_obj(
+                self.ctxt, 'fake-instance', api_method,
+                *expected_args, **expected_kwargs).AndReturn('meow')
+
+        self.mox.ReplayAll()
+
+        method_translations = {'revert_resize': 'revert_resize',
+                               'confirm_resize': 'confirm_resize',
+                               'reset_network': 'reset_network',
+                               'inject_network_info': 'inject_network_info',
+                              }
+        tgt_method = method_translations.get(method,
+                                             '%s_instance' % method)
+        result = getattr(meth_cls, tgt_method)(
+                message, 'fake-instance', *args, **kwargs)
+        if expect_result:
+            self.assertEqual('meow', result)
+
+    def test_start_instance(self):
+        self._test_instance_action_method('start', (), {}, (), {}, False)
+
+    def test_stop_instance_cast(self):
+        self._test_instance_action_method('stop', (), {}, (),
+                                          {'do_cast': True}, False)
+
+    def test_stop_instance_call(self):
+        self._test_instance_action_method('stop', (), {}, (),
+                                          {'do_cast': False}, True)
+
+    def test_reboot_instance(self):
+        kwargs = dict(reboot_type='HARD')
+        self._test_instance_action_method('reboot', (), kwargs, (),
+                                          kwargs, False)
+
+    def test_suspend_instance(self):
+        self._test_instance_action_method('suspend', (), {}, (), {}, False)
+
+    def test_resume_instance(self):
+        self._test_instance_action_method('resume', (), {}, (), {}, False)
+
+    def test_get_host_uptime(self):
+        host_name = "fake-host"
+        host_uptime = (" 08:32:11 up 93 days, 18:25, 12 users,  load average:"
+                       " 0.20, 0.12, 0.14")
+        self.mox.StubOutWithMock(self.tgt_host_api, 'get_host_uptime')
+        self.tgt_host_api.get_host_uptime(self.ctxt, host_name).\
+            AndReturn(host_uptime)
+        self.mox.ReplayAll()
+        response = self.src_msg_runner.get_host_uptime(self.ctxt,
+                                                       self.tgt_cell_name,
+                                                       host_name)
+        expected_host_uptime = response.value_or_raise()
+        self.assertEqual(host_uptime, expected_host_uptime)
+
+    def test_terminate_instance(self):
+        self._test_instance_action_method('terminate',
+                                          (), {}, (), {}, False)
+
+    def test_soft_delete_instance(self):
+        self._test_instance_action_method('soft_delete',
+                                          (), {}, (), {}, False)
+
+    def test_pause_instance(self):
+        self._test_instance_action_method('pause', (), {}, (), {}, False)
+
+    def test_unpause_instance(self):
+        self._test_instance_action_method('unpause', (), {}, (), {}, False)
+
+    def test_resize_instance(self):
+        kwargs = dict(flavor=dict(id=42, flavorid='orangemocchafrappuccino'),
+                      extra_instance_updates=dict(cow='moo'))
+        expected_kwargs = dict(flavor_id='orangemocchafrappuccino', cow='moo')
+        self._test_instance_action_method('resize', (), kwargs,
+                                          (), expected_kwargs,
+                                          False)
+
+    def test_live_migrate_instance(self):
+        kwargs = dict(block_migration='fake-block-mig',
+                      disk_over_commit='fake-commit',
+                      host_name='fake-host')
+        expected_args = ('fake-block-mig', 'fake-commit', 'fake-host')
+        self._test_instance_action_method('live_migrate', (), kwargs,
+                                          expected_args, {}, False)
+
+    def test_revert_resize(self):
+        self._test_instance_action_method('revert_resize',
+                                          (), {}, (), {}, False)
+
+    def test_confirm_resize(self):
+        self._test_instance_action_method('confirm_resize',
+                                          (), {}, (), {}, False)
+
+    def test_reset_network(self):
+        self._test_instance_action_method('reset_network',
+                                          (), {}, (), {}, False)
+
+    def test_inject_network_info(self):
+        self._test_instance_action_method('inject_network_info',
+                                          (), {}, (), {}, False)
+
+    def test_snapshot_instance(self):
+        inst = instance_obj.Instance()
+        meth_cls = self.tgt_methods_cls
+
+        self.mox.StubOutWithMock(inst, 'refresh')
+        self.mox.StubOutWithMock(inst, 'save')
+        self.mox.StubOutWithMock(meth_cls.compute_rpcapi, 'snapshot_instance')
+
+        def check_state(expected_task_state=None):
+            self.assertEqual(task_states.IMAGE_SNAPSHOT, inst.task_state)
+
+        inst.refresh()
+        inst.save(expected_task_state=None).WithSideEffects(check_state)
+
+        meth_cls.compute_rpcapi.snapshot_instance(self.ctxt,
+                                                  inst, 'image-id')
+
+        self.mox.ReplayAll()
+
+        class FakeMessage(object):
+            pass
+
+        message = FakeMessage()
+        message.ctxt = self.ctxt
+        message.need_response = False
+
+        meth_cls.snapshot_instance(message, inst, image_id='image-id')
+
+    def test_backup_instance(self):
+        inst = instance_obj.Instance()
+        meth_cls = self.tgt_methods_cls
+
+        self.mox.StubOutWithMock(inst, 'refresh')
+        self.mox.StubOutWithMock(inst, 'save')
+        self.mox.StubOutWithMock(meth_cls.compute_rpcapi, 'backup_instance')
+
+        def check_state(expected_task_state=None):
+            self.assertEqual(task_states.IMAGE_BACKUP, inst.task_state)
+
+        inst.refresh()
+        inst.save(expected_task_state=None).WithSideEffects(check_state)
+
+        meth_cls.compute_rpcapi.backup_instance(self.ctxt,
+                                                inst,
+                                                'image-id',
+                                                'backup-type',
+                                                'rotation')
+
+        self.mox.ReplayAll()
+
+        class FakeMessage(object):
+            pass
+
+        message = FakeMessage()
+        message.ctxt = self.ctxt
+        message.need_response = False
+
+        meth_cls.backup_instance(message, inst,
+                                 image_id='image-id',
+                                 backup_type='backup-type',
+                                 rotation='rotation')
 
 
 class CellsBroadcastMethodsTestCase(test.TestCase):
@@ -989,10 +1397,10 @@ class CellsBroadcastMethodsTestCase(test.TestCase):
         self.assertFalse(self.mid_methods_cls._at_the_top())
         self.assertFalse(self.src_methods_cls._at_the_top())
 
-    def test_instance_update_at_top(self):
+    def _test_instance_update_at_top(self, net_info):
         fake_info_cache = {'id': 1,
                            'instance': 'fake_instance',
-                           'other': 'moo'}
+                           'network_info': net_info}
         fake_sys_metadata = [{'id': 1,
                               'key': 'key1',
                               'value': 'value1'},
@@ -1011,7 +1419,7 @@ class CellsBroadcastMethodsTestCase(test.TestCase):
                          'other': 'meow'}
         expected_sys_metadata = {'key1': 'value1',
                                  'key2': 'value2'}
-        expected_info_cache = {'other': 'moo'}
+        expected_info_cache = {'network_info': "[]"}
         expected_cell_name = 'api-cell!child-cell2!grandchild-cell1'
         expected_instance = {'system_metadata': expected_sys_metadata,
                              'cell_name': expected_cell_name,
@@ -1033,11 +1441,19 @@ class CellsBroadcastMethodsTestCase(test.TestCase):
                                          expected_instance,
                                          update_cells=False)
         self.tgt_db_inst.instance_info_cache_update(self.ctxt, 'fake_uuid',
-                                                    expected_info_cache,
-                                                    update_cells=False)
+                                                    expected_info_cache)
         self.mox.ReplayAll()
 
         self.src_msg_runner.instance_update_at_top(self.ctxt, fake_instance)
+
+    def test_instance_update_at_top(self):
+        self._test_instance_update_at_top("[]")
+
+    def test_instance_update_at_top_netinfo_list(self):
+        self._test_instance_update_at_top([])
+
+    def test_instance_update_at_top_netinfo_model(self):
+        self._test_instance_update_at_top(network_model.NetworkInfo())
 
     def test_instance_update_at_top_with_building_state(self):
         fake_info_cache = {'id': 1,
@@ -1086,8 +1502,7 @@ class CellsBroadcastMethodsTestCase(test.TestCase):
                                          expected_instance,
                                          update_cells=False)
         self.tgt_db_inst.instance_info_cache_update(self.ctxt, 'fake_uuid',
-                                                    expected_info_cache,
-                                                    update_cells=False)
+                                                    expected_info_cache)
         self.mox.ReplayAll()
 
         self.src_msg_runner.instance_update_at_top(self.ctxt, fake_instance)
@@ -1417,3 +1832,200 @@ class CellsBroadcastMethodsTestCase(test.TestCase):
         self.mox.ReplayAll()
 
         self.src_msg_runner.consoleauth_delete_tokens(self.ctxt, fake_uuid)
+
+    def test_bdm_update_or_create_with_none_create(self):
+        fake_bdm = {'id': 'fake_id',
+                    'volume_id': 'fake_volume_id'}
+        expected_bdm = fake_bdm.copy()
+        expected_bdm.pop('id')
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_update_or_create')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_update_or_create')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_update_or_create')
+        self.tgt_db_inst.block_device_mapping_update_or_create(
+                self.ctxt, expected_bdm, legacy=False)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_update_or_create_at_top(self.ctxt,
+                                                        fake_bdm,
+                                                        create=None)
+
+    def test_bdm_update_or_create_with_true_create(self):
+        fake_bdm = {'id': 'fake_id',
+                    'volume_id': 'fake_volume_id'}
+        expected_bdm = fake_bdm.copy()
+        expected_bdm.pop('id')
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_create')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_create')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_create')
+        self.tgt_db_inst.block_device_mapping_create(
+                self.ctxt, fake_bdm, legacy=False)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_update_or_create_at_top(self.ctxt,
+                                                        fake_bdm,
+                                                        create=True)
+
+    def test_bdm_update_or_create_with_false_create_vol_id(self):
+        fake_bdm = {'id': 'fake_id',
+                    'instance_uuid': 'fake_instance_uuid',
+                    'device_name': 'fake_device_name',
+                    'volume_id': 'fake_volume_id'}
+        expected_bdm = fake_bdm.copy()
+        expected_bdm.pop('id')
+
+        fake_inst_bdms = [{'id': 1,
+                           'volume_id': 'not-a-match',
+                           'device_name': 'not-a-match'},
+                          {'id': 2,
+                           'volume_id': 'fake_volume_id',
+                           'device_name': 'not-a-match'},
+                          {'id': 3,
+                           'volume_id': 'not-a-match',
+                           'device_name': 'not-a-match'}]
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_update')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_update')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_get_all_by_instance')
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_update')
+
+        self.tgt_db_inst.block_device_mapping_get_all_by_instance(
+                self.ctxt, 'fake_instance_uuid').AndReturn(
+                        fake_inst_bdms)
+        # Should try to update ID 2.
+        self.tgt_db_inst.block_device_mapping_update(
+                self.ctxt, 2, expected_bdm, legacy=False)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_update_or_create_at_top(self.ctxt,
+                                                        fake_bdm,
+                                                        create=False)
+
+    def test_bdm_update_or_create_with_false_create_dev_name(self):
+        fake_bdm = {'id': 'fake_id',
+                    'instance_uuid': 'fake_instance_uuid',
+                    'device_name': 'fake_device_name',
+                    'volume_id': 'fake_volume_id'}
+        expected_bdm = fake_bdm.copy()
+        expected_bdm.pop('id')
+
+        fake_inst_bdms = [{'id': 1,
+                           'volume_id': 'not-a-match',
+                           'device_name': 'not-a-match'},
+                          {'id': 2,
+                           'volume_id': 'not-a-match',
+                           'device_name': 'fake_device_name'},
+                          {'id': 3,
+                           'volume_id': 'not-a-match',
+                           'device_name': 'not-a-match'}]
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_update')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_update')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_get_all_by_instance')
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_update')
+
+        self.tgt_db_inst.block_device_mapping_get_all_by_instance(
+                self.ctxt, 'fake_instance_uuid').AndReturn(
+                        fake_inst_bdms)
+        # Should try to update ID 2.
+        self.tgt_db_inst.block_device_mapping_update(
+                self.ctxt, 2, expected_bdm, legacy=False)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_update_or_create_at_top(self.ctxt,
+                                                        fake_bdm,
+                                                        create=False)
+
+    def test_bdm_destroy_by_volume(self):
+        fake_instance_uuid = 'fake-instance-uuid'
+        fake_volume_id = 'fake-volume-name'
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_destroy_by_instance_and_volume')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_destroy_by_instance_and_volume')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_destroy_by_instance_and_volume')
+        self.tgt_db_inst.block_device_mapping_destroy_by_instance_and_volume(
+                self.ctxt, fake_instance_uuid, fake_volume_id)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_destroy_at_top(self.ctxt, fake_instance_uuid,
+                                               volume_id=fake_volume_id)
+
+    def test_bdm_destroy_by_device(self):
+        fake_instance_uuid = 'fake-instance-uuid'
+        fake_device_name = 'fake-device-name'
+
+        # Shouldn't be called for these 2 cells
+        self.mox.StubOutWithMock(self.src_db_inst,
+                'block_device_mapping_destroy_by_instance_and_device')
+        self.mox.StubOutWithMock(self.mid_db_inst,
+                'block_device_mapping_destroy_by_instance_and_device')
+
+        self.mox.StubOutWithMock(self.tgt_db_inst,
+                'block_device_mapping_destroy_by_instance_and_device')
+        self.tgt_db_inst.block_device_mapping_destroy_by_instance_and_device(
+                self.ctxt, fake_instance_uuid, fake_device_name)
+
+        self.mox.ReplayAll()
+
+        self.src_msg_runner.bdm_destroy_at_top(self.ctxt, fake_instance_uuid,
+                                               device_name=fake_device_name)
+
+    def test_get_migrations(self):
+        self._setup_attrs(up=False)
+        filters = {'status': 'confirmed'}
+        migrations_from_cell1 = [{'id': 123}]
+        migrations_from_cell2 = [{'id': 456}]
+        self.mox.StubOutWithMock(self.mid_compute_api,
+                                 'get_migrations')
+
+        self.mid_compute_api.get_migrations(self.ctxt, filters).\
+            AndReturn(migrations_from_cell1)
+
+        self.mox.StubOutWithMock(self.tgt_compute_api,
+                                 'get_migrations')
+
+        self.tgt_compute_api.get_migrations(self.ctxt, filters).\
+            AndReturn(migrations_from_cell2)
+
+        self.mox.ReplayAll()
+
+        responses = self.src_msg_runner.get_migrations(
+                self.ctxt,
+                None, False, filters)
+        self.assertEquals(2, len(responses))
+        for response in responses:
+            self.assertIn(response.value_or_raise(), [migrations_from_cell1,
+                                                      migrations_from_cell2])

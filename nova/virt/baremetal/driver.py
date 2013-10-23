@@ -27,23 +27,20 @@ from nova.compute import power_state
 from nova import context as nova_context
 from nova import exception
 from nova.openstack.common import excutils
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import importutils
+from nova.openstack.common import jsonutils
 from nova.openstack.common import log as logging
-from nova import paths
 from nova.virt.baremetal import baremetal_states
 from nova.virt.baremetal import db
+from nova.virt.baremetal import pxe
 from nova.virt import driver
 from nova.virt import firewall
 from nova.virt.libvirt import imagecache
 
+LOG = logging.getLogger(__name__)
+
 opts = [
-    cfg.BoolOpt('inject_password',
-                default=True,
-                help='Whether baremetal compute injects password or not'),
-    cfg.StrOpt('injected_network_template',
-               default=paths.basedir_def('nova/virt/'
-                                         'baremetal/interfaces.template'),
-               help='Template file for injected network'),
     cfg.StrOpt('vif_driver',
                default='nova.virt.baremetal.vif_driver.BareMetalVIFDriver',
                help='Baremetal VIF driver.'),
@@ -67,9 +64,6 @@ opts = [
                help='Baremetal compute node\'s tftp root path'),
     ]
 
-
-LOG = logging.getLogger(__name__)
-
 baremetal_group = cfg.OptGroup(name='baremetal',
                                title='Baremetal Options')
 
@@ -77,6 +71,7 @@ CONF = cfg.CONF
 CONF.register_group(baremetal_group)
 CONF.register_opts(opts, baremetal_group)
 CONF.import_opt('host', 'nova.netconf')
+CONF.import_opt('my_ip', 'nova.netconf')
 
 DEFAULT_FIREWALL_DRIVER = "%s.%s" % (
     firewall.__name__,
@@ -164,9 +159,6 @@ class BareMetalDriver(driver.ComputeDriver):
         # TODO(deva): define the version properly elsewhere
         return 1
 
-    def legacy_nwinfo(self):
-        return True
-
     def list_instances(self):
         l = []
         context = nova_context.get_admin_context()
@@ -193,8 +185,8 @@ class BareMetalDriver(driver.ComputeDriver):
         for vol in block_device_mapping:
             connection_info = vol['connection_info']
             mountpoint = vol['mount_device']
-            self.attach_volume(
-                    connection_info, instance['name'], mountpoint)
+            self.attach_volume(None,
+                    connection_info, instance, mountpoint)
 
     def _detach_block_devices(self, instance, block_device_info):
         block_device_mapping = driver.\
@@ -203,7 +195,7 @@ class BareMetalDriver(driver.ComputeDriver):
             connection_info = vol['connection_info']
             mountpoint = vol['mount_device']
             self.detach_volume(
-                    connection_info, instance['name'], mountpoint)
+                    connection_info, instance, mountpoint)
 
     def _start_firewall(self, instance, network_info):
         self.firewall_driver.setup_basic_filtering(
@@ -248,8 +240,13 @@ class BareMetalDriver(driver.ComputeDriver):
                             injected_files=injected_files,
                             network_info=network_info,
                         )
-            self.driver.activate_bootloader(context, node, instance)
-            self.power_on(instance, node)
+            self.driver.activate_bootloader(context, node, instance,
+                                            network_info=network_info)
+            # NOTE(deva): ensure node is really off before we turn it on
+            #             fixes bug https://code.launchpad.net/bugs/1178919
+            self.power_off(instance, node)
+            self.power_on(context, instance, network_info, block_device_info,
+                          node)
             self.driver.activate_node(context, node, instance)
             _update_state(context, node, instance, baremetal_states.ACTIVE)
         except Exception:
@@ -286,7 +283,8 @@ class BareMetalDriver(driver.ComputeDriver):
                 "for instance %r") % instance['uuid'])
         _update_state(ctx, node, instance, state)
 
-    def destroy(self, instance, network_info, block_device_info=None):
+    def destroy(self, instance, network_info, block_device_info=None,
+                context=None):
         context = nova_context.get_admin_context()
 
         try:
@@ -330,7 +328,8 @@ class BareMetalDriver(driver.ComputeDriver):
                 "for instance %r") % instance['uuid'])
         pm.stop_console()
 
-    def power_on(self, instance, node=None):
+    def power_on(self, context, instance, network_info, block_device_info=None,
+                 node=None):
         """Power on the specified instance."""
         if not node:
             node = _get_baremetal_node_by_instance_uuid(instance['uuid'])
@@ -345,13 +344,15 @@ class BareMetalDriver(driver.ComputeDriver):
     def get_volume_connector(self, instance):
         return self.volume_driver.get_volume_connector(instance)
 
-    def attach_volume(self, connection_info, instance, mountpoint):
+    def attach_volume(self, context, connection_info, instance, mountpoint,
+                      encryption=None):
         return self.volume_driver.attach_volume(connection_info,
                                                 instance, mountpoint)
 
-    def detach_volume(self, connection_info, instance_name, mountpoint):
+    def detach_volume(self, connection_info, instance, mountpoint,
+                      encryption=None):
         return self.volume_driver.detach_volume(connection_info,
-                                                instance_name, mountpoint)
+                                                instance, mountpoint)
 
     def get_info(self, instance):
         inst_uuid = instance.get('uuid')
@@ -408,6 +409,9 @@ class BareMetalDriver(driver.ComputeDriver):
                'hypervisor_version': self.get_hypervisor_version(),
                'hypervisor_hostname': str(node['uuid']),
                'cpu_info': 'baremetal cpu',
+               'supported_instances':
+                        jsonutils.dumps(self.supported_instances),
+               'stats': self.extra_specs
                }
         return dic
 
@@ -474,12 +478,12 @@ class BareMetalDriver(driver.ComputeDriver):
             for pif in pifs:
                 if pif['vif_uuid']:
                     db.bm_interface_set_vif_uuid(context, pif['id'], None)
-        for (network, mapping) in network_info:
-            self.vif_driver.plug(instance, (network, mapping))
+        for vif in network_info:
+            self.vif_driver.plug(instance, vif)
 
     def _unplug_vifs(self, instance, network_info):
-        for (network, mapping) in network_info:
-            self.vif_driver.unplug(instance, (network, mapping))
+        for vif in network_info:
+            self.vif_driver.unplug(instance, vif)
 
     def manage_image_cache(self, context, all_instances):
         """Manage the local cache of images."""
@@ -489,7 +493,23 @@ class BareMetalDriver(driver.ComputeDriver):
         node = _get_baremetal_node_by_instance_uuid(instance['uuid'])
         return self.driver.get_console_output(node, instance)
 
-    def get_available_nodes(self):
+    def get_available_nodes(self, refresh=False):
         context = nova_context.get_admin_context()
         return [str(n['uuid']) for n in
                 db.bm_node_get_all(context, service_host=CONF.host)]
+
+    def dhcp_options_for_instance(self, instance):
+        # NOTE(deva): This only works for PXE driver currently:
+        # If not running the PXE driver, you should not enable
+        # DHCP updates in nova.conf.
+        bootfile_name = pxe.get_pxe_bootfile_name(instance)
+
+        opts = [{'opt_name': 'bootfile-name',
+                 'opt_value': bootfile_name},
+                {'opt_name': 'server-ip-address',
+                 'opt_value': CONF.my_ip},
+                {'opt_name': 'tftp-server',
+                 'opt_value': CONF.my_ip}
+               ]
+
+        return opts

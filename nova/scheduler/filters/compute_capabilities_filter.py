@@ -13,6 +13,7 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
 from nova.scheduler import filters
 from nova.scheduler.filters import extra_specs_ops
@@ -24,37 +25,51 @@ LOG = logging.getLogger(__name__)
 class ComputeCapabilitiesFilter(filters.BaseHostFilter):
     """HostFilter hard-coded to work with InstanceType records."""
 
-    def _satisfies_extra_specs(self, capabilities, instance_type):
-        """Check that the capabilities provided by the compute service
-        satisfy the extra specs associated with the instance type"""
+    # Instance type and host capabilities do not change within a request
+    run_filter_once_per_request = True
+
+    def _satisfies_extra_specs(self, host_state, instance_type):
+        """Check that the host_state provided by the compute service
+        satisfy the extra specs associated with the instance type.
+        """
         if 'extra_specs' not in instance_type:
             return True
 
         for key, req in instance_type['extra_specs'].iteritems():
             # Either not scope format, or in capabilities scope
             scope = key.split(':')
-            if len(scope) > 1 and scope[0] != "capabilities":
-                continue
-            elif scope[0] == "capabilities":
-                del scope[0]
-            cap = capabilities
+            if len(scope) > 1:
+                if scope[0] != "capabilities":
+                    continue
+                else:
+                    del scope[0]
+            cap = host_state
             for index in range(0, len(scope)):
                 try:
-                    cap = cap.get(scope[index], None)
+                    if not isinstance(cap, dict):
+                        if getattr(cap, scope[index], None) is None:
+                            # If can't find, check stats dict
+                            cap = cap.stats.get(scope[index], None)
+                        else:
+                            cap = getattr(cap, scope[index], None)
+                    else:
+                        cap = cap.get(scope[index], None)
                 except AttributeError:
                     return False
                 if cap is None:
                     return False
-            if not extra_specs_ops.match(cap, req):
+            if not extra_specs_ops.match(str(cap), req):
+                LOG.debug(_("extra_spec requirement '%(req)s' does not match "
+                    "%(cap)s'"), {'req': req, 'cap': cap})
                 return False
         return True
 
     def host_passes(self, host_state, filter_properties):
         """Return a list of hosts that can create instance_type."""
         instance_type = filter_properties.get('instance_type')
-        if not self._satisfies_extra_specs(host_state.capabilities,
+        if not self._satisfies_extra_specs(host_state,
                 instance_type):
             LOG.debug(_("%(host_state)s fails instance_type extra_specs "
-                    "requirements"), locals())
+                    "requirements"), {'host_state': host_state})
             return False
         return True

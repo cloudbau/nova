@@ -23,12 +23,16 @@ import random
 
 from oslo.config import cfg
 
-from nova.compute import flavors
+from nova.compute import rpcapi as compute_rpcapi
 from nova import exception
+from nova import notifier
+from nova.openstack.common.gettextutils import _
 from nova.openstack.common import log as logging
-from nova.openstack.common.notifier import api as notifier
+from nova.pci import pci_request
 from nova.scheduler import driver
 from nova.scheduler import scheduler_options
+from nova.scheduler import utils as scheduler_utils
+
 
 CONF = cfg.CONF
 LOG = logging.getLogger(__name__)
@@ -54,11 +58,13 @@ class FilterScheduler(driver.Scheduler):
     def __init__(self, *args, **kwargs):
         super(FilterScheduler, self).__init__(*args, **kwargs)
         self.options = scheduler_options.SchedulerOptions()
+        self.compute_rpcapi = compute_rpcapi.ComputeAPI()
+        self.notifier = notifier.get_notifier('scheduler')
 
     def schedule_run_instance(self, context, request_spec,
                               admin_password, injected_files,
                               requested_networks, is_first_time,
-                              filter_properties):
+                              filter_properties, legacy_bdm_in_spec):
         """This method is called from nova.compute.api to provision
         an instance.  We first create a build plan (a list of WeightedHosts)
         and then provision.
@@ -66,10 +72,9 @@ class FilterScheduler(driver.Scheduler):
         Returns a list of the instances created.
         """
         payload = dict(request_spec=request_spec)
-        notifier.notify(context, notifier.publisher_id("scheduler"),
-                        'scheduler.run_instance.start', notifier.INFO, payload)
+        self.notifier.info(context, 'scheduler.run_instance.start', payload)
 
-        instance_uuids = request_spec.pop('instance_uuids')
+        instance_uuids = request_spec.get('instance_uuids')
         LOG.info(_("Attempting to build %(num_instances)d instance(s) "
                     "uuids: %(instance_uuids)s"),
                   {'num_instances': len(instance_uuids),
@@ -78,6 +83,11 @@ class FilterScheduler(driver.Scheduler):
 
         weighed_hosts = self._schedule(context, request_spec,
                                        filter_properties, instance_uuids)
+
+        # NOTE: Pop instance_uuids as individual creates do not need the
+        # set of uuids. Do not pop before here as the upper exception
+        # handler fo NoValidHost needs the uuid to set error state
+        instance_uuids = request_spec.pop('instance_uuids')
 
         # NOTE(comstud): Make sure we do not pass this through.  It
         # contains an instance of RpcContext that cannot be serialized.
@@ -102,7 +112,8 @@ class FilterScheduler(driver.Scheduler):
                                          requested_networks,
                                          injected_files, admin_password,
                                          is_first_time,
-                                         instance_uuid=instance_uuid)
+                                         instance_uuid=instance_uuid,
+                                         legacy_bdm_in_spec=legacy_bdm_in_spec)
             except Exception as ex:
                 # NOTE(vish): we don't reraise the exception here to make sure
                 #             that all instances in the request get set to
@@ -114,35 +125,7 @@ class FilterScheduler(driver.Scheduler):
             retry = filter_properties.get('retry', {})
             retry['hosts'] = []
 
-        notifier.notify(context, notifier.publisher_id("scheduler"),
-                        'scheduler.run_instance.end', notifier.INFO, payload)
-
-    def schedule_prep_resize(self, context, image, request_spec,
-                             filter_properties, instance, instance_type,
-                             reservations):
-        """Select a target for resize.
-
-        Selects a target host for the instance, post-resize, and casts
-        the prep_resize operation to it.
-        """
-
-        weighed_hosts = self._schedule(context, request_spec,
-                filter_properties, [instance['uuid']])
-        if not weighed_hosts:
-            raise exception.NoValidHost(reason="")
-        weighed_host = weighed_hosts.pop(0)
-
-        self._post_select_populate_filter_properties(filter_properties,
-                weighed_host.obj)
-
-        # context is not serializable
-        filter_properties.pop('context', None)
-
-        # Forward off to the host
-        self.compute_rpcapi.prep_resize(context, image, instance,
-                instance_type, weighed_host.obj.host, reservations,
-                request_spec=request_spec, filter_properties=filter_properties,
-                node=weighed_host.obj.nodename)
+        self.notifier.info(context, 'scheduler.run_instance.end', payload)
 
     def select_hosts(self, context, request_spec, filter_properties):
         """Selects a filtered set of hosts."""
@@ -153,18 +136,33 @@ class FilterScheduler(driver.Scheduler):
             raise exception.NoValidHost(reason="")
         return hosts
 
+    def select_destinations(self, context, request_spec, filter_properties):
+        """Selects a filtered set of hosts and nodes."""
+        num_instances = request_spec['num_instances']
+        instance_uuids = request_spec.get('instance_uuids')
+        selected_hosts = self._schedule(context, request_spec,
+                                        filter_properties, instance_uuids)
+
+        # Couldn't fulfill the request_spec
+        if len(selected_hosts) < num_instances:
+            raise exception.NoValidHost(reason='')
+
+        dests = [dict(host=host.obj.host, nodename=host.obj.nodename,
+                      limits=host.obj.limits) for host in selected_hosts]
+        return dests
+
     def _provision_resource(self, context, weighed_host, request_spec,
             filter_properties, requested_networks, injected_files,
-            admin_password, is_first_time, instance_uuid=None):
+            admin_password, is_first_time, instance_uuid=None,
+            legacy_bdm_in_spec=True):
         """Create the requested resource in this Zone."""
         # NOTE(vish): add our current instance back into the request spec
         request_spec['instance_uuids'] = [instance_uuid]
         payload = dict(request_spec=request_spec,
                        weighted_host=weighed_host.to_dict(),
                        instance_id=instance_uuid)
-        notifier.notify(context, notifier.publisher_id("scheduler"),
-                        'scheduler.run_instance.scheduled', notifier.INFO,
-                        payload)
+        self.notifier.info(context,
+                           'scheduler.run_instance.scheduled', payload)
 
         # Update the metadata if necessary
         scheduler_hints = filter_properties.get('scheduler_hints') or {}
@@ -175,44 +173,28 @@ class FilterScheduler(driver.Scheduler):
             values.update({'group': group})
             values = {'system_metadata': values}
 
-        updated_instance = driver.instance_update_db(context,
-                instance_uuid, extra_values=values)
+        try:
+            updated_instance = driver.instance_update_db(context,
+                    instance_uuid, extra_values=values)
 
-        self._post_select_populate_filter_properties(filter_properties,
-                weighed_host.obj)
+        except exception.InstanceNotFound:
+            LOG.warning(_("Instance disappeared during scheduling"),
+                        context=context, instance_uuid=instance_uuid)
 
-        self.compute_rpcapi.run_instance(context, instance=updated_instance,
-                host=weighed_host.obj.host,
-                request_spec=request_spec, filter_properties=filter_properties,
-                requested_networks=requested_networks,
-                injected_files=injected_files,
-                admin_password=admin_password, is_first_time=is_first_time,
-                node=weighed_host.obj.nodename)
+        else:
+            scheduler_utils.populate_filter_properties(filter_properties,
+                    weighed_host.obj)
 
-    def _post_select_populate_filter_properties(self, filter_properties,
-            host_state):
-        """Add additional information to the filter properties after a node has
-        been selected by the scheduling process.
-        """
-        # Add a retry entry for the selected compute host and node:
-        self._add_retry_host(filter_properties, host_state.host,
-                             host_state.nodename)
-
-        self._add_oversubscription_policy(filter_properties, host_state)
-
-    def _add_retry_host(self, filter_properties, host, node):
-        """Add a retry entry for the selected compute node. In the event that
-        the request gets re-scheduled, this entry will signal that the given
-        node has already been tried.
-        """
-        retry = filter_properties.get('retry', None)
-        if not retry:
-            return
-        hosts = retry['hosts']
-        hosts.append([host, node])
-
-    def _add_oversubscription_policy(self, filter_properties, host_state):
-        filter_properties['limits'] = host_state.limits
+            self.compute_rpcapi.run_instance(context,
+                    instance=updated_instance,
+                    host=weighed_host.obj.host,
+                    request_spec=request_spec,
+                    filter_properties=filter_properties,
+                    requested_networks=requested_networks,
+                    injected_files=injected_files,
+                    admin_password=admin_password, is_first_time=is_first_time,
+                    node=weighed_host.obj.nodename,
+                    legacy_bdm_in_spec=legacy_bdm_in_spec)
 
     def _get_configuration_options(self):
         """Fetch options dictionary. Broken out for testing."""
@@ -227,6 +209,10 @@ class FilterScheduler(driver.Scheduler):
         os_type = request_spec['instance_properties']['os_type']
         filter_properties['project_id'] = project_id
         filter_properties['os_type'] = os_type
+        pci_requests = pci_request.get_pci_requests_from_flavor(
+            request_spec.get('instance_type') or {})
+        if pci_requests:
+            filter_properties['pci_requests'] = pci_requests
 
     def _max_attempts(self):
         max_attempts = CONF.scheduler_max_attempts
@@ -241,7 +227,7 @@ class FilterScheduler(driver.Scheduler):
         """
         exc = retry.pop('exc', None)  # string-ified exception from compute
         if not exc:
-            return  # no exception info from a prevous attempt, skip
+            return  # no exception info from a previous attempt, skip
 
         hosts = retry.get('hosts', None)
         if not hosts:
@@ -260,12 +246,14 @@ class FilterScheduler(driver.Scheduler):
         request. If maximum retries is exceeded, raise NoValidHost.
         """
         max_attempts = self._max_attempts()
-        retry = filter_properties.pop('retry', {})
+        force_hosts = filter_properties.get('force_hosts', [])
+        force_nodes = filter_properties.get('force_nodes', [])
 
-        if max_attempts == 1:
+        if max_attempts == 1 or force_hosts or force_nodes:
             # re-scheduling is disabled.
             return
 
+        retry = filter_properties.pop('retry', {})
         # retry is enabled, update attempt count:
         if retry:
             retry['num_attempts'] += 1
@@ -343,7 +331,7 @@ class FilterScheduler(driver.Scheduler):
         for num in xrange(num_instances):
             # Filter local hosts based on requirements ...
             hosts = self.host_manager.get_filtered_hosts(hosts,
-                    filter_properties)
+                    filter_properties, index=num)
             if not hosts:
                 # Can't get any more locally.
                 break
@@ -371,32 +359,3 @@ class FilterScheduler(driver.Scheduler):
             if update_group_hosts is True:
                 filter_properties['group_hosts'].append(chosen_host.obj.host)
         return selected_hosts
-
-    def _assert_compute_node_has_enough_memory(self, context,
-                                              instance_ref, dest):
-        """Checks if destination host has enough memory for live migration.
-
-
-        :param context: security context
-        :param instance_ref: nova.db.sqlalchemy.models.Instance object
-        :param dest: destination host
-
-        """
-        compute = self._get_compute_info(context, dest)
-        node = compute.get('hypervisor_hostname')
-        host_state = self.host_manager.host_state_cls(dest, node)
-        host_state.update_from_compute_node(compute)
-
-        instance_type = flavors.extract_instance_type(instance_ref)
-        filter_properties = {'instance_type': instance_type}
-
-        hosts = self.host_manager.get_filtered_hosts([host_state],
-                                                     filter_properties,
-                                                     'RamFilter')
-        if not hosts:
-            instance_uuid = instance_ref['uuid']
-            reason = (_("Unable to migrate %(instance_uuid)s to %(dest)s: "
-                        "Lack of memory")
-                      % {'instance_uuid': instance_uuid,
-                         'dest': dest})
-            raise exception.MigrationPreCheckError(reason=reason)

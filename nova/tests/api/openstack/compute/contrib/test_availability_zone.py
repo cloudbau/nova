@@ -24,6 +24,7 @@ from nova.openstack.common import jsonutils
 from nova import servicegroup
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import matchers
 
 
 def fake_service_get_all(context, disabled=None):
@@ -56,7 +57,7 @@ def fake_service_get_all(context, disabled=None):
                                datetime.datetime(2012, 12, 26, 14, 45, 25, 0),
                                "fake_host-1", False),
                 __fake_service("nova-sched", "internal",
-                               datetime.datetime(2012, 11, 14, 9, 57, 03, 0),
+                               datetime.datetime(2012, 11, 14, 9, 57, 3, 0),
                                datetime.datetime(2012, 12, 26, 14, 45, 25, 0),
                                "fake_host-1", False),
                 __fake_service("nova-network", "internal",
@@ -73,9 +74,14 @@ def fake_set_availability_zones(context, services):
     return services
 
 
-class AvailabilityZoneApiTest(test.TestCase):
+def fake_get_availability_zones(context):
+    return ['nova'], []
+
+
+class AvailabilityZoneApiTest(test.NoDBTestCase):
     def setUp(self):
         super(AvailabilityZoneApiTest, self).setUp()
+        availability_zones.reset_cache()
         self.stubs.Set(db, 'service_get_all', fake_service_get_all)
         self.stubs.Set(availability_zones, 'set_availability_zones',
                        fake_set_availability_zones)
@@ -102,7 +108,7 @@ class AvailabilityZoneApiTest(test.TestCase):
         self.assertEqual(resp.status_int, 200)
         resp_dict = jsonutils.loads(resp.body)
 
-        self.assertTrue('availabilityZoneInfo' in resp_dict)
+        self.assertIn('availabilityZoneInfo', resp_dict)
         zones = resp_dict['availabilityZoneInfo']
         self.assertEqual(len(zones), 2)
         self.assertEqual(zones[0]['zoneName'], u'zone-1')
@@ -150,7 +156,7 @@ class AvailabilityZoneApiTest(test.TestCase):
         req.environ['nova.context'] = context.get_admin_context()
         resp_dict = availabilityZone.detail(req)
 
-        self.assertTrue('availabilityZoneInfo' in resp_dict)
+        self.assertIn('availabilityZoneInfo', resp_dict)
         zones = resp_dict['availabilityZoneInfo']
         self.assertEqual(len(zones), 3)
 
@@ -201,8 +207,25 @@ class AvailabilityZoneApiTest(test.TestCase):
         _assertZone(z1[4], l7[0], l7[1])
         _assertZone(z2[0], l8[0], l8[1])
 
+    def test_availability_zone_detail_no_services(self):
+        expected_response = {'availabilityZoneInfo':
+                                 [{'zoneState': {'available': True},
+                             'hosts': {},
+                             'zoneName': 'nova'}]}
+        self.stubs.Set(availability_zones, 'get_availability_zones',
+                       fake_get_availability_zones)
+        availabilityZone = availability_zone.AvailabilityZoneController()
 
-class AvailabilityZoneSerializerTest(test.TestCase):
+        req = webob.Request.blank('/v2/fake/os-availability-zone/detail')
+        req.method = 'GET'
+        req.environ['nova.context'] = context.get_admin_context()
+        resp_dict = availabilityZone.detail(req)
+
+        self.assertThat(resp_dict,
+                        matchers.DictMatches(expected_response))
+
+
+class AvailabilityZoneSerializerTest(test.NoDBTestCase):
     def test_availability_zone_index_detail_serializer(self):
         def _verify_zone(zone_dict, tree):
             self.assertEqual(tree.tag, 'availabilityZone')
@@ -211,10 +234,10 @@ class AvailabilityZoneSerializerTest(test.TestCase):
                              tree[0].get('available'))
 
             for _idx, host_child in enumerate(tree[1]):
-                self.assertTrue(host_child.get('name') in zone_dict['hosts'])
+                self.assertIn(host_child.get('name'), zone_dict['hosts'])
                 svcs = zone_dict['hosts'][host_child.get('name')]
                 for _idx, svc_child in enumerate(host_child[0]):
-                    self.assertTrue(svc_child.get('name') in svcs)
+                    self.assertIn(svc_child.get('name'), svcs)
                     svc = svcs[svc_child.get('name')]
                     self.assertEqual(len(svc_child), 1)
 

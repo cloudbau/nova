@@ -21,10 +21,13 @@ import webob
 from nova.api.openstack import wsgi
 from nova import compute
 from nova.compute import vm_states
+from nova import db
 from nova import exception
+from nova.objects import instance as instance_obj
 from nova.openstack.common import jsonutils
 from nova import test
 from nova.tests.api.openstack import fakes
+from nova.tests import fake_instance
 
 
 SENTINEL = object()
@@ -32,7 +35,8 @@ SENTINEL = object()
 
 def fake_compute_get(*args, **kwargs):
     def _return_server(*_args, **_kwargs):
-        return fakes.stub_instance(*args, **kwargs)
+        inst = fakes.stub_instance(*args, **kwargs)
+        return fake_instance.fake_instance_obj(_args[1], **inst)
     return _return_server
 
 
@@ -46,6 +50,8 @@ class HideServerAddressesTest(test.TestCase):
             osapi_compute_extension=[
                 'nova.api.openstack.compute.contrib.select_extensions'],
             osapi_compute_ext_list=['Hide_server_addresses'])
+        return_server = fakes.fake_instance_get()
+        self.stubs.Set(db, 'instance_get_by_uuid', return_server)
 
     def _make_request(self, url):
         req = webob.Request.blank(url)
@@ -106,7 +112,9 @@ class HideServerAddressesTest(test.TestCase):
         instances = [instance_0, instance_1]
 
         def get_all(*args, **kwargs):
-            return instances
+            fields = instance_obj.INSTANCE_DEFAULT_FIELDS
+            return instance_obj._make_instance_list(
+                args[1], instance_obj.InstanceList(), instances, fields)
 
         self.stubs.Set(compute.api.API, 'get_all', get_all)
         res = self._make_request('/v2/fake/servers/detail')
