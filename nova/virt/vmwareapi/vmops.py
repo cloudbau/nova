@@ -115,6 +115,22 @@ class VMwareVMOps(object):
         LOG.debug(_("Got total of %s instances") % str(len(lst_vm_names)))
         return lst_vm_names
 
+    def _extend_virtual_disk(self, instance, requested_size, name,
+                             datacenter):
+        service_content = self._session._get_vim().get_service_content()
+        LOG.debug(_("Extending root virtual disk to %s"), requested_size)
+        vmdk_extend_task = self._session._call_method(
+                self._session._get_vim(),
+                "ExtendVirtualDisk_Task",
+                service_content.virtualDiskManager,
+                name=name,
+                datacenter=datacenter,
+                newCapacityKb=requested_size,
+                eagerZero=False)
+        self._session._wait_for_task(instance['uuid'],
+                                     vmdk_extend_task)
+        LOG.debug(_("Extended root virtual disk"))
+
     def spawn(self, context, instance, image_meta, network_info,
               block_device_info=None):
         """
@@ -167,6 +183,13 @@ class VMwareVMOps(object):
 
         (vmdk_file_size_in_kb, os_type, adapter_type,
             disk_type, vif_model) = _get_image_properties()
+
+        root_gb = instance['root_gb']
+        root_gb_in_kb = root_gb * 1024 * 1024
+        if root_gb_in_kb and vmdk_file_size_in_kb > root_gb_in_kb:
+            reason = _("Image disk size greater than requested disk size")
+            raise exception.InstanceUnacceptable(instance_id=instance['uuid'],
+                                                 reason=reason)
 
         vm_folder_ref = self._get_vmfolder_ref()
         res_pool_ref = self._get_res_pool_ref()
@@ -310,7 +333,7 @@ class VMwareVMOps(object):
                          'data_store_name': data_store_name},
                       instance=instance)
 
-        def _copy_virtual_disk():
+        def _copy_virtual_disk(source, dest):
             """Copy a sparse virtual disk to a thin virtual disk."""
             # Copy a sparse virtual disk to a thin virtual disk. This is also
             # done to generate the meta-data file whose specifics
@@ -325,16 +348,16 @@ class VMwareVMOps(object):
                         "data_store_name": data_store_name,
                         "disk_type": disk_type},
                       instance=instance)
-            vmdk_copy_spec = vm_util.get_vmdk_create_spec(client_factory,
-                                    vmdk_file_size_in_kb, adapter_type,
-                                    disk_type)
+            vmdk_copy_spec = self.get_copy_virtual_disk_spec(client_factory,
+                                                             adapter_type,
+                                                             disk_type)
             vmdk_copy_task = self._session._call_method(
                 self._session._get_vim(),
                 "CopyVirtualDisk_Task",
                 service_content.virtualDiskManager,
-                sourceName=sparse_uploaded_vmdk_path,
+                sourceName=source,
                 sourceDatacenter=self._get_datacenter_ref_and_name()[0],
-                destName=uploaded_vmdk_path,
+                destName=dest,
                 destSpec=vmdk_copy_spec)
             self._session._wait_for_task(instance['uuid'], vmdk_copy_task)
             LOG.debug(_("Copied Virtual Disk of size %(vmdk_file_size_in_kb)s"
@@ -349,20 +372,17 @@ class VMwareVMOps(object):
                 self._default_root_device, block_device_info)
 
         if not ebs_root:
+
             linked_clone = CONF.use_linked_clone
-            if linked_clone:
-                upload_folder = self._instance_path_base
-                upload_name = instance['image_ref']
-            else:
-                upload_folder = instance['uuid']
-                upload_name = instance['name']
+            upload_folder = self._instance_path_base
+            upload_name = instance['image_ref']
 
             # The vmdk meta-data file
             uploaded_vmdk_name = "%s/%s.vmdk" % (upload_folder, upload_name)
             uploaded_vmdk_path = vm_util.build_datastore_path(data_store_name,
                                                 uploaded_vmdk_name)
 
-            if not (linked_clone and self._check_if_folder_file_exists(
+            if not (self._check_if_folder_file_exists(
                                         data_store_ref, data_store_name,
                                         upload_folder, upload_name + ".vmdk")):
 
@@ -394,18 +414,64 @@ class VMwareVMOps(object):
                 if disk_type == "sparse":
                     # Copy the sparse virtual disk to a thin virtual disk.
                     disk_type = "thin"
-                    _copy_virtual_disk()
+                    _copy_virtual_disk(sparse_uploaded_vmdk_path,
+                                       uploaded_vmdk_path)
                     _delete_disk_file(sparse_uploaded_vmdk_path)
             else:
                 # linked clone base disk exists
                 if disk_type == "sparse":
                     disk_type = "thin"
 
-            # Attach the vmdk uploaded to the VM.
+            # Extend the disk size if necessary
+            if not linked_clone:
+                # If we are not using linked_clone, copy the image from
+                # the cache into the instance directory.  If we are using
+                # linked clone it is references from the cache directory
+                dest_folder = instance['uuid']
+                dest_name = instance['name']
+                dest_vmdk_name = "%s/%s.vmdk" % (dest_folder,
+                                                         dest_name)
+                dest_vmdk_path = vm_util.build_datastore_path(
+                    data_store_name, dest_vmdk_name)
+                _copy_virtual_disk(uploaded_vmdk_path, dest_vmdk_path)
+
+                root_vmdk_path = dest_vmdk_path
+                if root_gb_in_kb > vmdk_file_size_in_kb:
+                    self._extend_virtual_disk(instance, root_gb_in_kb,
+                                              root_vmdk_path, dc_ref)
+            else:
+                root_vmdk_name = "%s/%s.%s.vmdk" % (upload_folder, upload_name,
+                                                    root_gb)
+                root_vmdk_path = vm_util.build_datastore_path(data_store_name,
+                                                              root_vmdk_name)
+                if not self._check_if_folder_file_exists(
+                                        data_store_ref, data_store_name,
+                                        upload_folder,
+                                        upload_name + ".%s.vmdk" % root_gb):
+                    dc_ref = self._get_datacenter_ref_and_name()[0]
+                    LOG.debug(_("Copying root disk of size %sGb"), root_gb)
+                    copy_spec = self.get_copy_virtual_disk_spec(
+                            client_factory, adapter_type, disk_type)
+                    vmdk_copy_task = self._session._call_method(
+                        self._session._get_vim(),
+                        "CopyVirtualDisk_Task",
+                        service_content.virtualDiskManager,
+                        sourceName=uploaded_vmdk_path,
+                        sourceDatacenter=dc_ref,
+                        destName=root_vmdk_path,
+                        destSpec=copy_spec)
+                    self._session._wait_for_task(instance['uuid'],
+                                                 vmdk_copy_task)
+                    if root_gb_in_kb > vmdk_file_size_in_kb:
+                        self._extend_virtual_disk(instance, root_gb_in_kb,
+                                                  root_vmdk_path, dc_ref)
+
+            # Attach the root disk to the VM.
             self._volumeops.attach_disk_to_vm(
                                 vm_ref, instance,
-                                adapter_type, disk_type, uploaded_vmdk_path,
-                                vmdk_file_size_in_kb, linked_clone)
+                                adapter_type, disk_type, root_vmdk_path,
+                                root_gb_in_kb, linked_clone)
+
         else:
             # Attach the root disk to the VM.
             root_disk = driver.block_device_info_get_mapping(
@@ -425,8 +491,8 @@ class VMwareVMOps(object):
             LOG.debug(_("Powered on the VM instance"), instance=instance)
         _power_on_vm()
 
-    def _get_copy_virtual_disk_spec(self, client_factory, adapter_type,
-                                    disk_type):
+    def get_copy_virtual_disk_spec(self, client_factory, adapter_type,
+                                   disk_type):
         return vm_util.get_copy_virtual_disk_spec(client_factory,
                                                   adapter_type,
                                                   disk_type)
@@ -521,11 +587,11 @@ class VMwareVMOps(object):
         dc_ref = self._get_datacenter_ref_and_name()[0]
 
         def _copy_vmdk_content():
-            # Copy the contents of the disk ( or disks, if there were snapshots
+            # Copy the contents of the disk (or disks, if there were snapshots
             # done earlier) to a temporary vmdk file.
-            copy_spec = self._get_copy_virtual_disk_spec(client_factory,
-                                                         adapter_type,
-                                                         disk_type)
+            copy_spec = self.get_copy_virtual_disk_spec(client_factory,
+                                                        adapter_type,
+                                                        disk_type)
             LOG.debug(_('Copying disk data before snapshot of the VM'),
                       instance=instance)
             copy_disk_task = self._session._call_method(
@@ -1332,8 +1398,8 @@ class VMwareVCVMOps(VMwareVMOps):
     when invoked on Virtual Center instead of ESX host.
     """
 
-    def _get_copy_virtual_disk_spec(self, client_factory, adapter_type,
-                                    disk_type):
+    def get_copy_virtual_disk_spec(self, client_factory, adapter_type,
+                                   disk_type):
         LOG.debug(_("Will copy while retaining adapter type "
                     "%(adapter_type)s and disk type %(disk_type)s") %
                     {"disk_type": disk_type,
