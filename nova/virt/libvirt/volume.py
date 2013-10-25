@@ -79,7 +79,10 @@ volume_opts = [
     cfg.ListOpt('qemu_allowed_storage_drivers',
                default=[],
                help='Protocols listed here will be accessed directly '
-                    'from QEMU. Currently supported protocols: [gluster]')
+                    'from QEMU. Currently supported protocols: [gluster]'),
+    cfg.StrOpt('xtreemfs_mount_point_base',
+               default=paths.state_path_def('mnt'),
+               help='Base dir where Xtreemfs shares shall be mounted'),
     ]
 
 CONF = cfg.CONF
@@ -1100,3 +1103,42 @@ class LibvirtScalityVolumeDriver(LibvirtBaseVolumeDriver):
             msg = _("Cannot mount Scality SOFS, check syslog for errors")
             LOG.warn(msg)
             raise exception.NovaException(msg)
+
+
+class LibvirtXtreemfsVolumeDriver(LibvirtBaseVolumeDriver):
+    """Class implements libvirt part of volume driver for XtreemFS."""
+
+    def __init__(self, connection):
+        super(LibvirtXtreemfsVolumeDriver,
+              self).__init__(connection, is_block_dev=False)
+
+    def connect_volume(self, connection_info, mount_device):
+        """Mount volume and return xml configuration for libvirt to attach
+        this volume.
+        """
+        conf = super(LibvirtXtreemfsVolumeDriver,
+                     self).connect_volume(connection_info, mount_device)
+        # The default driver cache policy is 'none', and this causes
+        # qemu/kvm to open the volume file with O_DIRECT, which is
+        # rejected by FUSE (on kernels older than 3.3). XtreemFS
+        # is FUSE based, so we must provide a more sensible default.
+        conf.driver_cache = 'writethrough'
+        path = self._mount_xtreemfs(connection_info['data']['export'])
+        path = os.path.join(path, connection_info['data']['name'])
+        conf.source_type = 'file'
+        conf.source_path = path
+        return conf
+
+    def _mount_xtreemfs(self, xtreemfs_share):
+        """Mount Xtreemfs share to local path."""
+        mount_path = os.path.join(CONF.xtreemfs_mount_point_base,
+                                  self.get_hash_str(xtreemfs_share))
+        utils.execute('mkdir', '-p', mount_path)
+        utils.execute('mount', '-t', 'xtreemfs', '-o', 'allow_other',
+                      xtreemfs_share, mount_path, run_as_root=True)
+        return mount_path
+
+    @staticmethod
+    def get_hash_str(share_name):
+        """return unique string to use as filename."""
+        return hashlib.md5(share_name).hexdigest()
