@@ -277,8 +277,23 @@ class VMOps(object):
 
         self._attach_mapped_block_devices(instance, block_device_info)
 
+        try:
+            self.firewall_driver.setup_basic_filtering(
+                    instance, network_info)
+        except NotImplementedError:
+            # NOTE(salvatore-orlando): setup_basic_filtering might be
+            # empty or not implemented at all, as basic filter could
+            # be implemented with VIF rules created by xapi plugin
+            pass
+
+        self.firewall_driver.prepare_instance_filter(instance,
+                                                     network_info)
+
         # 5. Start VM
         self._start(instance, vm_ref=vm_ref)
+
+        self.firewall_driver.apply_instance_filter(instance, network_info)
+
         self._update_instance_progress(context, instance,
                                        step=5,
                                        total_steps=RESIZE_TOTAL_STEPS)
@@ -1736,6 +1751,24 @@ class VMOps(object):
             with excutils.save_and_reraise_exception():
                 recover_method(context, instance, destination_hostname,
                                block_migration)
+
+    def post_live_migration_at_destination(self, context, instance,
+                                           network_info, block_migration,
+                                           block_device_info):
+        # FIXME(johngarbutt): we should block all traffic until we have
+        # applied security groups, however this requires changes to XenServer
+        try:
+            self.firewall_driver.setup_basic_filtering(
+                    instance, network_info)
+        except NotImplementedError:
+            # NOTE(salvatore-orlando): setup_basic_filtering might be
+            # empty or not implemented at all, as basic filter could
+            # be implemented with VIF rules created by xapi plugin
+            pass
+
+        self.firewall_driver.prepare_instance_filter(instance,
+                                                     network_info)
+        self.firewall_driver.apply_instance_filter(instance, network_info)
 
     def get_per_instance_usage(self):
         """Get usage info about each active instance."""
