@@ -106,6 +106,14 @@ def get_vm_create_spec(client_factory, instance, data_store_name,
     return config_spec
 
 
+def get_vm_resize_spec(client_factory, instance):
+    """Provides updates for a VM spec."""
+    resize_spec = client_factory.create('ns0:VirtualMachineConfigSpec')
+    resize_spec.numCPUs = int(instance['vcpus'])
+    resize_spec.memoryMB = int(instance['memory_mb'])
+    return resize_spec
+
+
 def create_controller_spec(client_factory, key, adapter_type="lsiLogic"):
     """
     Builds a Config Spec for the LSI or Bus Logic Controller's addition
@@ -255,13 +263,15 @@ def get_cdrom_attach_config_spec(client_factory,
     return config_spec
 
 
-def get_vmdk_detach_config_spec(client_factory, device):
+def get_vmdk_detach_config_spec(client_factory, device,
+                                destroy_disk=False):
     """Builds the vmdk detach config spec."""
     config_spec = client_factory.create('ns0:VirtualMachineConfigSpec')
 
     device_config_spec = []
-    virtual_device_config_spec = delete_virtual_disk_spec(client_factory,
-                                                          device)
+    virtual_device_config_spec = detach_virtual_disk_spec(client_factory,
+                                                          device,
+                                                          destroy_disk)
 
     device_config_spec.append(virtual_device_config_spec)
 
@@ -461,14 +471,15 @@ def create_virtual_disk_spec(client_factory, controller_key,
     return virtual_device_config
 
 
-def delete_virtual_disk_spec(client_factory, device):
+def detach_virtual_disk_spec(client_factory, device, destroy_disk=False):
     """
-    Builds spec for the deletion of an already existing Virtual Disk from VM.
+    Builds spec for the detach of an already existing Virtual Disk from VM.
     """
     virtual_device_config = client_factory.create(
                             'ns0:VirtualDeviceConfigSpec')
     virtual_device_config.operation = "remove"
-    virtual_device_config.fileOperation = "destroy"
+    if destroy_disk:
+        virtual_device_config.fileOperation = "destroy"
     virtual_device_config.device = device
 
     return virtual_device_config
@@ -480,7 +491,8 @@ def clone_vm_spec(client_factory, location,
     clone_spec = client_factory.create('ns0:VirtualMachineCloneSpec')
     clone_spec.location = location
     clone_spec.powerOn = power_on
-    clone_spec.snapshot = snapshot
+    if snapshot:
+        clone_spec.snapshot = snapshot
     clone_spec.template = template
     return clone_spec
 
@@ -491,7 +503,8 @@ def relocate_vm_spec(client_factory, datastore=None, host=None,
     rel_spec = client_factory.create('ns0:VirtualMachineRelocateSpec')
     rel_spec.datastore = datastore
     rel_spec.diskMoveType = disk_move_type
-    rel_spec.host = host
+    if host:
+        rel_spec.host = host
     return rel_spec
 
 
@@ -827,10 +840,9 @@ def get_host_ref(session, cluster=None):
         host_ret = session._call_method(vim_util, "get_dynamic_property",
                                         cluster, "ClusterComputeResource",
                                         "host")
-        if host_ret is None:
-            return
-        if not host_ret.ManagedObjectReference:
-            return
+        if not host_ret or not host_ret.ManagedObjectReference:
+            msg = _('No host available on cluster')
+            raise exception.NoValidHost(reason=msg)
         host_mor = host_ret.ManagedObjectReference[0]
 
     return host_mor
@@ -925,7 +937,7 @@ def get_datastore_ref_and_name(session, cluster=None, host=None,
                                         "get_dynamic_property", host,
                                         "HostSystem", "datastore")
 
-        if datastore_ret is None:
+        if not datastore_ret:
             raise exception.DatastoreNotFound()
         data_store_mors = datastore_ret.ManagedObjectReference
         data_stores = session._call_method(vim_util,

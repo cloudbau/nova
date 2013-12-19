@@ -405,7 +405,6 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
                  {'task_state': task_states.IMAGE_UPLOADING,
                   'expected_state': task_states.IMAGE_PENDING_UPLOAD}}]
         func_call_matcher = matchers.FunctionCallMatcher(expected_calls)
-        self._create_vm()
         info = self.conn.get_info({'uuid': self.uuid,
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
@@ -417,6 +416,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
         self.assertIsNone(func_call_matcher.match())
 
     def test_snapshot(self):
+        self._create_vm()
         self._test_snapshot()
 
     def test_snapshot_non_existent(self):
@@ -662,7 +662,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
         res = self.conn.get_console_output(self.instance)
         self.assertNotEqual(0, len(res))
 
-    def _test_finish_migration(self, power_on):
+    def _test_finish_migration(self, power_on, resize_instance=False):
         """
         Tests the finish_migration method on vmops
         """
@@ -693,7 +693,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
                                    disk_info=None,
                                    network_info=None,
                                    block_device_info=None,
-                                   resize_instance=False,
+                                   resize_instance=resize_instance,
                                    image_meta=None,
                                    power_on=power_on)
 
@@ -704,6 +704,12 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
     def test_finish_migration_power_off(self):
         self.assertRaises(NotImplementedError,
                           self._test_finish_migration, power_on=False)
+
+    def test_confirm_migration(self):
+        self._create_vm()
+        self.assertRaises(NotImplementedError,
+                          self.conn.confirm_migration, self.context,
+                          self.instance, None)
 
     def _test_finish_revert_migration(self, power_on):
         """
@@ -957,7 +963,7 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
         self.mox.StubOutWithMock(volumeops.VMwareVolumeOps,
                                  'detach_disk_from_vm')
         volumeops.VMwareVolumeOps.detach_disk_from_vm(mox.IgnoreArg(),
-                self.instance, device)
+                self.instance, device, destroy_disk=True)
         self.mox.ReplayAll()
         self.conn.detach_volume(connection_info, self.instance, mount_point,
                                 encryption=None)
@@ -1116,6 +1122,11 @@ class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
         self._test_finish_migration(power_on=False)
         self.assertEquals(False, self.power_on_called)
 
+    def test_finish_migration_power_on_resize(self):
+        self._test_finish_migration(power_on=True,
+                                    resize_instance=True)
+        self.assertEquals(True, self.power_on_called)
+
     def test_finish_revert_migration_power_on(self):
         self._test_finish_revert_migration(power_on=True)
         self.assertEquals(True, self.power_on_called)
@@ -1138,6 +1149,29 @@ class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
 
         self.mox.ReplayAll()
 
+        self._create_vm()
+        self._test_snapshot()
+
+    def test_snapshot_using_file_manager(self):
+        self._create_vm()
+        uuid_str = uuidutils.generate_uuid()
+        self.mox.StubOutWithMock(uuidutils,
+                                 'generate_uuid')
+        uuidutils.generate_uuid().AndReturn(uuid_str)
+
+        self.mox.StubOutWithMock(vmops.VMwareVMOps,
+                                 '_delete_datastore_file')
+        # Check calls for delete vmdk and -flat.vmdk pair
+        self.conn._vmops._delete_datastore_file(
+                mox.IgnoreArg(),
+                "[fake-ds] vmware-tmp/%s-flat.vmdk" % uuid_str,
+                mox.IgnoreArg()).AndReturn(None)
+        self.conn._vmops._delete_datastore_file(
+                mox.IgnoreArg(),
+                "[fake-ds] vmware-tmp/%s.vmdk" % uuid_str,
+                mox.IgnoreArg()).AndReturn(None)
+
+        self.mox.ReplayAll()
         self._test_snapshot()
 
     def test_spawn_invalid_node(self):
@@ -1174,3 +1208,25 @@ class VMwareAPIVCDriverTestCase(VMwareAPIVMTestCase):
         info = self.conn.get_info({'uuid': self.uuid,
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
+
+    def test_migrate_disk_and_power_off(self):
+        def fake_update_instance_progress(context, instance, step,
+                                          total_steps):
+            pass
+
+        def fake_get_host_ref_from_name(dest):
+            return None
+
+        self._create_vm()
+        instance_type = {'name': 'fake', 'flavorid': 'fake_id'}
+        self.stubs.Set(self.conn._vmops, "_update_instance_progress",
+                       fake_update_instance_progress)
+        self.stubs.Set(self.conn._vmops, "_get_host_ref_from_name",
+                       fake_get_host_ref_from_name)
+        self.conn.migrate_disk_and_power_off(self.context, self.instance,
+                                             'fake_dest', instance_type,
+                                             None)
+
+    def test_confirm_migration(self):
+        self._create_vm()
+        self.conn.confirm_migration(self.context, self.instance, None)

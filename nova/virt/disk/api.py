@@ -100,6 +100,10 @@ for s in CONF.virt_mkfs:
         _DEFAULT_MKFS_COMMAND = mkfs_command
 
 
+def get_fs_type_for_os_type(os_type):
+    return os_type if _MKFS_COMMAND.get(os_type) else 'default'
+
+
 def mkfs(os_type, fs_label, target):
     mkfs_command = (_MKFS_COMMAND.get(os_type, _DEFAULT_MKFS_COMMAND) or
                     '') % {'fs_label': fs_label, 'target': target}
@@ -188,7 +192,7 @@ def is_image_partitionless(image, use_cow=False):
             utils.execute('e2label', image)
         except processutils.ProcessExecutionError as e:
             LOG.debug(_('Unable to determine label for image %(image)s with '
-                        'error %(errror)s. Cannot resize.'),
+                        'error %(error)s. Cannot resize.'),
                       {'image': image,
                        'error': e})
             return False

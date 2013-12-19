@@ -3537,7 +3537,21 @@ class LibvirtConnTestCase(test.TestCase):
 
         conn.spawn(self.context, instance, None, [], None)
 
-    def test_create_image_plain(self):
+    def test_chown_disk_config_for_instance(self):
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        instance = copy.deepcopy(self.test_instance)
+        instance['name'] = 'test_name'
+        self.mox.StubOutWithMock(fake_libvirt_utils, 'get_instance_path')
+        self.mox.StubOutWithMock(os.path, 'exists')
+        self.mox.StubOutWithMock(fake_libvirt_utils, 'chown')
+        fake_libvirt_utils.get_instance_path(instance).AndReturn('/tmp/uuid')
+        os.path.exists('/tmp/uuid/disk.config').AndReturn(True)
+        fake_libvirt_utils.chown('/tmp/uuid/disk.config', os.getuid())
+
+        self.mox.ReplayAll()
+        conn._chown_disk_config_for_instance(instance)
+
+    def _test_create_image_plain(self, os_type='', filename='', mkfs=False):
         gotFiles = []
 
         def fake_image(self, instance, name, image_type=''):
@@ -3572,11 +3586,15 @@ class LibvirtConnTestCase(test.TestCase):
         instance_ref = self.test_instance
         instance_ref['image_ref'] = 1
         instance = db.instance_create(self.context, instance_ref)
+        instance['os_type'] = os_type
 
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.stubs.Set(conn, 'to_xml', fake_none)
         self.stubs.Set(conn, '_create_domain_and_network', fake_none)
         self.stubs.Set(conn, 'get_info', fake_get_info)
+        if mkfs:
+            self.stubs.Set(nova.virt.disk.api, '_MKFS_COMMAND',
+                       {os_type: 'mkfs.ext3 --label %(fs_label)s %(target)s'})
 
         image_meta = {'id': instance['image_ref']}
         disk_info = blockinfo.get_disk_info(CONF.libvirt_type,
@@ -3591,10 +3609,30 @@ class LibvirtConnTestCase(test.TestCase):
         wantFiles = [
             {'filename': '356a192b7913b04c54574d18c28d46e6395428ab',
              'size': 10 * 1024 * 1024 * 1024},
-            {'filename': 'ephemeral_20_default',
+            {'filename': filename,
              'size': 20 * 1024 * 1024 * 1024},
             ]
         self.assertEquals(gotFiles, wantFiles)
+
+    def test_create_image_plain_os_type_blank(self):
+        self._test_create_image_plain(os_type='',
+                                      filename='ephemeral_20_default',
+                                      mkfs=False)
+
+    def test_create_image_plain_os_type_none(self):
+        self._test_create_image_plain(os_type=None,
+                                      filename='ephemeral_20_default',
+                                      mkfs=False)
+
+    def test_create_image_plain_os_type_set_no_fs(self):
+        self._test_create_image_plain(os_type='test',
+                                      filename='ephemeral_20_default',
+                                      mkfs=False)
+
+    def test_create_image_plain_os_type_set_with_fs(self):
+        self._test_create_image_plain(os_type='test',
+                                      filename='ephemeral_20_test',
+                                      mkfs=True)
 
     def test_create_image_with_swap(self):
         gotFiles = []
@@ -3658,6 +3696,23 @@ class LibvirtConnTestCase(test.TestCase):
              'size': 500 * 1024 * 1024},
             ]
         self.assertEquals(gotFiles, wantFiles)
+
+    def test_create_ephemeral_default(self):
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.mox.StubOutWithMock(utils, 'execute')
+        utils.execute('mkfs.ext3', '-L', 'myVol', '-F',
+                      '/dev/something', run_as_root=True)
+        self.mox.ReplayAll()
+        conn._create_ephemeral('/dev/something', 20, 'myVol', 'linux',
+                               max_size=20)
+
+    def test_create_swap_default(self):
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        self.mox.StubOutWithMock(utils, 'execute')
+        utils.execute('mkswap', '/dev/something')
+        self.mox.ReplayAll()
+
+        conn._create_swap('/dev/something', 1, max_size=20)
 
     def test_get_console_output_file(self):
         fake_libvirt_utils.files['console.log'] = '01234567890'
