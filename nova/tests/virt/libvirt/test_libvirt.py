@@ -3032,23 +3032,73 @@ class LibvirtConnTestCase(test.TestCase):
 
         db.instance_destroy(self.context, instance_ref['uuid'])
 
-    def test_create_images_and_backing(self):
+    def _do_test_create_images_and_backing(self, disk_type):
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
         self.mox.StubOutWithMock(conn, '_fetch_instance_kernel_ramdisk')
         self.mox.StubOutWithMock(libvirt_driver.libvirt_utils, 'create_image')
 
-        libvirt_driver.libvirt_utils.create_image(mox.IgnoreArg(),
-                                                  mox.IgnoreArg(),
-                                                  mox.IgnoreArg())
+        disk_info = {'path': 'foo', 'type': disk_type,
+                     'disk_size': 1 * 1024 ** 3,
+                     'virt_disk_size': 20 * 1024 ** 3,
+                     'backing_file': None}
+        disk_info_json = jsonutils.dumps([disk_info])
+
+        libvirt_driver.libvirt_utils.create_image(
+            disk_info['type'], mox.IgnoreArg(), disk_info['virt_disk_size'])
         conn._fetch_instance_kernel_ramdisk(self.context, self.test_instance)
         self.mox.ReplayAll()
 
         self.stubs.Set(os.path, 'exists', lambda *args: False)
-        disk_info_json = jsonutils.dumps([{'path': 'foo', 'type': None,
-                                           'disk_size': 0,
-                                           'backing_file': None}])
         conn._create_images_and_backing(self.context, self.test_instance,
                                         "/fake/instance/dir", disk_info_json)
+
+    def test_create_images_and_backing_qcow2(self):
+        self._do_test_create_images_and_backing('qcow2')
+
+    def test_create_images_and_backing_raw(self):
+        self._do_test_create_images_and_backing('raw')
+
+    def test_create_images_and_backing_ephemeral_gets_created(self):
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+        disk_info_json = jsonutils.dumps(
+            [{u'backing_file': u'fake_image_backing_file',
+              u'disk_size': 10747904,
+              u'path': u'disk_path',
+              u'type': u'qcow2',
+              u'virt_disk_size': 25165824},
+             {u'backing_file': u'ephemeral_1_default',
+              u'disk_size': 393216,
+              u'over_committed_disk_size': 1073348608,
+              u'path': u'disk_eph_path',
+              u'type': u'qcow2',
+              u'virt_disk_size': 1073741824}])
+
+        base_dir = os.path.join(CONF.instances_path,
+                                CONF.base_dir_name)
+        self.test_instance.update({'name': 'fake_instance',
+                                   'user_id': 'fake-user',
+                                   'os_type': None,
+                                   'project_id': 'fake-project'})
+
+        with contextlib.nested(
+            mock.patch.object(conn, '_fetch_instance_kernel_ramdisk'),
+            mock.patch.object(libvirt_driver.libvirt_utils, 'fetch_image'),
+            mock.patch.object(conn, '_create_ephemeral')
+        ) as (fetch_kernel_ramdisk_mock, fetch_image_mock,
+                create_ephemeral_mock):
+            conn._create_images_and_backing(self.context, self.test_instance,
+                                            "/fake/instance/dir",
+                                            disk_info_json)
+            self.assertEqual(len(create_ephemeral_mock.call_args_list), 1)
+            m_args, m_kwargs = create_ephemeral_mock.call_args_list[0]
+            self.assertEqual(
+                    os.path.join(base_dir, 'ephemeral_1_default'),
+                    m_kwargs['target'])
+            self.assertEqual(len(fetch_image_mock.call_args_list), 1)
+            m_args, m_kwargs = fetch_image_mock.call_args_list[0]
+            self.assertEqual(
+                    os.path.join(base_dir, 'fake_image_backing_file'),
+                    m_kwargs['target'])
 
     def test_create_images_and_backing_disk_info_none(self):
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
@@ -3857,10 +3907,12 @@ class LibvirtConnTestCase(test.TestCase):
         instance = db.instance_create(self.context, self.test_instance)
         conn.destroy(instance, {})
 
-    def test_destroy_removes_disk(self):
+    def _test_destroy_removes_disk(self, volume_fail=False):
         instance = {"name": "instancename", "id": "42",
                     "uuid": "875a8070-d0b9-4949-8b31-104d125c9a64",
                     "cleaned": 0, 'info_cache': None, 'security_groups': []}
+        vol = {'block_device_mapping': [
+              {'connection_info': 'dummy', 'mount_device': '/dev/sdb'}]}
 
         self.mox.StubOutWithMock(libvirt_driver.LibvirtDriver,
                                  '_undefine_domain')
@@ -3870,6 +3922,18 @@ class LibvirtConnTestCase(test.TestCase):
                                 columns_to_join=['info_cache',
                                                  'security_groups']
                                 ).AndReturn(instance)
+        self.mox.StubOutWithMock(driver, "block_device_info_get_mapping")
+        driver.block_device_info_get_mapping(vol
+                                 ).AndReturn(vol['block_device_mapping'])
+        self.mox.StubOutWithMock(libvirt_driver.LibvirtDriver,
+                                 "volume_driver_method")
+        if volume_fail:
+            libvirt_driver.LibvirtDriver.volume_driver_method(
+                        mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg()).\
+                                     AndRaise(exception.VolumeNotFound('vol'))
+        else:
+            libvirt_driver.LibvirtDriver.volume_driver_method(
+                        mox.IgnoreArg(), mox.IgnoreArg(), mox.IgnoreArg())
         self.mox.StubOutWithMock(shutil, "rmtree")
         shutil.rmtree(os.path.join(CONF.instances_path,
                                    'instance-%08x' % int(instance['id'])))
@@ -3911,7 +3975,13 @@ class LibvirtConnTestCase(test.TestCase):
                        fake_obj_load_attr)
         self.stubs.Set(instance_obj.Instance, 'save', fake_save)
 
-        conn.destroy(instance, [])
+        conn.destroy(instance, [], vol)
+
+    def test_destroy_removes_disk(self):
+        self._test_destroy_removes_disk(volume_fail=False)
+
+    def test_destroy_removes_disk_volume_fails(self):
+        self._test_destroy_removes_disk(volume_fail=True)
 
     def test_destroy_not_removes_disk(self):
         instance = {"name": "instancename", "id": "instanceid",
@@ -7304,12 +7374,16 @@ class LibvirtVolumeSnapshotTestCase(test.TestCase):
         self.mox.StubOutWithMock(self.conn, 'has_min_version')
         self.mox.StubOutWithMock(domain, 'blockRebase')
         self.mox.StubOutWithMock(domain, 'blockCommit')
+        self.mox.StubOutWithMock(domain, 'blockJobInfo')
 
         self.conn._lookup_by_name('instance-%s' % instance['id']).\
             AndReturn(domain)
         self.conn.has_min_version(mox.IgnoreArg()).AndReturn(True)
 
         domain.blockRebase('vda', 'snap.img', 0, 0)
+
+        domain.blockJobInfo('vda', 0).AndReturn({'cur': 1, 'end': 1000})
+        domain.blockJobInfo('vda', 0).AndReturn({'cur': 1000, 'end': 1000})
 
         self.mox.ReplayAll()
 
@@ -7332,12 +7406,16 @@ class LibvirtVolumeSnapshotTestCase(test.TestCase):
         self.mox.StubOutWithMock(self.conn, 'has_min_version')
         self.mox.StubOutWithMock(domain, 'blockRebase')
         self.mox.StubOutWithMock(domain, 'blockCommit')
+        self.mox.StubOutWithMock(domain, 'blockJobInfo')
 
         self.conn._lookup_by_name('instance-%s' % instance['id']).\
             AndReturn(domain)
         self.conn.has_min_version(mox.IgnoreArg()).AndReturn(True)
 
         domain.blockCommit('vda', 'other-snap.img', 'snap.img', 0, 0)
+
+        domain.blockJobInfo('vda', 0).AndReturn({'cur': 1, 'end': 1000})
+        domain.blockJobInfo('vda', 0).AndReturn({})
 
         self.mox.ReplayAll()
 

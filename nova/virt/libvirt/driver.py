@@ -927,9 +927,21 @@ class LibvirtDriver(driver.ComputeDriver):
                                                            encryption)
                     encryptor.detach_volume(**encryption)
 
-            self.volume_driver_method('disconnect_volume',
-                                      connection_info,
-                                      disk_dev)
+            try:
+                self.volume_driver_method('disconnect_volume',
+                                          connection_info,
+                                          disk_dev)
+            except Exception as exc:
+                with excutils.save_and_reraise_exception() as ctxt:
+                    if destroy_disks:
+                        # Don't block on Volume errors if we're trying to
+                        # delete the instance as we may be patially created
+                        # or deleted
+                        ctxt.reraise = False
+                        LOG.warn(_("Ignoring Volume Error on vol %(vol_id)s "
+                                   "during delete %(exc)s"),
+                                 {'vol_id': vol.get('volume_id'), 'exc': exc},
+                                 instance=instance)
 
         if destroy_disks:
             self._delete_instance_files(instance)
@@ -1430,6 +1442,16 @@ class LibvirtDriver(driver.ComputeDriver):
 
     @staticmethod
     def _wait_for_block_job(domain, disk_path, abort_on_error=False):
+        """Wait for libvirt block job to complete.
+
+        Libvirt may return either cur==end or an empty dict when
+        the job is complete, depending on whether the job has been
+        cleaned up by libvirt yet, or not.
+
+        :returns: True if still in progress
+                  False if completed
+        """
+
         status = domain.blockJobInfo(disk_path, 0)
         if status == -1 and abort_on_error:
             msg = _('libvirt error while requesting blockjob info.')
@@ -1440,7 +1462,7 @@ class LibvirtDriver(driver.ComputeDriver):
         except Exception:
             return False
 
-        if cur == end and cur != 0 and end != 0:
+        if cur == end:
             return False
         else:
             return True
@@ -3048,14 +3070,18 @@ class LibvirtDriver(driver.ComputeDriver):
                                             context, instance['image_ref'])
             image_meta = compute_utils.get_image_metadata(
                                 context, image_service, image_id, instance)
-        LOG.debug(_('Start to_xml instance=%(instance)s '
+        # NOTE(danms): Stringifying a NetworkInfo will take a lock. Do
+        # this ahead of time so that we don't acquire it while also
+        # holding the logging lock.
+        network_info_str = str(network_info)
+        LOG.debug(_('Start to_xml '
                     'network_info=%(network_info)s '
                     'disk_info=%(disk_info)s '
                     'image_meta=%(image_meta)s rescue=%(rescue)s'
                     'block_device_info=%(block_device_info)s'),
-                  {'instance': instance, 'network_info': network_info,
-                   'disk_info': disk_info, 'image_meta': image_meta,
-                   'rescue': rescue, 'block_device_info': block_device_info})
+                  {'network_info': network_info_str, 'disk_info': disk_info,
+                   'image_meta': image_meta, 'rescue': rescue,
+                   'block_device_info': block_device_info})
         conf = self.get_guest_config(instance, network_info, image_meta,
                                      disk_info, rescue, block_device_info)
         xml = conf.to_xml()
@@ -4203,7 +4229,7 @@ class LibvirtDriver(driver.ComputeDriver):
             instance_disk = os.path.join(instance_dir, base)
             if not info['backing_file'] and not os.path.exists(instance_disk):
                 libvirt_utils.create_image(info['type'], instance_disk,
-                                           info['disk_size'])
+                                           info['virt_disk_size'])
             elif info['backing_file']:
                 # Creating backing file follows same way as spawning instances.
                 cache_name = os.path.basename(info['backing_file'])
@@ -4211,13 +4237,28 @@ class LibvirtDriver(driver.ComputeDriver):
                 image = self.image_backend.image(instance,
                                                  instance_disk,
                                                  CONF.libvirt_images_type)
-                image.cache(fetch_func=libvirt_utils.fetch_image,
-                            context=context,
-                            filename=cache_name,
-                            image_id=instance['image_ref'],
-                            user_id=instance['user_id'],
-                            project_id=instance['project_id'],
-                            size=info['virt_disk_size'])
+                if cache_name.startswith('ephemeral'):
+                    image.cache(fetch_func=self._create_ephemeral,
+                                fs_label=cache_name,
+                                os_type=instance["os_type"],
+                                filename=cache_name,
+                                size=info['virt_disk_size'],
+                                ephemeral_size=instance['ephemeral_gb'])
+                elif cache_name.startswith('swap'):
+                    inst_type = flavors.extract_flavor(instance)
+                    swap_mb = inst_type['swap']
+                    image.cache(fetch_func=self._create_swap,
+                                filename="swap_%s" % swap_mb,
+                                size=swap_mb * (1024 ** 2),
+                                swap_mb=swap_mb)
+                else:
+                    image.cache(fetch_func=libvirt_utils.fetch_image,
+                                context=context,
+                                filename=cache_name,
+                                image_id=instance['image_ref'],
+                                user_id=instance['user_id'],
+                                project_id=instance['project_id'],
+                                size=info['virt_disk_size'])
 
         # if image has kernel and ramdisk, just download
         # following normal way.
@@ -4344,7 +4385,7 @@ class LibvirtDriver(driver.ComputeDriver):
                 over_commit_size = int(virt_size) - dk_size
             else:
                 backing_file = ""
-                virt_size = 0
+                virt_size = dk_size
                 over_commit_size = 0
 
             disk_info.append({'type': disk_type,
