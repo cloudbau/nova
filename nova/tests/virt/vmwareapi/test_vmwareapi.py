@@ -22,7 +22,6 @@ Test suite for VMwareAPI.
 """
 
 import contextlib
-
 import mock
 import mox
 from oslo.config import cfg
@@ -409,6 +408,38 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
 
+    def test_spawn_disk_extend_insufficient_disk_space(self):
+        self.flags(use_linked_clone=True, group='vmware')
+        self.wait_task = self.conn._session._wait_for_task
+        self.call_method = self.conn._session._call_method
+        self.task_ref = None
+        id = 'fake_image_uuid'
+        cached_image = '[%s] vmware_base/%s.80.vmdk' % (self.ds, id)
+        tmp_file = '[%s] vmware_base/%s.80-flat.vmdk' % (self.ds, id)
+
+        def fake_wait_for_task(instance_uuid, task_ref):
+            if task_ref == self.task_ref:
+                self.task_ref = None
+                self.assertTrue(vmwareapi_fake.get_file(cached_image))
+                self.assertTrue(vmwareapi_fake.get_file(tmp_file))
+                raise exception.NovaException('No space!')
+            return self.wait_task(instance_uuid, task_ref)
+
+        def fake_call_method(module, method, *args, **kwargs):
+            task_ref = self.call_method(module, method, *args, **kwargs)
+            if method == "ExtendVirtualDisk_Task":
+                self.task_ref = task_ref
+            return task_ref
+
+        self.stubs.Set(self.conn._session, "_call_method", fake_call_method)
+        self.stubs.Set(self.conn._session, "_wait_for_task",
+                       fake_wait_for_task)
+
+        self.assertRaises(exception.NovaException,
+                          self._create_vm)
+        self.assertFalse(vmwareapi_fake.get_file(cached_image))
+        self.assertFalse(vmwareapi_fake.get_file(tmp_file))
+
     def test_spawn_disk_invalid_disk_size(self):
         self.mox.StubOutWithMock(vmware_images, 'get_vmdk_size_and_properties')
         result = [82 * 1024 * 1024 * 1024,
@@ -477,6 +508,11 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
                         network_info=self.network_info,
                         block_device_info=block_device_info)
 
+    def mock_upload_image(self, context, image, instance, **kwargs):
+        self.assertEqual(image, 'Test-Snapshot')
+        self.assertEqual(instance, self.instance)
+        self.assertEqual(kwargs['disk_type'], 'preallocated')
+
     def _test_snapshot(self):
         expected_calls = [
             {'args': (),
@@ -490,8 +526,10 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
         info = self.conn.get_info({'uuid': self.uuid,
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
-        self.conn.snapshot(self.context, self.instance, "Test-Snapshot",
-                           func_call_matcher.call)
+        with mock.patch.object(vmware_images, 'upload_image',
+                               self.mock_upload_image):
+            self.conn.snapshot(self.context, self.instance, "Test-Snapshot",
+                               func_call_matcher.call)
         info = self.conn.get_info({'uuid': self.uuid,
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)

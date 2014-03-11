@@ -1859,7 +1859,7 @@ def instance_get_all_by_filters(context, filters, sort_key, sort_dir,
     if 'changes-since' in filters:
         changes_since = timeutils.normalize_time(filters['changes-since'])
         query_prefix = query_prefix.\
-                            filter(models.Instance.updated_at > changes_since)
+                            filter(models.Instance.updated_at >= changes_since)
 
     if 'deleted' in filters:
         # Instances can be soft or hard deleted and the query needs to
@@ -3249,6 +3249,7 @@ def _quota_reservations_query(session, context, reservations):
 
 
 @require_context
+@_retry_on_deadlock
 def reservation_commit(context, reservations, project_id=None, user_id=None):
     session = get_session()
     with session.begin():
@@ -3264,6 +3265,7 @@ def reservation_commit(context, reservations, project_id=None, user_id=None):
 
 
 @require_context
+@_retry_on_deadlock
 def reservation_rollback(context, reservations, project_id=None, user_id=None):
     session = get_session()
     with session.begin():
