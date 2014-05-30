@@ -34,6 +34,7 @@ from nova import block_device
 from nova.compute import api as compute_api
 from nova.compute import power_state
 from nova.compute import task_states
+from nova.compute import vm_states
 from nova import context
 from nova import db
 from nova import exception
@@ -793,6 +794,31 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
 
+    def destroy_rescued(self, fake_method):
+        self._rescue()
+        with (
+            mock.patch.object(self.conn._volumeops, "detach_disk_from_vm",
+                              fake_method)
+        ):
+            self.instance['vm_state'] = vm_states.RESCUED
+            self.conn.destroy(self.instance, self.network_info)
+            inst_path = '[%s] %s/%s.vmdk' % (self.ds, self.uuid, self.uuid)
+            self.assertFalse(vmwareapi_fake.get_file(inst_path))
+            rescue_file_path = '[%s] %s-rescue/%s-rescue.vmdk' % (self.ds,
+                                                                  self.uuid,
+                                                                  self.uuid)
+            self.assertFalse(vmwareapi_fake.get_file(rescue_file_path))
+
+    def test_destroy_rescued(self):
+        def fake_detach_disk_from_vm(*args, **kwargs):
+            pass
+        self.destroy_rescued(fake_detach_disk_from_vm)
+
+    def test_destroy_rescued_with_exception(self):
+        def fake_detach_disk_from_vm(*args, **kwargs):
+            raise exception.NovaException('Here is my fake exception')
+        self.destroy_rescued(fake_detach_disk_from_vm)
+
     def test_destroy(self):
         self._create_vm()
         info = self.conn.get_info({'uuid': self.uuid,
@@ -846,14 +872,31 @@ class VMwareAPIVMTestCase(test.NoDBTestCase):
 
     def test_unrescue(self):
         self._rescue()
+        self.test_vm_ref = None
+        self.test_device_name = None
 
-        def fake_detach_disk_from_vm(*args, **kwargs):
-            pass
+        def fake_power_off_vm_ref(vm_ref):
+            self.test_vm_ref = vm_ref
+            self.assertIsNotNone(vm_ref)
 
-        self.stubs.Set(self.conn._volumeops, "detach_disk_from_vm",
-                       fake_detach_disk_from_vm)
+        def fake_detach_disk_from_vm(vm_ref, instance,
+                                     device_name, destroy_disk=False):
+            self.test_device_name = device_name
+            info = self.conn.get_info(instance)
+            self._check_vm_info(info, power_state.SHUTDOWN)
 
-        self.conn.unrescue(self.instance, None)
+        with contextlib.nested(
+            mock.patch.object(self.conn._vmops, "_power_off_vm_ref",
+                              side_effect=fake_power_off_vm_ref),
+            mock.patch.object(self.conn._volumeops, "detach_disk_from_vm",
+                              side_effect=fake_detach_disk_from_vm),
+        ) as (poweroff, detach):
+            self.conn.unrescue(self.instance, None)
+            poweroff.assert_called_once_with(self.test_vm_ref)
+            detach.assert_called_once_with(self.test_vm_ref, mock.ANY,
+                                           self.test_device_name)
+            self.test_vm_ref = None
+            self.test_device_name = None
         info = self.conn.get_info({'name': 1, 'uuid': self.uuid,
                                    'node': self.instance_node})
         self._check_vm_info(info, power_state.RUNNING)
