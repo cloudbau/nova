@@ -141,6 +141,14 @@ _fake_NodeDevXml = \
     </device>"""}
 
 
+def mocked_bdm(id, bdm_info):
+    bdm_mock = mock.MagicMock()
+    bdm_mock.__getitem__ = lambda s, k: bdm_info[k]
+    bdm_mock.get = lambda *k, **kw: bdm_info.get(*k, **kw)
+    bdm_mock.id = id
+    return bdm_mock
+
+
 def _concurrency(signal, wait, done, target, is_block_dev=False):
     signal.send()
     wait.wait()
@@ -737,6 +745,37 @@ class LibvirtConnTestCase(test.TestCase):
         result = conn.get_volume_connector(volume)
         self.assertThat(expected, matchers.DictMatches(result))
 
+    def test_lifecycle_event_registration(self):
+        calls = []
+
+        def fake_registerErrorHandler(*args, **kwargs):
+            calls.append('fake_registerErrorHandler')
+
+        def fake_get_host_capabilities(**args):
+            cpu = vconfig.LibvirtConfigGuestCPU()
+            cpu.arch = "armv7l"
+
+            caps = vconfig.LibvirtConfigCaps()
+            caps.host = vconfig.LibvirtConfigCapsHost()
+            caps.host.cpu = cpu
+            calls.append('fake_get_host_capabilities')
+            return caps
+
+        @mock.patch.object(libvirt, 'registerErrorHandler',
+                           side_effect=fake_registerErrorHandler)
+        @mock.patch.object(libvirt_driver.LibvirtDriver,
+                           'get_host_capabilities',
+                            side_effect=fake_get_host_capabilities)
+        def test_init_host(get_host_capabilities, register_error_handler):
+            conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
+            conn.init_host("test_host")
+
+        test_init_host()
+        # NOTE(dkliban): Will fail if get_host_capabilities is called before
+        # registerErrorHandler
+        self.assertEqual(['fake_registerErrorHandler',
+                          'fake_get_host_capabilities'], calls)
+
     def test_close_callback(self):
         self.close_callback = None
 
@@ -1012,8 +1051,11 @@ class LibvirtConnTestCase(test.TestCase):
         instance_ref = db.instance_create(self.context, self.test_instance)
         conn_info = {'driver_volume_type': 'fake'}
         info = {'block_device_mapping': [
-                  {'connection_info': conn_info, 'mount_device': '/dev/vdc'},
-                  {'connection_info': conn_info, 'mount_device': '/dev/vdd'}]}
+                mocked_bdm(1, {'connection_info': conn_info,
+                               'mount_device': '/dev/vdc'}),
+                mocked_bdm(2, {'connection_info': conn_info,
+                               'mount_device': '/dev/vdd'}),
+                ]}
 
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                             instance_ref, info)
@@ -1025,6 +1067,8 @@ class LibvirtConnTestCase(test.TestCase):
         self.assertIsInstance(cfg.devices[3],
                               vconfig.LibvirtConfigGuestDisk)
         self.assertEqual(cfg.devices[3].target_dev, 'vdd')
+        self.assertTrue(info['block_device_mapping'][0].save.called)
+        self.assertTrue(info['block_device_mapping'][1].save.called)
 
     def test_get_guest_config_with_configdrive(self):
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
@@ -1065,10 +1109,13 @@ class LibvirtConnTestCase(test.TestCase):
         instance_ref = db.instance_create(self.context, self.test_instance)
         conn_info = {'driver_volume_type': 'fake'}
         bd_info = {'block_device_mapping': [
-                  {'connection_info': conn_info, 'mount_device': '/dev/sdc',
-                   'disk_bus': 'scsi'},
-                  {'connection_info': conn_info, 'mount_device': '/dev/sdd',
-                   'disk_bus': 'scsi'}]}
+                mocked_bdm(1, {'connection_info': conn_info,
+                               'mount_device': '/dev/sdc',
+                               'disk_bus': 'scsi'}),
+                mocked_bdm(2, {'connection_info': conn_info,
+                               'mount_device': '/dev/sdd',
+                               'disk_bus': 'scsi'}),
+                ]}
 
         disk_info = blockinfo.get_disk_info(CONF.libvirt.virt_type,
                                             instance_ref, bd_info, image_meta)
@@ -3517,6 +3564,10 @@ class LibvirtConnTestCase(test.TestCase):
                 check = (lambda t: t.find('./os/kernel'), None)
             check_list.append(check)
 
+            if expect_kernel:
+                check = (lambda t: "no_timer_check" in t.find('./os/cmdline').
+                         text, hypervisor_type == "qemu")
+                check_list.append(check)
             # Hypervisors that only support vm_mode.HVM and Xen
             # should not produce configuration that results in kernel
             # arguments
@@ -6575,6 +6626,26 @@ class LibvirtConnTestCase(test.TestCase):
         self.assertRaises(exception.ConsoleTypeUnavailable,
                           conn.get_spice_console, self.context, instance)
 
+    def test_detach_volume_with_instance_not_found(self):
+        # Test that detach_volume() method does not raise exception,
+        # if the instance does not exist.
+
+        instance = self.create_instance_obj(self.context)
+        conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), False)
+
+        with contextlib.nested(
+            mock.patch.object(conn, '_lookup_by_name',
+                              side_effect=exception.InstanceNotFound(
+                                  instance_id=instance.name)),
+            mock.patch.object(conn, 'volume_driver_method')
+        ) as (_lookup_by_name, volume_driver_method):
+            connection_info = {'driver_volume_type': 'fake'}
+            conn.detach_volume(connection_info, instance, '/dev/sda')
+            _lookup_by_name.assert_called_once_with(instance.name)
+            volume_driver_method.assert_called_once_with('disconnect_volume',
+                                                         connection_info,
+                                                         'sda')
+
     def _test_attach_detach_interface_get_config(self, method_name):
         """Tests that the get_config() method is properly called in
         attach_interface() and detach_interface().
@@ -6836,19 +6907,21 @@ class LibvirtConnTestCase(test.TestCase):
                        '_lookup_by_name',
                        fake_lookup_name)
         block_device_info = {'block_device_mapping': [
-                    {'guest_format': None,
-                     'boot_index': 0,
-                     'mount_device': '/dev/vda',
-                     'connection_info':
-                        {'driver_volume_type': 'iscsi'},
-                     'disk_bus': 'virtio',
-                     'device_type': 'disk',
-                     'delete_on_termination': False}
+                mocked_bdm(1, {'guest_format': None,
+                               'boot_index': 0,
+                               'mount_device': '/dev/vda',
+                               'connection_info':
+                                   {'driver_volume_type': 'iscsi'},
+                               'disk_bus': 'virtio',
+                               'device_type': 'disk',
+                               'delete_on_termination': False}),
                     ]}
         conn.post_live_migration_at_destination(self.context, instance,
                                         network_info, True,
                                         block_device_info=block_device_info)
         self.assertTrue('fake' in self.resultXML)
+        self.assertTrue(
+            block_device_info['block_device_mapping'][0].save.called)
 
     def test_create_without_pause(self):
         self.flags(virt_type='lxc', group='libvirt')
@@ -6867,7 +6940,8 @@ class LibvirtConnTestCase(test.TestCase):
             self.assertEqual(0, create.call_args_list[0][1]['launch_flags'])
             self.assertEqual(0, domain.resume.call_count)
 
-    def _test_create_with_network_events(self, neutron_failure=None):
+    def _test_create_with_network_events(self, neutron_failure=None,
+                                         power_on=True):
         self.flags(vif_driver="nova.tests.fake_network.FakeVIFDriver",
                    group='libvirt')
         generated_events = []
@@ -6905,9 +6979,11 @@ class LibvirtConnTestCase(test.TestCase):
         @mock.patch.object(conn, 'cleanup')
         def test_create(cleanup, create, fw_driver, plug_vifs):
             domain = conn._create_domain_and_network(self.context, 'xml',
-                                                     instance, vifs)
+                                                     instance, vifs,
+                                                     power_on=power_on)
             plug_vifs.assert_called_with(instance, vifs)
-            event = utils.is_neutron() and CONF.vif_plugging_timeout
+            event = (utils.is_neutron() and CONF.vif_plugging_timeout and
+                     power_on)
             flag = event and libvirt.VIR_DOMAIN_START_PAUSED or 0
             self.assertEqual(flag,
                              create.call_args_list[0][1]['launch_flags'])
@@ -6920,7 +6996,7 @@ class LibvirtConnTestCase(test.TestCase):
 
         test_create()
 
-        if utils.is_neutron() and CONF.vif_plugging_timeout:
+        if utils.is_neutron() and CONF.vif_plugging_timeout and power_on:
             prepare.assert_has_calls([
                 mock.call(instance, 'network-vif-plugged-vif1'),
                 mock.call(instance, 'network-vif-plugged-vif2')])
@@ -6936,6 +7012,12 @@ class LibvirtConnTestCase(test.TestCase):
     @mock.patch('nova.utils.is_neutron', return_value=True)
     def test_create_with_network_events_neutron(self, is_neutron):
         self._test_create_with_network_events()
+
+    @mock.patch('nova.utils.is_neutron', return_value=True)
+    def test_create_with_network_events_neutron_power_off(self,
+                                                          is_neutron):
+        # Tests that we don't wait for events if we don't start the instance.
+        self._test_create_with_network_events(power_on=False)
 
     @mock.patch('nova.utils.is_neutron', return_value=True)
     def test_create_with_network_events_neutron_nowait(self, is_neutron):
@@ -7381,20 +7463,44 @@ class IptablesFirewallTestCase(test.TestCase):
         self.mox.StubOutWithMock(self.fw,
                                  'add_filters_for_instance',
                                  use_mock_anything=True)
+        self.mox.StubOutWithMock(self.fw.iptables.ipv4['filter'],
+                                 'has_chain')
 
         self.fw.instance_rules(instance_ref,
                                mox.IgnoreArg()).AndReturn((None, None))
         self.fw.add_filters_for_instance(instance_ref, mox.IgnoreArg(),
-                                         mox.IgnoreArg())
+                                         mox.IgnoreArg(), mox.IgnoreArg())
         self.fw.instance_rules(instance_ref,
                                mox.IgnoreArg()).AndReturn((None, None))
+        self.fw.iptables.ipv4['filter'].has_chain(mox.IgnoreArg()
+                                                  ).AndReturn(True)
         self.fw.add_filters_for_instance(instance_ref, mox.IgnoreArg(),
-                                         mox.IgnoreArg())
+                                         mox.IgnoreArg(), mox.IgnoreArg())
         self.mox.ReplayAll()
 
         self.fw.prepare_instance_filter(instance_ref, mox.IgnoreArg())
-        self.fw.instances[instance_ref['id']] = instance_ref
+        self.fw.instance_info[instance_ref['id']] = (instance_ref, None)
         self.fw.do_refresh_security_group_rules("fake")
+
+    def test_do_refresh_security_group_rules_instance_disappeared(self):
+        instance1 = {'id': 1, 'uuid': 'fake-uuid1'}
+        instance2 = {'id': 2, 'uuid': 'fake-uuid2'}
+        self.fw.instance_info = {1: (instance1, 'netinfo1'),
+                                 2: (instance2, 'netinfo2')}
+        mock_filter = mock.MagicMock()
+        with mock.patch.dict(self.fw.iptables.ipv4, {'filter': mock_filter}):
+            mock_filter.has_chain.return_value = False
+            with mock.patch.object(self.fw, 'instance_rules') as mock_ir:
+                mock_ir.return_value = (None, None)
+                self.fw.do_refresh_security_group_rules('secgroup')
+                self.assertEqual(2, mock_ir.call_count)
+            # NOTE(danms): Make sure that it is checking has_chain each time,
+            # continuing to process all the instances, and never adding the
+            # new chains back if has_chain() is False
+            mock_filter.has_chain.assert_has_calls([mock.call('inst-1'),
+                                                    mock.call('inst-2')],
+                                                   any_order=True)
+            self.assertEqual(0, mock_filter.add_chain.call_count)
 
     def test_unfilter_instance_undefines_nwfilter(self):
         admin_ctxt = context.get_admin_context()
@@ -7698,6 +7804,44 @@ class NWFilterTestCase(test.TestCase):
                                                           'in filter')
 
         db.instance_destroy(admin_ctxt, instance_ref['uuid'])
+
+    def test_multinic_base_filter_selection(self):
+        fakefilter = NWFilterFakes()
+        self.fw._conn.nwfilterDefineXML = fakefilter.filterDefineXMLMock
+        self.fw._conn.nwfilterLookupByName = fakefilter.nwfilterLookupByName
+
+        instance_ref = self._create_instance()
+        inst_id = instance_ref['id']
+        inst_uuid = instance_ref['uuid']
+
+        self.security_group = self.setup_and_return_security_group()
+
+        db.instance_add_security_group(self.context, inst_uuid,
+                                       self.security_group['id'])
+
+        instance = db.instance_get(self.context, inst_id)
+
+        network_info = _fake_network_info(self.stubs, 2)
+        network_info[0]['network']['subnets'][0]['meta']['dhcp_server'] = \
+            '1.1.1.1'
+
+        self.fw.setup_basic_filtering(instance, network_info)
+
+        def assert_filterref(instance, vif, expected=[]):
+            nic_id = vif['address'].replace(':', '')
+            filter_name = self.fw._instance_filter_name(instance, nic_id)
+            f = fakefilter.nwfilterLookupByName(filter_name)
+            tree = etree.fromstring(f.xml)
+            frefs = [fr.get('filter') for fr in tree.findall('filterref')]
+            self.assertTrue(set(expected) == set(frefs))
+
+        assert_filterref(instance, network_info[0], expected=['nova-base'])
+        assert_filterref(instance, network_info[1], expected=['nova-nodhcp'])
+
+        db.instance_remove_security_group(self.context, inst_uuid,
+                                          self.security_group['id'])
+        self.teardown_security_group()
+        db.instance_destroy(context.get_admin_context(), instance_ref['uuid'])
 
 
 class LibvirtUtilsTestCase(test.TestCase):
