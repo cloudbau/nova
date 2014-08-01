@@ -847,6 +847,10 @@ class VMwareVMOps(object):
             (vmdk_file_path_before_snapshot, adapter_type,
              disk_type) = vm_util.get_vmdk_path_and_adapter_type(
                                         hw_devices, uuid=instance['uuid'])
+            if not vmdk_file_path_before_snapshot:
+                LOG.debug("No root disk defined. Unable to snapshot.")
+                raise error_util.NoRootDiskDefined()
+
             datastore_name = ds_util.split_datastore_path(
                                         vmdk_file_path_before_snapshot)[0]
             os_type = self._session._call_method(vim_util,
@@ -1445,8 +1449,8 @@ class VMwareVMOps(object):
         vm_props = self._session._call_method(vim_util,
                     "get_object_properties", None, vm_ref, "VirtualMachine",
                     lst_properties)
-        query = {'summary.config.numCpu': None,
-                 'summary.config.memorySizeMB': None,
+        query = {'summary.config.numCpu': 0,
+                 'summary.config.memorySizeMB': 0,
                  'runtime.powerState': None}
         self._get_values_from_object_properties(vm_props, query)
         max_mem = int(query['summary.config.memorySizeMB']) * 1024
