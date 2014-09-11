@@ -3457,7 +3457,10 @@ class ComputeManager(manager.SchedulerDependentManager):
 
     def _unshelve_instance(self, context, instance, image):
         self._notify_about_instance_usage(context, instance, 'unshelve.start')
+        compute_info = self._get_compute_info(context.elevated(), self.host)
         instance.task_state = task_states.SPAWNING
+        instance.node = compute_info['hypervisor_hostname']
+        instance.host = self.host
         instance.save()
 
         network_info = self._get_instance_nw_info(context, instance)
@@ -4346,7 +4349,7 @@ class ComputeManager(manager.SchedulerDependentManager):
                 try:
                     instance = instance_obj.Instance.get_by_uuid(
                         context, instance_uuids.pop(0),
-                        expected_attrs=['system_metadata'])
+                        expected_attrs=['system_metadata', 'info_cache'])
                 except exception.InstanceNotFound:
                     # Instance is gone.  Try to grab another.
                     continue
