@@ -495,6 +495,7 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
         self.logical_block_size = None
         self.physical_block_size = None
         self.readonly = False
+        self.shareable = False
         self.snapshot = None
 
     def format_dom(self):
@@ -592,6 +593,9 @@ class LibvirtConfigGuestDisk(LibvirtConfigGuestDevice):
 
         if self.readonly:
             dev.append(etree.Element("readonly"))
+
+        if self.shareable:
+            dev.append(etree.Element("shareable"))
 
         return dev
 

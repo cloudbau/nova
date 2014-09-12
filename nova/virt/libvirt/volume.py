@@ -39,6 +39,9 @@ from nova.virt.libvirt import utils as virtutils
 LOG = logging.getLogger(__name__)
 
 volume_opts = [
+    cfg.BoolOpt('mark_volume_shareable',
+                default=False,
+                help='Mark volume attached as a shareable disk'),
     cfg.IntOpt('num_iscsi_scan_tries',
                default=5,
                help='Number of times to rescan iSCSI target to find volume',
@@ -120,6 +123,7 @@ class LibvirtBaseVolumeDriver(object):
         conf.target_dev = disk_info['dev']
         conf.target_bus = disk_info['bus']
         conf.serial = connection_info.get('serial')
+        conf.shareable = CONF.libvirt.mark_volume_shareable
 
         # Support for block size tuning
         data = {}
