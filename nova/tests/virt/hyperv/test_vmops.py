@@ -12,6 +12,8 @@
 #    License for the specific language governing permissions and limitations
 #    under the License.
 
+import mock
+
 from nova import exception
 from nova import test
 from nova.tests import fake_instance
@@ -27,8 +29,14 @@ class VMOpsTestCase(test.NoDBTestCase):
     def setUp(self):
         super(VMOpsTestCase, self).setUp()
         self.context = 'fake-context'
-        self.flags(force_hyperv_utils_v1=True, group='hyperv')
-        self.flags(force_volumeutils_v1=True, group='hyperv')
+
+        # utilsfactory will check the host OS version via get_hostutils,
+        # in order to return the proper Utils Class, so it must be mocked.
+        patched_func = mock.patch.object(vmops.utilsfactory,
+                                 "get_hostutils")
+        patched_func.start()
+        self.addCleanup(patched_func.stop)
+
         self._vmops = vmops.VMOps()
 
     def test_attach_config_drive(self):
@@ -36,3 +44,14 @@ class VMOpsTestCase(test.NoDBTestCase):
         self.assertRaises(exception.InvalidDiskFormat,
                           self._vmops.attach_config_drive,
                           instance, 'C:/fake_instance_dir/configdrive.xxx')
+
+    def test_list_instance_uuids(self):
+        fake_uuid = '4f54fb69-d3a2-45b7-bb9b-b6e6b3d893b3'
+        with mock.patch.object(self._vmops._vmutils,
+                               'list_instance_notes') as mock_list_notes:
+            mock_list_notes.return_value = [('fake_name', [fake_uuid])]
+
+            response = self._vmops.list_instance_uuids()
+            mock_list_notes.assert_called_once_with()
+
+        self.assertEqual(response, [fake_uuid])

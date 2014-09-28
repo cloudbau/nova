@@ -125,6 +125,8 @@ class HyperVAPIBaseTestCase(test.NoDBTestCase):
                        fake_get_remote_image_service)
 
         def fake_check_min_windows_version(fake_self, major, minor):
+            if [major, minor] >= [6, 3]:
+                return False
             return self._check_min_windows_version_satisfied
         self.stubs.Set(hostutils.HostUtils, 'check_min_windows_version',
                        fake_check_min_windows_version)
@@ -734,10 +736,6 @@ class HyperVAPITestCase(HyperVAPIBaseTestCase):
         m.AndReturn(True)
 
         if cow:
-            m = basevolumeutils.BaseVolumeUtils.volume_in_mapping(mox.IsA(str),
-                                                                  None)
-            m.AndReturn(False)
-
             self._setup_get_cached_image_mocks(cow)
 
         if with_volumes:
@@ -915,7 +913,8 @@ class HyperVAPITestCase(HyperVAPIBaseTestCase):
                                      ephemeral_storage=False):
         vmutils.VMUtils.create_vm(mox.Func(self._check_vm_name), mox.IsA(int),
                                   mox.IsA(int), mox.IsA(bool),
-                                  CONF.hyperv.dynamic_memory_ratio)
+                                  CONF.hyperv.dynamic_memory_ratio,
+                                  mox.IsA(list))
 
         if not boot_from_volume:
             m = vmutils.VMUtils.attach_ide_drive(mox.Func(self._check_vm_name),
@@ -1016,9 +1015,10 @@ class HyperVAPITestCase(HyperVAPIBaseTestCase):
                                             remove_dir=True)
         m.AndReturn(self._test_instance_dir)
 
-        m = basevolumeutils.BaseVolumeUtils.volume_in_mapping(
-            mox.IsA(str), block_device_info)
-        m.AndReturn(boot_from_volume)
+        if block_device_info:
+            m = basevolumeutils.BaseVolumeUtils.volume_in_mapping(
+                'fake_root_device_name', block_device_info)
+            m.AndReturn(boot_from_volume)
 
         if not boot_from_volume:
             m = fake.PathUtils.get_instance_dir(mox.Func(self._check_vm_name))
@@ -1546,10 +1546,6 @@ class HyperVAPITestCase(HyperVAPIBaseTestCase):
         instance['system_metadata'] = {}
         network_info = fake_network.fake_get_instance_nw_info(self.stubs)
 
-        m = basevolumeutils.BaseVolumeUtils.volume_in_mapping(mox.IsA(str),
-                                                              None)
-        m.AndReturn(False)
-
         m = fake.PathUtils.get_instance_dir(mox.IsA(str))
         m.AndReturn(self._test_instance_dir)
 
@@ -1637,10 +1633,6 @@ class HyperVAPITestCase(HyperVAPIBaseTestCase):
 
         fake_revert_path = ('C:\\FakeInstancesPath\\%s\\_revert' %
                             instance['name'])
-
-        m = basevolumeutils.BaseVolumeUtils.volume_in_mapping(mox.IsA(str),
-                                                              None)
-        m.AndReturn(False)
 
         m = fake.PathUtils.get_instance_dir(mox.IsA(str),
                                             create_dir=False,
