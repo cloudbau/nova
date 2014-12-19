@@ -30,7 +30,6 @@ from nova import test
 from nova.tests import utils
 import nova.wsgi
 from oslo.config import cfg
-import urllib2
 import webob
 
 SSL_CERT_DIR = os.path.normpath(os.path.join(
@@ -242,8 +241,9 @@ class TestWSGIServerWithSSL(test.NoDBTestCase):
 
         server.start()
 
-        response = urllib2.urlopen('https://[::1]:%d/' % server.port)
-        self.assertEqual(greetings, response.read())
+        response = requests.get('https://[::1]:%d/' % server.port,
+                                verify=os.path.join(SSL_CERT_DIR, 'ca.crt'))
+        self.assertEqual(greetings, response.text)
 
         server.stop()
         server.wait()
