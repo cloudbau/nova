@@ -271,6 +271,13 @@ class ComputeAPI(object):
             return havana_compat
         return current
 
+    def _check_live_migration_api_version(self, server):
+        # NOTE(angdraug): live migration involving a compute host running Nova
+        # API older than v3.23 as either source or destination can cause
+        # instance disks to be deleted from shared storage
+        if not self.client.can_send_version('3.23'):
+            raise exception.LiveMigrationWithOldNovaNotSafe(server=server)
+
     def add_aggregate_host(self, ctxt, aggregate, host_param, host,
                            slave_info=None):
         '''Add aggregate host.
@@ -351,19 +358,19 @@ class ComputeAPI(object):
 
     def check_can_live_migrate_destination(self, ctxt, instance, destination,
                                            block_migration, disk_over_commit):
-        # NOTE(russellb) Havana compat
-        version = self._get_compat_version('3.0', '2.38')
-        cctxt = self.client.prepare(server=destination, version=version)
+        self._check_live_migration_api_version(destination)
+        cctxt = self.client.prepare(server=destination, version='3.23')
+
         return cctxt.call(ctxt, 'check_can_live_migrate_destination',
                           instance=instance,
                           block_migration=block_migration,
                           disk_over_commit=disk_over_commit)
 
     def check_can_live_migrate_source(self, ctxt, instance, dest_check_data):
-        # NOTE(russellb) Havana compat
-        version = self._get_compat_version('3.0', '2.38')
-        cctxt = self.client.prepare(server=_compute_host(None, instance),
-                version=version)
+        source = _compute_host(None, instance)
+        self._check_live_migration_api_version(source)
+        cctxt = self.client.prepare(server=source, version='3.23')
+
         return cctxt.call(ctxt, 'check_can_live_migrate_source',
                           instance=instance,
                           dest_check_data=dest_check_data)
@@ -734,13 +741,15 @@ class ComputeAPI(object):
                    instance=instance, migration=migration,
                    reservations=reservations)
 
-    def rollback_live_migration_at_destination(self, ctxt, instance, host):
-        # NOTE(russellb) Havana compat
-        version = self._get_compat_version('3.0', '2.0')
-        instance_p = jsonutils.to_primitive(instance)
-        cctxt = self.client.prepare(server=host, version=version)
+    def rollback_live_migration_at_destination(self, ctxt, instance, host,
+                                               destroy_disks=True,
+                                               migrate_data=None):
+        self._check_live_migration_api_version(host)
+        cctxt = self.client.prepare(server=host, version='3.23')
+
         cctxt.cast(ctxt, 'rollback_live_migration_at_destination',
-                   instance=instance_p)
+                   instance=instance,
+                   destroy_disks=destroy_disks, migrate_data=migrate_data)
 
     def run_instance(self, ctxt, instance, host, request_spec,
                      filter_properties, requested_networks,
