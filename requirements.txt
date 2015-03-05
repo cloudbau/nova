@@ -25,7 +25,8 @@ python-cinderclient>=1.0.6,<=1.1.1
 python-neutronclient>=2.3.4,<2.3.11
 #Note (JR): Use our own branch until upstream has a solution for https://bugs.launchpad.net/python-glanceclient/+bug/1423165
 #python-glanceclient>=0.9.0,!=0.14.0,<=0.14.2
-git+https://github.com/x-ion-de/python-glanceclient@0.14.3#egg=python-glanceclient
+pip>=6.0.8
+git+https://github.com/x-ion-de/python-glanceclient@stable/icehouse#egg=python-glanceclient
 python-keystoneclient>=0.7.0,<=0.11.2
 six>=1.6.0
 stevedore>=0.14,<1.2
