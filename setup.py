@@ -18,6 +18,5 @@
 import setuptools
 
 setuptools.setup(
-    dependency_links=['http://185.27.181.12/python-glanceclient-0.14.3.dev2.tar.gz'],
     setup_requires=['pbr'],
     pbr=True)
