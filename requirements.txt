@@ -23,7 +23,6 @@ iso8601>=0.1.9
 jsonschema>=2.0.0,<3.0.0
 python-cinderclient>=1.0.6,<=1.1.1
 python-neutronclient>=2.3.4,<2.3.11
-http://185.27.181.12/python_glanceclient-0.14.3.dev2.tar.gz#egg=python-glanceclient-0.14.3
 python-glanceclient<=0.14.9
 python-keystoneclient>=0.7.0,<=0.11.2
 six>=1.6.0
