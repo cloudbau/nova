@@ -4021,8 +4021,11 @@ class LibvirtConnTestCase(test.TestCase):
 
         self.mox.StubOutWithMock(conn, "_assert_dest_node_has_enough_disk")
         conn._assert_dest_node_has_enough_disk(
-            self.context, instance, dest_check_data['disk_available_mb'],
-            False)
+            # Note(JR): Merge conflict, old version
+	    # self.context, instance, dest_check_data['disk_available_mb'],
+            # False)
+            self.context, instance_ref, dest_check_data['disk_available_mb'],
+            False, None)
 
         self.mox.ReplayAll()
         ret = conn.check_can_live_migrate_source(self.context, instance,
@@ -4085,7 +4088,12 @@ class LibvirtConnTestCase(test.TestCase):
                 disk_available_mb=0)
 
         self.mox.StubOutWithMock(conn, "get_instance_disk_info")
-        conn.get_instance_disk_info(instance["name"]).AndReturn(
+        # Note(JR): Merge conflict, old version
+        # conn.get_instance_disk_info(instance["name"]).AndReturn(
+        conn.get_instance_disk_info(instance_ref["name"]).AndReturn(
+                                            '[{"virt_disk_size":2}]')
+        conn.get_instance_disk_info(instance_ref["name"],
+                                    block_device_info=None).AndReturn(
                                             '[{"virt_disk_size":2}]')
 
         self.mox.ReplayAll()
