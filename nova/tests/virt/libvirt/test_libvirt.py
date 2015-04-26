@@ -4085,8 +4085,6 @@ class LibvirtConnTestCase(test.TestCase):
                 disk_available_mb=0)
 
         self.mox.StubOutWithMock(conn, "get_instance_disk_info")
-        conn.get_instance_disk_info(instance["name"]).AndReturn(
-                                            '[{"virt_disk_size":2}]')
         conn.get_instance_disk_info(instance["name"],
                                     block_device_info=None).AndReturn(
                                             '[{"virt_disk_size":2}]')
