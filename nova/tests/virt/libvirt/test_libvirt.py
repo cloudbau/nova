@@ -1446,7 +1446,8 @@ class LibvirtConnTestCase(test.TestCase):
 
         self.assertEqual("none", cfg.devices[7].action)
 
-    def test_get_guest_config_with_watchdog_action_through_flavor(self):
+    def _test_get_guest_config_with_watchdog_action_flavor(self,
+            hw_watchdog_action="hw:watchdog_action"):
         self.flags(virt_type='kvm', group='libvirt')
 
         conn = libvirt_driver.LibvirtDriver(fake.FakeVirtAPI(), True)
@@ -1456,7 +1457,7 @@ class LibvirtConnTestCase(test.TestCase):
         db.flavor_extra_specs_update_or_create(
                 self.context,
                 flavor['flavorid'],
-                {'hw_watchdog_action': 'none'})
+                {hw_watchdog_action: 'none'})
 
         instance_ref = db.instance_create(self.context, self.test_instance)
 
@@ -1467,7 +1468,7 @@ class LibvirtConnTestCase(test.TestCase):
 
         db.flavor_extra_specs_delete(self.context,
                                      flavor['flavorid'],
-                                     'hw_watchdog_action')
+                                     hw_watchdog_action)
 
         self.assertEqual(8, len(cfg.devices))
         self.assertIsInstance(cfg.devices[0],
@@ -1488,6 +1489,16 @@ class LibvirtConnTestCase(test.TestCase):
                               vconfig.LibvirtConfigGuestWatchdog)
 
         self.assertEqual("none", cfg.devices[7].action)
+
+    def test_get_guest_config_with_watchdog_action_through_flavor(self):
+        self._test_get_guest_config_with_watchdog_action_flavor()
+
+    # TODO(pkholkin): the test accepting old property name 'hw_watchdog_action'
+    #                should be removed in L release
+    def test_get_guest_config_with_watchdog_action_through_flavor_no_scope(
+            self):
+        self._test_get_guest_config_with_watchdog_action_flavor(
+            hw_watchdog_action="hw_watchdog_action")
 
     def test_get_guest_config_with_watchdog_action_meta_overrides_flavor(self):
         self.flags(virt_type='kvm', group='libvirt')
